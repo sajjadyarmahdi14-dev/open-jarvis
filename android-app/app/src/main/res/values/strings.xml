@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Jarvis</string>
+    <string name="connecting">Connecting to Jarvis Core...</string>
+    <string name="daemon_offline">Jarvis Daemon is not running</string>
+    <string name="start_daemon">Start Jarvis Daemon in Termux</string>
+    <string name="retry">Retry Connection</string>
+    <string name="listening">Listening for command...</string>
+    <string name="service_title">Jarvis Omni-Control Active</string>
+    <string name="service_desc">Tap to open Jarvis Mobile HUD</string>
+</resources>

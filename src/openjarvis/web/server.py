@@ -17,6 +17,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from openjarvis.core.config import _is_android, load_config
+from openjarvis.core.env_config import (
+    get_config_status,
+    load_all_env_and_config,
+    save_persistent_config,
+)
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry, ToolRegistry
 from openjarvis.core.types import Conversation, Message, Role
@@ -26,6 +31,9 @@ from openjarvis.tools._paths import file_tool_kwargs
 from openjarvis.tools._stubs import BaseTool
 
 logger = logging.getLogger(__name__)
+
+# Ensure persistent configuration and .env candidates are loaded on server startup
+load_all_env_and_config()
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -54,6 +62,14 @@ class VoiceRequest(BaseModel):
     tts: Optional[bool] = False
 
 
+class ConfigUpdateRequest(BaseModel):
+    openrouter_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    openrouter_model: Optional[str] = None
+    gemini_model: Optional[str] = None
+    active_model: Optional[str] = None
+
+
 _cached_agent = None
 _cached_tools = None
 
@@ -64,12 +80,18 @@ def _get_or_create_agent():
     if _cached_agent is not None:
         return _cached_agent
 
+    load_all_env_and_config()
+    cfg_status = get_config_status()
+
     config = load_config()
     register_builtin_models()
 
     resolved = get_engine(config, "cloud")
     if resolved is None:
-        raise RuntimeError("No cloud inference engine available. Please set GEMINI_API_KEY or OPENROUTER_API_KEY.")
+        raise RuntimeError(
+            "No cloud inference engine available. Please open Settings (⚙️) in the top bar "
+            "and configure your OpenRouter or Gemini API key."
+        )
 
     engine_name, engine = resolved
 
@@ -77,7 +99,11 @@ def _get_or_create_agent():
     import openjarvis.agents  # noqa: F401
     import openjarvis.tools  # noqa: F401
 
-    agent_cls = AgentRegistry.get("react") if AgentRegistry.contains("react") else AgentRegistry.get("native_react")
+    agent_cls = (
+        AgentRegistry.get("react")
+        if AgentRegistry.contains("react")
+        else AgentRegistry.get("native_react")
+    )
 
     # Gather all android tools + common tools
     tool_names = [k for k in ToolRegistry.keys() if k.startswith("android_")]
@@ -97,10 +123,7 @@ def _get_or_create_agent():
     _cached_tools = tools
     bus = EventBus(record_history=False)
 
-    model = os.environ.get("DEFAULT_MODEL") or "gemini-2.5-flash"
-    if "openrouter" in model or os.environ.get("OPENROUTER_API_KEY"):
-        if not model or model == "gemini-2.5-flash" and not os.environ.get("GEMINI_API_KEY"):
-            model = "openrouter/auto"
+    model = cfg_status.get("active_model") or "google/gemma-3-27b-it:free"
 
     agent = agent_cls(
         engine=engine,
@@ -148,6 +171,44 @@ async def health_check():
     return {"status": "ok"}
 
 
+@app.get("/api/config")
+async def get_config():
+    """Return current configuration, models, and masked keys."""
+    return get_config_status()
+
+
+@app.post("/api/config")
+async def update_config(req: ConfigUpdateRequest):
+    """Save persistent configuration and hot-reload the inference engine."""
+    global _cached_agent, _cached_tools
+
+    updated_status = save_persistent_config(
+        openrouter_api_key=req.openrouter_api_key,
+        gemini_api_key=req.gemini_api_key,
+        openrouter_model=req.openrouter_model,
+        gemini_model=req.gemini_model,
+        active_model=req.active_model,
+    )
+
+    # Invalidate cached agent and tools so the next request uses the fresh engine
+    _cached_agent = None
+    _cached_tools = None
+
+    try:
+        _get_or_create_agent()
+        return {
+            "success": True,
+            "config": updated_status,
+            "message": f"Engine hot-reloaded with {updated_status['active_model']}",
+        }
+    except Exception as exc:
+        return {
+            "success": True,
+            "config": updated_status,
+            "warning": f"Config saved, but engine check reported: {exc}",
+        }
+
+
 @app.get("/api/status")
 async def get_status():
     import openjarvis.tools  # noqa: F401
@@ -165,14 +226,14 @@ async def get_status():
         except Exception:
             battery_info = bat_out
 
-    model = os.environ.get("DEFAULT_MODEL") or (
-        "gemini-2.5-flash" if os.environ.get("GEMINI_API_KEY") else "openrouter/auto"
-    )
+    cfg_status = get_config_status()
 
     return {
         "status": "online",
         "platform": "android" if _is_android() else "host",
-        "model": model,
+        "model": cfg_status["active_model"],
+        "provider": cfg_status["active_provider"],
+        "has_key": cfg_status["has_openrouter_key"] or cfg_status["has_gemini_key"],
         "battery": battery_info,
         "tools_count": len([k for k in ToolRegistry.keys() if k.startswith("android_")]),
     }

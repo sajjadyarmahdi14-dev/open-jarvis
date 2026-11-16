@@ -416,6 +416,249 @@
       0%, 80%, 100% { transform: scale(0); opacity: 0.3; }
       40% { transform: scale(1); opacity: 1; }
     }
+
+    /* Settings Modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(4, 7, 13, 0.78);
+      backdrop-filter: blur(14px);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      padding: 16px;
+    }
+
+    .modal-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal-card {
+      width: 100%;
+      max-width: 480px;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--border);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.7), 0 0 24px var(--cyan-glow);
+      border-radius: 20px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transform: translateY(16px) scale(0.96);
+      transition: transform 0.25s ease;
+      max-height: 90vh;
+    }
+
+    .modal-overlay.open .modal-card {
+      transform: translateY(0) scale(1);
+    }
+
+    .modal-header {
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(8, 12, 20, 0.6);
+    }
+
+    .modal-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--cyan);
+    }
+
+    .modal-title h3 {
+      font-size: 14.5px;
+      font-weight: 700;
+      letter-spacing: 1.2px;
+      color: #fff;
+    }
+
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      font-size: 24px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    .modal-close:hover {
+      color: #fff;
+    }
+
+    .modal-body {
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .form-group label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .badge {
+      font-size: 10.5px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-weight: 500;
+      font-family: 'Fira Code', monospace;
+    }
+
+    .badge.set {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid var(--green);
+      color: var(--green);
+    }
+
+    .badge.empty {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--red);
+      color: var(--red);
+    }
+
+    .input-with-button {
+      display: flex;
+      position: relative;
+      align-items: center;
+    }
+
+    .form-group input {
+      width: 100%;
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 10px;
+      padding: 10px 14px;
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+      font-family: 'Fira Code', monospace;
+      transition: border-color 0.2s;
+    }
+
+    .form-group input:focus {
+      border-color: var(--cyan);
+      box-shadow: 0 0 8px var(--cyan-glow);
+    }
+
+    .btn-toggle-eye {
+      position: absolute;
+      right: 10px;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      opacity: 0.7;
+    }
+
+    .form-group small {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .model-presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .preset-pill {
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 14px;
+      background: rgba(0, 240, 255, 0.08);
+      border: 1px solid rgba(0, 240, 255, 0.3);
+      color: var(--cyan);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .preset-pill:hover, .preset-pill:active {
+      background: rgba(0, 240, 255, 0.2);
+      border-color: var(--cyan);
+      transform: scale(0.97);
+    }
+
+    .status-msg {
+      font-size: 12.5px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      display: none;
+    }
+
+    .status-msg.success {
+      display: block;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid var(--green);
+      color: var(--green);
+    }
+
+    .status-msg.error {
+      display: block;
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--red);
+      color: var(--red);
+    }
+
+    .modal-footer {
+      padding: 14px 20px;
+      background: rgba(8, 12, 20, 0.6);
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .btn-secondary {
+      padding: 8px 16px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text-dim);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      padding: 8px 18px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--cyan), var(--purple));
+      border: none;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 0 12px var(--cyan-glow);
+    }
+
+    .btn-primary:active {
+      transform: scale(0.96);
+    }
   </style>
 </head>
 <body>
@@ -434,6 +677,12 @@
       </div>
     </div>
     <div class="header-actions">
+      <button class="btn-icon" id="btn-settings" title="Engine & API Settings" onclick="openSettingsModal()">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
       <button class="btn-icon" id="btn-tts" title="Voice Reply (TTS)" onclick="toggleTTS()">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
@@ -448,6 +697,60 @@
       </button>
     </div>
   </header>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay" onclick="closeSettingsModal(event)">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          <h3>JARVIS CONFIGURATION</h3>
+        </div>
+        <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label>OpenRouter API Key <span class="badge" id="openrouter-badge">Checking...</span></label>
+          <div class="input-with-button">
+            <input type="password" id="input-openrouter-key" placeholder="sk-or-v1-..." autocomplete="off">
+            <button type="button" class="btn-toggle-eye" onclick="togglePasswordVisibility('input-openrouter-key')">👁️</button>
+          </div>
+          <small>Get free/paid key from <a href="https://openrouter.ai/keys" target="_blank" style="color:var(--cyan)">openrouter.ai/keys</a></small>
+        </div>
+
+        <div class="form-group">
+          <label>Google Gemini API Key <span class="badge" id="gemini-badge">Checking...</span></label>
+          <div class="input-with-button">
+            <input type="password" id="input-gemini-key" placeholder="AIzaSy..." autocomplete="off">
+            <button type="button" class="btn-toggle-eye" onclick="togglePasswordVisibility('input-gemini-key')">👁️</button>
+          </div>
+          <small>Get free key from <a href="https://aistudio.google.com/" target="_blank" style="color:var(--cyan)">aistudio.google.com</a></small>
+        </div>
+
+        <div class="form-group">
+          <label>Active Model ID</label>
+          <input type="text" id="input-active-model" placeholder="e.g. google/gemma-3-27b-it:free">
+          <div class="model-presets">
+            <span class="preset-pill" onclick="selectModelPreset('google/gemma-3-27b-it:free')">✨ Gemma 3 27B (Free)</span>
+            <span class="preset-pill" onclick="selectModelPreset('deepseek/deepseek-chat-v3-0324:free')">⚡ DeepSeek V3 (Free)</span>
+            <span class="preset-pill" onclick="selectModelPreset('openrouter/free')">🆓 OpenRouter Free</span>
+            <span class="preset-pill" onclick="selectModelPreset('gemini-2.5-flash')">⚡ Gemini 2.5 Flash</span>
+          </div>
+        </div>
+
+        <div id="settings-status-msg" class="status-msg"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>
+        <button class="btn-primary" id="btn-save-settings" onclick="saveSettings()">Save & Hot-Reload Engine</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Messages List -->
   <main id="chat-container">
@@ -765,12 +1068,130 @@
       return escaped;
     }
 
+    // --- Settings Modal & API Config Management ---
+    let currentConfig = null;
+
+    function openSettingsModal() {
+      const modal = document.getElementById('settings-modal');
+      modal.classList.add('open');
+      const statusMsg = document.getElementById('settings-status-msg');
+      statusMsg.className = 'status-msg';
+      statusMsg.style.display = 'none';
+      loadConfig();
+    }
+
+    function closeSettingsModal(e) {
+      if (e && e.target && e.target.id !== 'settings-modal' && !e.target.classList.contains('modal-close') && !e.target.classList.contains('btn-secondary')) {
+        return;
+      }
+      document.getElementById('settings-modal').classList.remove('open');
+    }
+
+    function togglePasswordVisibility(inputId) {
+      const el = document.getElementById(inputId);
+      el.type = el.type === 'password' ? 'text' : 'password';
+    }
+
+    function selectModelPreset(modelId) {
+      document.getElementById('input-active-model').value = modelId;
+    }
+
+    async function loadConfig() {
+      try {
+        const resp = await fetch('/api/config');
+        const data = await resp.json();
+        currentConfig = data;
+
+        const orBadge = document.getElementById('openrouter-badge');
+        const gemBadge = document.getElementById('gemini-badge');
+
+        if (data.has_openrouter_key) {
+          orBadge.className = 'badge set';
+          orBadge.innerText = 'SET (' + (data.openrouter_key_masked || 'active') + ')';
+          document.getElementById('input-openrouter-key').placeholder = data.openrouter_key_masked || 'API key set';
+        } else {
+          orBadge.className = 'badge empty';
+          orBadge.innerText = 'NOT SET';
+          document.getElementById('input-openrouter-key').placeholder = 'sk-or-v1-...';
+        }
+
+        if (data.has_gemini_key) {
+          gemBadge.className = 'badge set';
+          gemBadge.innerText = 'SET (' + (data.gemini_key_masked || 'active') + ')';
+          document.getElementById('input-gemini-key').placeholder = data.gemini_key_masked || 'API key set';
+        } else {
+          gemBadge.className = 'badge empty';
+          gemBadge.innerText = 'NOT SET';
+          document.getElementById('input-gemini-key').placeholder = 'AIzaSy...';
+        }
+
+        document.getElementById('input-active-model').value = data.active_model || '';
+      } catch (err) {
+        console.error('Failed to load config:', err);
+      }
+    }
+
+    async function saveSettings() {
+      const saveBtn = document.getElementById('btn-save-settings');
+      const statusMsg = document.getElementById('settings-status-msg');
+      const orKey = document.getElementById('input-openrouter-key').value.trim();
+      const gemKey = document.getElementById('input-gemini-key').value.trim();
+      const model = document.getElementById('input-active-model').value.trim();
+
+      saveBtn.disabled = true;
+      saveBtn.innerText = 'Hot-Reloading Engine...';
+      statusMsg.style.display = 'none';
+
+      const payload = {};
+      if (orKey) payload.openrouter_api_key = orKey;
+      if (gemKey) payload.gemini_api_key = gemKey;
+      if (model) payload.active_model = model;
+
+      try {
+        const resp = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const res = await resp.json();
+        saveBtn.disabled = false;
+        saveBtn.innerText = 'Save & Hot-Reload Engine';
+
+        if (res.success) {
+          statusMsg.className = 'status-msg success';
+          statusMsg.innerText = '✓ ' + (res.message || 'Saved and hot-reloaded successfully!');
+          statusMsg.style.display = 'block';
+
+          if (res.config && res.config.active_model) {
+            const prov = (res.config.active_provider || 'CLOUD').toUpperCase();
+            document.getElementById('status-label').innerText = `${prov} // ${res.config.active_model}`;
+          }
+
+          loadConfig();
+          setTimeout(() => {
+            document.getElementById('settings-modal').classList.remove('open');
+          }, 1200);
+        } else {
+          statusMsg.className = 'status-msg error';
+          statusMsg.innerText = '⚠️ ' + (res.warning || res.error || 'Failed to save configuration.');
+          statusMsg.style.display = 'block';
+        }
+      } catch (err) {
+        saveBtn.disabled = false;
+        saveBtn.innerText = 'Save & Hot-Reload Engine';
+        statusMsg.className = 'status-msg error';
+        statusMsg.innerText = '⚠️ Network error: ' + err.message;
+        statusMsg.style.display = 'block';
+      }
+    }
+
     // Initialize status check
     fetch('/api/status')
       .then(r => r.json())
       .then(s => {
         if (s.model) {
-          document.getElementById('status-label').innerText = `${s.platform.toUpperCase()} // ${s.model}`;
+          const prov = (s.provider || s.platform || 'ANDROID').toUpperCase();
+          document.getElementById('status-label').innerText = `${prov} // ${s.model}`;
         }
       })
       .catch(() => {});

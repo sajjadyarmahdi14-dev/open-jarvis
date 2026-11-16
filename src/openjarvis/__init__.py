@@ -14,6 +14,13 @@ try:
 except PackageNotFoundError:  # pragma: no cover — uninstalled source tree
     __version__ = "0.0.0+unknown"
 
+# Auto-load persistent configuration and .env files on package import
+try:
+    from openjarvis.core.env_config import load_all_env_and_config
+    load_all_env_and_config()
+except Exception:
+    pass
+
 __all__ = ["Jarvis", "JarvisSystem", "MemoryHandle", "SystemBuilder", "__version__"]
 
 _SDK_EXPORTS = {"Jarvis", "JarvisSystem", "MemoryHandle", "SystemBuilder"}

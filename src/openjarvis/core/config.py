@@ -256,20 +256,24 @@ def _is_android() -> bool:
 
 
 def _load_env_files() -> None:
-    """Auto-load .env files from cwd, ~/.openjarvis/.env, or OPENJARVIS_CONFIG parent."""
+    """Auto-load .env files from cwd, ~/.openjarvis/.env, or candidate paths."""
     try:
-        from dotenv import load_dotenv
+        from openjarvis.core.env_config import load_all_env_and_config
+        load_all_env_and_config()
+    except Exception:
+        try:
+            from dotenv import load_dotenv
 
-        candidates = [
-            Path.cwd() / ".env",
-            get_config_dir() / ".env",
-            Path.home() / ".openjarvis" / ".env",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                load_dotenv(candidate, override=False)
-    except ImportError:
-        pass
+            candidates = [
+                Path.cwd() / ".env",
+                get_config_dir() / ".env",
+                Path.home() / ".openjarvis" / ".env",
+            ]
+            for candidate in candidates:
+                if candidate.is_file():
+                    load_dotenv(candidate, override=False)
+        except ImportError:
+            pass
 
 
 def detect_hardware() -> HardwareInfo:

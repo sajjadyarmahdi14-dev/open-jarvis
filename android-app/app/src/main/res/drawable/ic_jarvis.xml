@@ -1,0 +1,23 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#080C14"
+        android:pathData="M0,0h108v108h-108z"/>
+    <!-- Outer Arc / HUD -->
+    <path
+        android:strokeColor="#00F0FF"
+        android:strokeWidth="4"
+        android:pathData="M54,18 A36,36 0 1 1 53.9,18"/>
+    <!-- Inner Core -->
+    <path
+        android:strokeColor="#8A2BE2"
+        android:strokeWidth="3"
+        android:pathData="M54,30 A24,24 0 1 0 54.1,30"/>
+    <!-- Center Dot -->
+    <path
+        android:fillColor="#00F0FF"
+        android:pathData="M54,46 A8,8 0 1 1 53.9,46"/>
+</vector>

@@ -184,3 +184,49 @@ def test_web_server_endpoints():
     # Camera latest endpoint (returns 404 or image if exists)
     cam_res = client.get("/api/camera/latest")
     assert cam_res.status_code in (200, 404)
+
+
+def test_env_config_and_status():
+    from openjarvis.core.env_config import (
+        get_config_status,
+        load_all_env_and_config,
+        parse_env_file,
+    )
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w+", suffix=".env", delete=False) as f:
+        f.write("# comment\nTEST_OPENJARVIS_KEY=test_value_123\nANOTHER_KEY=\"quoted_val\"\n")
+        tmp_path = Path(f.name)
+
+    try:
+        parsed = parse_env_file(tmp_path)
+        assert parsed.get("TEST_OPENJARVIS_KEY") == "test_value_123"
+        assert parsed.get("ANOTHER_KEY") == "quoted_val"
+    finally:
+        tmp_path.unlink()
+
+    status = get_config_status()
+    assert "has_openrouter_key" in status
+    assert "active_model" in status
+
+
+def test_config_api_endpoints():
+    client = TestClient(app)
+
+    # 1. GET /api/config
+    get_res = client.get("/api/config")
+    assert get_res.status_code == 200
+    data = get_res.json()
+    assert "has_openrouter_key" in data
+    assert "active_model" in data
+
+    # 2. POST /api/config
+    post_res = client.post(
+        "/api/config",
+        json={"active_model": "google/gemma-3-27b-it:free"}
+    )
+    assert post_res.status_code == 200
+    pdata = post_res.json()
+    assert pdata["success"] is True
+    assert pdata["config"]["active_model"] == "google/gemma-3-27b-it:free"
+
