@@ -20,7 +20,11 @@ class JarvisAndroidBridge(
     private val onStopVoice: () -> Unit
 ) : TextToSpeech.OnInitListener {
 
-    private var tts: TextToSpeech? = TextToSpeech(activity.applicationContext, this)
+    private var tts: TextToSpeech? = try {
+        TextToSpeech(activity.applicationContext, this)
+    } catch (_: Throwable) {
+        null
+    }
     private var isTtsReady = false
     private var isTorchOn = false
 

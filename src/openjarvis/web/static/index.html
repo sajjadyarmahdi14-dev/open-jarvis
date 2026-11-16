@@ -804,6 +804,9 @@
   <script>
     let ttsEnabled = false;
     let isRecording = false;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let recordTimer = null;
     let conversationHistory = [];
 
     // Native Android Bridge Helpers
@@ -1075,6 +1078,91 @@
     async function toggleVoice() {
       const micBtn = document.getElementById('btn-mic');
       const bridge = window.JarvisAndroid || window.AndroidJarvis;
+
+      // 1. If currently recording with MediaRecorder, stop and upload immediately
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        if (recordTimer) clearTimeout(recordTimer);
+        mediaRecorder.stop();
+        return;
+      }
+
+      // 2. Try Web/App direct mic recording via navigator.mediaDevices
+      if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audioChunks = [];
+
+          let mimeType = 'audio/webm';
+          if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
+            if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+              mimeType = 'audio/webm;codecs=opus';
+            } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+              mimeType = 'audio/mp4';
+            } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
+              mimeType = 'audio/ogg';
+            }
+          }
+
+          mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              audioChunks.push(event.data);
+            }
+          };
+
+          mediaRecorder.onstop = async () => {
+            micBtn.classList.remove('recording');
+            stream.getTracks().forEach((track) => track.stop());
+
+            if (audioChunks.length === 0) return;
+            const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
+
+            showTypingIndicator();
+            try {
+              const formData = new FormData();
+              const ext = mimeType.includes('mp4') ? 'm4a' : (mimeType.includes('ogg') ? 'ogg' : 'webm');
+              formData.append('audio', audioBlob, `voice_input.${ext}`);
+              formData.append('tts', ttsEnabled ? 'true' : 'false');
+
+              const resp = await fetch('/api/voice/upload', {
+                method: 'POST',
+                body: formData
+              });
+              const data = await resp.json();
+              removeTypingIndicator();
+
+              if (data.transcription) {
+                appendMessage('user', data.transcription);
+                if (data.response) {
+                  appendMessage('assistant', data.response, data.tool_calls || []);
+                }
+              } else if (data.error) {
+                appendMessage('assistant', '⚠️ Voice Error: ' + data.error);
+              }
+            } catch (err) {
+              removeTypingIndicator();
+              appendMessage('assistant', '⚠️ Voice upload failed: ' + err.message);
+            }
+          };
+
+          mediaRecorder.start();
+          micBtn.classList.add('recording');
+
+          // Auto stop after 7 seconds max if user doesn't tap again
+          recordTimer = setTimeout(() => {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+              mediaRecorder.stop();
+            }
+          }, 7000);
+
+          return;
+        } catch (mediaErr) {
+          console.warn('getUserMedia unavailable or denied, falling back:', mediaErr);
+        }
+      }
+
+      // 3. Fallback to native Android Bridge if available
       if (bridge && typeof bridge.startVoiceRecognition === 'function') {
         if (micBtn.classList.contains('recording')) {
           if (typeof bridge.stopVoiceRecognition === 'function') {
@@ -1087,8 +1175,8 @@
         return;
       }
 
+      // 4. Fallback to server Termux microphone recording
       if (isRecording) {
-        // Stop recording
         isRecording = false;
         micBtn.classList.remove('recording');
         return;
@@ -1096,6 +1184,7 @@
 
       isRecording = true;
       micBtn.classList.add('recording');
+      showTypingIndicator();
 
       try {
         const resp = await fetch('/api/voice', {
@@ -1106,6 +1195,7 @@
         const data = await resp.json();
         isRecording = false;
         micBtn.classList.remove('recording');
+        removeTypingIndicator();
 
         if (data.transcription) {
           appendMessage('user', data.transcription);
@@ -1118,6 +1208,7 @@
       } catch (err) {
         isRecording = false;
         micBtn.classList.remove('recording');
+        removeTypingIndicator();
         appendMessage('assistant', 'Voice input failed: ' + err.message);
       }
     }

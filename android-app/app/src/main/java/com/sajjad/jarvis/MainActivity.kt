@@ -60,6 +60,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            initApp(savedInstanceState)
+        } catch (t: Throwable) {
+            android.util.Log.e("Jarvis", "Fatal crash during MainActivity initialization", t)
+            renderCrashScreen(t)
+        }
+    }
+
+    private fun initApp(savedInstanceState: Bundle?) {
         applyEdgeToEdgeDarkTheme()
         setContentView(R.layout.activity_main)
 
@@ -76,7 +85,6 @@ class MainActivity : AppCompatActivity() {
         requestRequiredPermissions()
         initWebView()
         setupSwipeRefresh()
-        startBackgroundService()
 
         btnStartTermux.setOnClickListener { launchTermuxServer() }
         btnRetrySplash.setOnClickListener {
@@ -88,6 +96,42 @@ class MainActivity : AppCompatActivity() {
 
         handleIncomingIntent(intent)
         startHealthCheckLoop()
+    }
+
+    private fun renderCrashScreen(t: Throwable) {
+        try {
+            val sw = java.io.StringWriter()
+            t.printStackTrace(java.io.PrintWriter(sw))
+            val stackTrace = sw.toString()
+
+            val scrollView = android.widget.ScrollView(this).apply {
+                setBackgroundColor(0xFF080C14.toInt())
+                setPadding(40, 60, 40, 60)
+            }
+            val layout = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            val titleView = TextView(this).apply {
+                text = "⚠️ Jarvis Startup Diagnostics"
+                setTextColor(0xFF00F0FF.toInt())
+                textSize = 20f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                setPadding(0, 0, 0, 20)
+            }
+            val msgView = TextView(this).apply {
+                text = "Jarvis caught an unexpected startup exception:\n\n$stackTrace\n\nPlease verify Termux server is running at http://127.0.0.1:8765."
+                setTextColor(0xFFF1F5F9.toInt())
+                textSize = 13f
+                setTextIsSelectable(true)
+                typeface = android.graphics.Typeface.MONOSPACE
+            }
+            layout.addView(titleView)
+            layout.addView(msgView)
+            scrollView.addView(layout)
+            setContentView(scrollView)
+        } catch (_: Throwable) {
+            // Absolute last resort
+        }
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -142,6 +186,22 @@ class MainActivity : AppCompatActivity() {
         if (needed.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), permissionsCode)
         }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        try {
+            if (requestCode == permissionsCode) {
+                val postNotifIndex = permissions.indexOf(Manifest.permission.POST_NOTIFICATIONS)
+                if (postNotifIndex != -1 && grantResults.getOrNull(postNotifIndex) == PackageManager.PERMISSION_GRANTED) {
+                    startBackgroundService()
+                }
+            }
+        } catch (_: Throwable) {}
     }
 
     private fun initWebView() {
@@ -317,6 +377,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "سرویس تشخیص گفتار بر روی دستگاه شما فعال نیست", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         runOnUiThread {
             try {
                 speechRecognizer?.destroy()
@@ -390,13 +455,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun startBackgroundService() {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    return
+                }
+            }
             val serviceIntent = Intent(this, JarvisForegroundService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(serviceIntent)
             } else {
                 startService(serviceIntent)
             }
-        } catch (_: Exception) {}
+        } catch (t: Throwable) {
+            android.util.Log.w("Jarvis", "startBackgroundService failed or blocked: ${t.message}")
+        }
     }
 
     private fun escapeJs(str: String): String {
@@ -408,9 +480,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        healthJob?.cancel()
-        bridge?.shutdown()
-        speechRecognizer?.destroy()
+        try {
+            healthJob?.cancel()
+            bridge?.shutdown()
+            speechRecognizer?.destroy()
+        } catch (_: Throwable) {}
         super.onDestroy()
     }
 }

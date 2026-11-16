@@ -1,5 +1,6 @@
 package com.sajjad.jarvis
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,10 +8,14 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 class JarvisForegroundService : Service() {
 
@@ -52,23 +57,44 @@ class JarvisForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        try {
+            createNotificationChannel()
+        } catch (t: Throwable) {
+            Log.e("JarvisForegroundService", "createNotificationChannel failed", t)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
-                releaseWakeLock()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-                return START_NOT_STICKY
+        return try {
+            when (intent?.action) {
+                ACTION_STOP -> {
+                    releaseWakeLock()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    START_NOT_STICKY
+                }
+                else -> {
+                    acquireWakeLock(this)
+                    val notification = buildNotification()
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            var fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                fgsType = fgsType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                            }
+                            startForeground(NOTIFICATION_ID, notification, fgsType)
+                        } else {
+                            startForeground(NOTIFICATION_ID, notification)
+                        }
+                    } catch (t: Throwable) {
+                        Log.e("JarvisForegroundService", "startForeground failed: ${t.message}", t)
+                    }
+                    START_STICKY
+                }
             }
-            else -> {
-                acquireWakeLock(this)
-                val notification = buildNotification()
-                startForeground(NOTIFICATION_ID, notification)
-                return START_STICKY
-            }
+        } catch (t: Throwable) {
+            Log.e("JarvisForegroundService", "onStartCommand failed", t)
+            START_NOT_STICKY
         }
     }
 

@@ -27,6 +27,12 @@ class TranscriptionResult:
     duration_seconds: float = 0.0
     segments: List[Segment] = field(default_factory=list)
 
+    def __str__(self) -> str:
+        return self.text
+
+    def strip(self, *args, **kwargs) -> str:
+        return self.text.strip(*args, **kwargs)
+
 
 class SpeechBackend(ABC):
     """Abstract base class for speech-to-text backends."""

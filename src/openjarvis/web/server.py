@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
@@ -292,11 +292,15 @@ async def voice_endpoint(req: VoiceRequest):
     try:
         # Record 4 seconds of audio via Termux mic
         recorded = _record_termux(audio_path, duration=4.0)
-        if not recorded or not audio_path.exists() or audio_path.stat().st_size == 0:
+        if not recorded:
             return {"error": "Microphone recording failed. Ensure Termux:API audio permission is granted."}
 
+        if not audio_path.exists() or audio_path.stat().st_size == 0:
+            audio_path.write_bytes(recorded)
+
         stt = GeminiSpeechBackend()
-        transcription = stt.transcribe(audio_path).strip()
+        res = stt.transcribe(recorded or audio_path, format="m4a")
+        transcription = (res.text if hasattr(res, "text") else str(res)).strip()
         if not transcription:
             return {"error": "Could not transcribe audio (no speech detected)."}
 
@@ -309,6 +313,7 @@ async def voice_endpoint(req: VoiceRequest):
             "tool_calls": chat_res.get("tool_calls", []),
         }
     except Exception as exc:
+        logger.exception("Voice pipeline error: %s", exc)
         return {"error": f"Voice pipeline error: {exc}"}
     finally:
         if audio_path.exists():
@@ -316,6 +321,52 @@ async def voice_endpoint(req: VoiceRequest):
                 audio_path.unlink()
             except OSError:
                 pass
+
+
+@app.post("/api/voice/upload")
+async def voice_upload_endpoint(
+    audio: UploadFile = File(...),
+    tts: bool = Form(False),
+):
+    """Accept an audio recording directly from browser/app mic, transcribe, and chat."""
+    from openjarvis.speech.gemini_stt import GeminiSpeechBackend
+
+    try:
+        audio_bytes = await audio.read()
+        if not audio_bytes:
+            return {"error": "Received empty audio file"}
+
+        filename = audio.filename or "audio.webm"
+        suffix = Path(filename).suffix.lstrip(".").lower()
+        if not suffix:
+            ct = (audio.content_type or "").lower()
+            if "webm" in ct:
+                suffix = "webm"
+            elif "mp4" in ct or "m4a" in ct:
+                suffix = "m4a"
+            elif "ogg" in ct:
+                suffix = "ogg"
+            elif "wav" in ct:
+                suffix = "wav"
+            else:
+                suffix = "webm"
+
+        stt = GeminiSpeechBackend()
+        res = stt.transcribe(audio_bytes, format=suffix)
+        transcription = (res.text if hasattr(res, "text") else str(res)).strip()
+        if not transcription:
+            return {"error": "Could not transcribe audio (no speech detected)."}
+
+        chat_req = ChatRequest(message=transcription, tts=tts)
+        chat_res = await chat_endpoint(chat_req)
+        return {
+            "transcription": transcription,
+            "response": chat_res.get("response", ""),
+            "tool_calls": chat_res.get("tool_calls", []),
+        }
+    except Exception as exc:
+        logger.exception("Voice upload pipeline failed: %s", exc)
+        return {"error": f"Voice upload error: {exc}"}
 
 
 @app.post("/api/tts")

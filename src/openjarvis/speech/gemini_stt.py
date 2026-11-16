@@ -9,7 +9,8 @@ from __future__ import annotations
 import base64
 import logging
 import os
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Union
 
 import httpx
 
@@ -42,21 +43,30 @@ class GeminiSpeechBackend(SpeechBackend):
         return bool(self.api_key.strip())
 
     def supported_formats(self) -> List[str]:
-        return ["wav", "mp3", "m4a", "ogg", "aac", "flac"]
+        return ["wav", "mp3", "m4a", "ogg", "aac", "flac", "webm"]
 
     def transcribe(
         self,
-        audio: bytes,
+        audio: Union[bytes, str, Path],
         *,
         format: str = "wav",
         language: Optional[str] = None,
     ) -> TranscriptionResult:
-        """Transcribe audio bytes using Gemini multimodal audio REST call."""
+        """Transcribe audio bytes or audio file path using Gemini multimodal audio REST call."""
         if not self.health():
             raise RuntimeError(
                 "Gemini STT requires GEMINI_API_KEY or GOOGLE_API_KEY. "
                 "Set it in your .env file."
             )
+
+        if isinstance(audio, (str, Path)):
+            audio_path = Path(audio)
+            if not audio_path.exists() or audio_path.stat().st_size == 0:
+                return TranscriptionResult(text="", duration_seconds=0.0)
+            if format == "wav" and audio_path.suffix:
+                format = audio_path.suffix.lstrip(".")
+            audio = audio_path.read_bytes()
+
         if not audio:
             return TranscriptionResult(text="", duration_seconds=0.0)
 
@@ -70,6 +80,7 @@ class GeminiSpeechBackend(SpeechBackend):
             "ogg": "audio/ogg",
             "flac": "audio/flac",
             "aac": "audio/aac",
+            "webm": "audio/webm",
         }
         mime_type = mime_map.get(fmt, "audio/wav")
 

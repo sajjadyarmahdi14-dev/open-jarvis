@@ -17,7 +17,7 @@ import time
 import uuid
 import wave
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,10 @@ def _rms(data: bytes) -> float:
 
 
 def _record_termux(
-    max_seconds: float = _MAX_RECORD_SECONDS,
+    destination_path: Optional[Union[str, Path, float, int]] = None,
+    duration: Optional[float] = None,
+    max_seconds: Optional[float] = None,
+    **kwargs: Any,
 ) -> bytes:
     """Record audio via Termux:API with strict background lifecycle control.
 
@@ -55,6 +58,24 @@ def _record_termux(
     manages starting, interactive push-to-talk stopping (-q), file flushing,
     and cleanup.
     """
+    target_path: Optional[Path] = None
+    target_duration: Optional[float] = None
+
+    if isinstance(destination_path, (int, float)):
+        target_duration = float(destination_path)
+    elif destination_path is not None:
+        target_path = Path(destination_path)
+
+    if duration is not None:
+        target_duration = float(duration)
+    elif max_seconds is not None:
+        target_duration = float(max_seconds)
+    elif "max_duration" in kwargs:
+        target_duration = float(kwargs["max_duration"])
+
+    if target_duration is None:
+        target_duration = float(_MAX_RECORD_SECONDS)
+
     # 1. Clean up any dangling recording process from previous aborted runs
     try:
         subprocess.run(
@@ -70,12 +91,13 @@ def _record_termux(
     temp_file = temp_dir / f"openjarvis_rec_{uuid.uuid4().hex[:8]}.m4a"
 
     # 2. Start recording to temporary audio container
+    record_limit = max(1, int(round(target_duration)))
     cmd = [
         "termux-microphone-record",
         "-f",
         str(temp_file),
         "-l",
-        str(int(max(max_seconds, 1))),
+        str(record_limit),
     ]
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=8.0, check=True)
@@ -95,7 +117,7 @@ def _record_termux(
         except (KeyboardInterrupt, EOFError):
             pass
     else:
-        time.sleep(min(max_seconds, 5.0))
+        time.sleep(min(target_duration, 5.0))
 
     # 4. Explicitly stop recording service
     try:
@@ -120,6 +142,11 @@ def _record_termux(
 
     try:
         audio_bytes = temp_file.read_bytes()
+        if target_path is not None:
+            try:
+                target_path.write_bytes(audio_bytes)
+            except Exception as write_err:
+                logger.warning("Failed to write recorded audio to target path %s: %s", target_path, write_err)
     finally:
         temp_file.unlink(missing_ok=True)
 
