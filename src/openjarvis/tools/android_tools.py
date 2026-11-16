@@ -1159,7 +1159,7 @@ class AndroidCameraCaptureTool(BaseTool):
             return ToolResult(tool_name=self.spec.name, content=f"Camera photo capture failed: {msg}. Ensure Termux:API camera permission is granted.", success=False)
 
         gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if gemini_key:
+        if gemini_key and gemini_key != "your_gemini_api_key_here":
             try:
                 import base64
                 import httpx
@@ -1196,11 +1196,61 @@ class AndroidCameraCaptureTool(BaseTool):
                                     tool_name=self.spec.name,
                                     content=f"Camera photo captured ({out_file}).\nVisual Analysis: " + "\n".join(text_parts),
                                     success=True,
+                                    data={"image_path": out_file},
                                 )
             except Exception as e:
-                logger.debug("Vision analysis failed: %s", e)
+                logger.debug("Gemini vision analysis failed: %s", e)
 
-        return ToolResult(tool_name=self.spec.name, content=f"Photo captured successfully: {out_file}", success=True)
+        # Fallback to OpenRouter multimodal vision if available
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if openrouter_key:
+            try:
+                import base64
+                import httpx
+                with open(out_file, "rb") as f:
+                    b64_img = base64.b64encode(f.read()).decode("utf-8")
+
+                data_uri = f"data:image/jpeg;base64,{b64_img}"
+                vision_model = os.environ.get("DEFAULT_MODEL") or "google/gemma-4-31b-it:free"
+                payload = {
+                    "model": vision_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_uri}}
+                            ]
+                        }
+                    ]
+                }
+                headers = {
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json"
+                }
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        choices = data.get("choices", [])
+                        if choices:
+                            text = choices[0].get("message", {}).get("content", "")
+                            if text:
+                                return ToolResult(
+                                    tool_name=self.spec.name,
+                                    content=f"Camera photo captured ({out_file}).\nVisual Analysis: {text}",
+                                    success=True,
+                                    data={"image_path": out_file},
+                                )
+            except Exception as e:
+                logger.debug("OpenRouter vision analysis failed: %s", e)
+
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Photo captured successfully: {out_file}",
+            success=True,
+            data={"image_path": out_file},
+        )
 
 
 @ToolRegistry.register("android_gps_location")
@@ -1320,6 +1370,10 @@ class AndroidWifiControlTool(BaseTool):
                         "type": "boolean",
                         "description": "True to enable Wi-Fi, False to disable, omit to inspect status only",
                     },
+                    "action": {
+                        "type": "string",
+                        "description": "Optional action string: 'enable', 'disable', 'info', or 'status'",
+                    },
                 },
             },
             category="android",
@@ -1327,6 +1381,15 @@ class AndroidWifiControlTool(BaseTool):
 
     def execute(self, **params: Any) -> ToolResult:
         enable = params.get("enable")
+        action = str(params.get("action", "")).strip().lower()
+
+        if action in ("enable", "true", "on") and enable is None:
+            enable = True
+        elif action in ("disable", "false", "off") and enable is None:
+            enable = False
+        elif isinstance(enable, str):
+            enable = enable.lower() in ("true", "1", "yes", "on")
+
         changes = []
         if enable is not None:
             bool_str = "true" if enable else "false"
@@ -1351,7 +1414,7 @@ class AndroidWifiControlTool(BaseTool):
                 info_str = out
         return ToolResult(
             tool_name=self.spec.name,
-            content="\n".join(changes + ([info_str] if info_str else [])),
+            content="\n".join(changes + ([info_str] if info_str else ["Wi-Fi status queried"])),
             success=True,
         )
 

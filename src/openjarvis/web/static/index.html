@@ -772,6 +772,8 @@
     <div class="chip" onclick="executeChip('android_wifi_control', {action: 'info'})">📶 Wi-Fi Status</div>
     <div class="chip" onclick="executeChip('android_torch', {state: 'toggle'})">💡 Torch Toggle</div>
     <div class="chip" onclick="executeChip('android_launch_app', {app: 'Telegram'})">📱 Telegram</div>
+    <div class="chip" onclick="executeChip('android_send_email', {to: 'contact@example.com', subject: 'Jarvis Mobile', body: 'Hello from J.A.R.V.I.S.'})">✉️ Compose Email</div>
+    <div class="chip" onclick="executeChip('android_web_search', {query: 'AI news today'})">🔍 Web Search</div>
     <div class="chip" onclick="executeChip('android_launch_app', {app: 'YouTube'})">▶️ YouTube</div>
     <div class="chip" onclick="executeChip('android_launch_app', {app: 'Minecraft'})">🎮 Minecraft</div>
     <div class="chip" onclick="executeChip('android_launch_app', {app: 'Settings'})">⚙️ Settings</div>
@@ -803,6 +805,42 @@
     let ttsEnabled = false;
     let isRecording = false;
     let conversationHistory = [];
+
+    // Native Android Bridge Helpers
+    window.setChatInput = function(transcript) {
+      const input = document.getElementById('chat-input');
+      if (input) {
+        input.value = transcript;
+        autoGrow(input);
+        input.focus();
+      }
+    };
+
+    window.onSpeechReady = function() {
+      const micBtn = document.getElementById('btn-mic');
+      if (micBtn) micBtn.classList.add('recording');
+    };
+
+    window.onSpeechStarted = function() {
+      const micBtn = document.getElementById('btn-mic');
+      if (micBtn) micBtn.classList.add('recording');
+    };
+
+    window.onSpeechEnded = function() {
+      const micBtn = document.getElementById('btn-mic');
+      if (micBtn) micBtn.classList.remove('recording');
+    };
+
+    window.onSpeechResults = function(transcript) {
+      const micBtn = document.getElementById('btn-mic');
+      if (micBtn) micBtn.classList.remove('recording');
+      window.setChatInput(transcript);
+    };
+
+    window.onSpeechError = function(err) {
+      const micBtn = document.getElementById('btn-mic');
+      if (micBtn) micBtn.classList.remove('recording');
+    };
 
     // Persian/Arabic RTL detection
     function isRtl(text) {
@@ -837,6 +875,10 @@
       } else {
         btn.classList.remove('active');
         waves.style.display = 'none';
+        const bridge = window.JarvisAndroid || window.AndroidJarvis;
+        if (bridge && typeof bridge.stopSpeaking === 'function') {
+          bridge.stopSpeaking();
+        }
       }
     }
 
@@ -904,6 +946,22 @@
 
       container.appendChild(row);
       container.scrollTop = container.scrollHeight;
+
+      if (ttsEnabled && role === 'assistant' && text) {
+        const cleanText = text.replace(/<[^>]*>/g, '').replace(/[*_#`]/g, '').trim();
+        if (cleanText) {
+          const bridge = window.JarvisAndroid || window.AndroidJarvis;
+          if (bridge && typeof bridge.speak === 'function') {
+            bridge.speak(cleanText);
+          } else {
+            fetch('/api/tts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: cleanText })
+            }).catch(() => {});
+          }
+        }
+      }
     }
 
     function showTypingIndicator() {
@@ -933,6 +991,11 @@
       const input = document.getElementById('chat-input');
       const text = (overrideText || input.value).trim();
       if (!text) return;
+
+      const bridge = window.JarvisAndroid || window.AndroidJarvis;
+      if (bridge && typeof bridge.vibrate === 'function') {
+        bridge.vibrate(20);
+      }
 
       if (!overrideText) {
         input.value = '';
@@ -970,6 +1033,10 @@
     }
 
     async function executeChip(toolName, params) {
+      const bridge = window.JarvisAndroid || window.AndroidJarvis;
+      if (bridge && typeof bridge.vibrate === 'function') {
+        bridge.vibrate(25);
+      }
       showTypingIndicator();
       try {
         const resp = await fetch(`/api/tools/${toolName}`, {
@@ -986,11 +1053,18 @@
         ]);
 
         if (ttsEnabled && data.content) {
-          fetch('/api/tts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: data.content })
-          });
+          const cleanText = data.content.replace(/<[^>]*>/g, '').replace(/[*_#`]/g, '').trim();
+          if (cleanText) {
+            if (bridge && typeof bridge.speak === 'function') {
+              bridge.speak(cleanText);
+            } else {
+              fetch('/api/tts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: cleanText })
+              }).catch(() => {});
+            }
+          }
         }
       } catch (err) {
         removeTypingIndicator();
@@ -1000,6 +1074,19 @@
 
     async function toggleVoice() {
       const micBtn = document.getElementById('btn-mic');
+      const bridge = window.JarvisAndroid || window.AndroidJarvis;
+      if (bridge && typeof bridge.startVoiceRecognition === 'function') {
+        if (micBtn.classList.contains('recording')) {
+          if (typeof bridge.stopVoiceRecognition === 'function') {
+            bridge.stopVoiceRecognition();
+          }
+          micBtn.classList.remove('recording');
+        } else {
+          bridge.startVoiceRecognition();
+        }
+        return;
+      }
+
       if (isRecording) {
         // Stop recording
         isRecording = false;
