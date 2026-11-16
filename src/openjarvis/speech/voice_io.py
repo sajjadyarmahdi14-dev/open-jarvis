@@ -49,6 +49,7 @@ def _record_termux(
     destination_path: Optional[Union[str, Path, float, int]] = None,
     duration: Optional[float] = None,
     max_seconds: Optional[float] = None,
+    interactive: Optional[bool] = None,
     **kwargs: Any,
 ) -> bytes:
     """Record audio via Termux:API with strict background lifecycle control.
@@ -107,7 +108,7 @@ def _record_termux(
         raise RuntimeError(f"termux-microphone-record failed: {exc.stderr.strip()}") from exc
 
     # 3. Push-to-Talk or timed wait
-    is_interactive = sys.stdin.isatty()
+    is_interactive = interactive if interactive is not None else (target_path is None and sys.stdin.isatty())
 
     if is_interactive:
         sys.stdout.write(" [Listening... Press Enter when done speaking] ")

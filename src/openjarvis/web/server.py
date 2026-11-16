@@ -290,8 +290,8 @@ async def voice_endpoint(req: VoiceRequest):
         audio_path = Path(tmp.name)
 
     try:
-        # Record 4 seconds of audio via Termux mic
-        recorded = _record_termux(audio_path, duration=4.0)
+        # Record 4 seconds of audio via Termux mic without blocking on stdin
+        recorded = _record_termux(audio_path, duration=4.0, interactive=False)
         if not recorded:
             return {"error": "Microphone recording failed. Ensure Termux:API audio permission is granted."}
 
