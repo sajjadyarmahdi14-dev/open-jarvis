@@ -704,14 +704,17 @@ class AndroidLaunchAppTool(BaseTool):
                         break
 
             if not pkg:
-                ok, output = _run_termux_cmd(["pm", "list", "packages", app_lower])
-                if ok and output:
-                    for line in output.splitlines():
-                        if "package:" in line:
+                # Dynamic package discovery fallback (cmd package list packages -3 / pm list packages)
+                for list_cmd in (["cmd", "package", "list", "packages", "-3"], ["pm", "list", "packages", "-3"], ["pm", "list", "packages"]):
+                    ok, output = _run_termux_cmd(list_cmd, timeout=10.0)
+                    if ok and output:
+                        for line in output.splitlines():
                             candidate = line.replace("package:", "").strip()
-                            if candidate:
+                            if app_lower in candidate.lower():
                                 pkg = candidate
                                 break
+                    if pkg:
+                        break
 
         if not pkg:
             pkg = app_name
@@ -1020,25 +1023,31 @@ class AndroidTelegramActionTool(BaseTool):
 
         clean_target = target.lstrip("@").replace("https://t.me/", "").replace("http://t.me/", "")
         bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        env_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        chat_id = clean_target if (clean_target.isdigit() or clean_target.startswith("-")) else env_chat_id
 
-        if bot_token and message and (clean_target.isdigit() or clean_target.startswith("-")):
+        if bot_token and message and chat_id:
             try:
                 import httpx
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
                 with httpx.Client(timeout=10.0) as client:
-                    resp = client.post(url, json={"chat_id": clean_target, "text": message})
+                    resp = client.post(url, json={"chat_id": chat_id, "text": message})
                     if resp.status_code == 200:
-                        return ToolResult(tool_name=self.spec.name, content=f"Sent message to Telegram chat {clean_target} via Telegram API", success=True)
+                        return ToolResult(tool_name=self.spec.name, content=f"Sent message to Telegram chat {chat_id} via Telegram Bot API", success=True)
             except Exception as exc:
                 logger.debug("Telegram Bot API send failed: %s", exc)
 
-        uri = f"https://t.me/{clean_target}?text={quote(message)}" if message else f"tg://resolve?domain={clean_target}"
-        ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", uri])
-        if ok:
+        uri = f"tg://resolve?domain={clean_target}"
+        if message:
+            uri += f"&text={quote(message)}"
+
+        ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", uri], timeout=10.0)
+        if ok and "Error" not in msg:
             return ToolResult(tool_name=self.spec.name, content=f"Opened Telegram for '@{clean_target}'", success=True)
 
-        ok2, msg2 = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", f"https://t.me/{clean_target}"])
-        if ok2:
+        fallback_uri = f"https://t.me/{clean_target}" + (f"?text={quote(message)}" if message else "")
+        ok2, msg2 = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.intent.action.VIEW", "-d", fallback_uri], timeout=10.0)
+        if ok2 and "Error" not in msg2:
             return ToolResult(tool_name=self.spec.name, content=f"Opened Telegram link for '@{clean_target}'", success=True)
 
         return ToolResult(tool_name=self.spec.name, content=f"Failed to open Telegram: {msg}", success=False)

@@ -132,11 +132,12 @@ def test_telegram_action_open():
         tool = AndroidTelegramActionTool()
         res = tool.execute(target="telegram")
         assert res.success is True
-        mock_cmd.assert_called_with([
+        called_args, _ = mock_cmd.call_args
+        assert called_args[0] == [
             "am", "start", "--user", "0",
             "-a", "android.intent.action.VIEW",
             "-d", "tg://resolve?domain=telegram"
-        ])
+        ]
 
 
 def test_launch_app_aliases():
@@ -229,4 +230,48 @@ def test_config_api_endpoints():
     pdata = post_res.json()
     assert pdata["success"] is True
     assert pdata["config"]["active_model"] == "google/gemma-3-27b-it:free"
+
+
+def test_sms_inbox():
+    mock_sms = [
+        {"sender": "+1234567890", "body": "Your verification code is 1234", "received": "2026-11-16 10:00"}
+    ]
+    with patch("openjarvis.tools.android_tools._run_termux_cmd", return_value=(True, json.dumps(mock_sms))):
+        tool = AndroidSmsInboxTool()
+        res = tool.execute(limit=1)
+        assert res.success is True
+        assert "1234" in res.content
+        assert "+1234567890" in res.content
+
+
+def test_send_email():
+    tool = AndroidSendEmailTool()
+    with patch("openjarvis.tools.android_tools._run_termux_cmd", return_value=(True, "")) as mock_cmd:
+        res = tool.execute(to="test@example.com", subject="Test", body="Hello")
+        assert res.success is True
+        assert "test@example.com" in res.content
+
+
+def test_gps_location():
+    tool = AndroidGpsLocationTool()
+    mock_loc = {"latitude": 35.6892, "longitude": 51.3890, "altitude": 1200, "accuracy": 15}
+    with patch("openjarvis.tools.android_tools._run_termux_cmd", return_value=(True, json.dumps(mock_loc))):
+        res = tool.execute()
+        assert res.success is True
+        assert "35.6892" in res.content
+        assert "maps" in res.content.lower()
+
+
+def test_web_search():
+    tool = AndroidWebSearchTool()
+    with patch("openjarvis.tools.android_tools._run_termux_cmd", return_value=(True, "")) as mock_cmd:
+        res = tool.execute(query="open jarvis ai", engine="google")
+        assert res.success is True
+        assert "open jarvis ai" in res.content
+        mock_cmd.assert_called_with([
+            "am", "start", "--user", "0",
+            "-a", "android.intent.action.VIEW",
+            "-d", "https://www.google.com/search?q=open%20jarvis%20ai"
+        ])
+
 
