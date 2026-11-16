@@ -22,9 +22,10 @@ from openjarvis.engine._stubs import InferenceEngine
 from openjarvis.tools._stubs import BaseTool, build_tool_descriptions
 
 REACT_SYSTEM_PROMPT = """\
-You are a ReAct agent. For each step, respond with exactly one of:
+You are Jarvis, a powerful AI assistant running natively on Android with full access to device controls and tools.
 
-1. To think and act:
+For each step, respond with either:
+1. To think and execute an action:
 Thought: <your reasoning>
 Action: <tool_name>
 Action Input: <json arguments>
@@ -32,6 +33,8 @@ Action Input: <json arguments>
 2. To give a final answer:
 Thought: <your reasoning>
 Final Answer: <your answer>
+
+You also have native tool calling support. Whenever the user asks to control or inspect their Android device (e.g., check battery, toggle flashlight/torch, launch apps like Telegram or Settings, manage clipboard, set volume, show toast/notification, or vibrate), invoke the appropriate Android tool. Never claim that you cannot control the device or access hardware.
 
 # Using Skills
 
@@ -279,13 +282,31 @@ class NativeReActAgent(ToolUsingAgent):
             if self._loop_guard:
                 messages = self._loop_guard.compress_context(messages)
 
-            result = self._generate(messages)
+            # Pass tools to engine so native function-calling models can invoke them
+            result = self._generate(messages, tools=self._tools if self._tools else None)
             usage = result.get("usage", {})
             for k in total_usage:
                 total_usage[k] += usage.get(k, 0)
 
             content = result.get("content", "")
-            parsed = self._parse_response(content)
+            raw_tool_calls = result.get("tool_calls", [])
+
+            if raw_tool_calls:
+                tc = raw_tool_calls[0]
+                action_name = tc.get("name", "")
+                raw_args = tc.get("arguments", "{}")
+                if isinstance(raw_args, dict):
+                    action_args = json.dumps(raw_args)
+                else:
+                    action_args = str(raw_args)
+                parsed = {
+                    "thought": content or f"Executing tool: {action_name}",
+                    "action": action_name,
+                    "action_input": action_args,
+                    "final_answer": "",
+                }
+            else:
+                parsed = self._parse_response(content)
 
             if parsed.get("parse_error"):
                 self._emit_turn_end(turns=turns)
@@ -302,7 +323,7 @@ class NativeReActAgent(ToolUsingAgent):
                 )
 
             # Final answer?
-            if parsed["final_answer"]:
+            if parsed.get("final_answer"):
                 self._emit_turn_end(turns=turns)
                 msg_dicts = [_message_to_dict(m) for m in messages]
                 return AgentResult(
@@ -313,18 +334,19 @@ class NativeReActAgent(ToolUsingAgent):
                 )
 
             # No action? Treat content as final answer
-            if not parsed["action"]:
+            if not parsed.get("action"):
                 self._emit_turn_end(turns=turns)
                 msg_dicts = [_message_to_dict(m) for m in messages]
                 return AgentResult(
-                    content=content,
+                    content=parsed.get("final_answer") or content,
                     tool_results=all_tool_results,
                     turns=turns,
                     metadata={**total_usage, "messages": msg_dicts},
                 )
 
             # Execute action
-            messages.append(Message(role=Role.ASSISTANT, content=content))
+            asst_text = content or f"Thought: {parsed['thought']}\nAction: {parsed['action']}\nAction Input: {parsed['action_input']}"
+            messages.append(Message(role=Role.ASSISTANT, content=asst_text))
 
             tool_call = ToolCall(
                 id=f"react_{turns}",

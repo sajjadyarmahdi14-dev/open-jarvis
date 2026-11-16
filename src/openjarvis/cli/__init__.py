@@ -131,6 +131,7 @@ if not _DATA_BOUNDARY_BOOTSTRAP:
     from openjarvis.cli.skill_cmd import skill
     from openjarvis.cli.telemetry_cmd import telemetry
     from openjarvis.cli.tool_cmd import tool
+    from openjarvis.cli.ui_cmd import ui
     from openjarvis.cli.vault_cmd import vault
     from openjarvis.cli.workflow_cmd import workflow
 
@@ -138,6 +139,8 @@ if not _DATA_BOUNDARY_BOOTSTRAP:
     cli.add_command(ask, "ask")
     cli.add_command(chat, "chat")
     cli.add_command(serve, "serve")
+    cli.add_command(ui, "ui")
+    cli.add_command(ui, "app")
     cli.add_command(model, "model")
     cli.add_command(memory, "memory")
     cli.add_command(mine, "mine")

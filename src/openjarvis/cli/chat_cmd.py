@@ -212,11 +212,18 @@ def chat(
                         getattr(config.tools, "enabled", None),
                         getattr(config.agent, "tools", None),
                     )
-                    if tool_names_list:
-                        import openjarvis.tools  # noqa: F401 — trigger registration
-                        from openjarvis.core.registry import ToolRegistry
-                        from openjarvis.tools._stubs import BaseTool
+                    import openjarvis.tools  # noqa: F401 — trigger registration
+                    from openjarvis.core.registry import ToolRegistry
+                    from openjarvis.tools._stubs import BaseTool
 
+                    if not tool_names_list or "all" in tool_names_list:
+                        # Auto-enable all android tools + essential tools
+                        tool_names_list = [k for k in ToolRegistry.keys() if k.startswith("android_")]
+                        for extra in ("calculator", "shell_exec", "web_search", "think", "repl", "file_read"):
+                            if ToolRegistry.contains(extra) and extra not in tool_names_list:
+                                tool_names_list.append(extra)
+
+                    if tool_names_list:
                         tool_instances = []
                         for tname in tool_names_list:
                             if ToolRegistry.contains(tname):

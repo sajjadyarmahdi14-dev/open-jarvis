@@ -1181,9 +1181,13 @@ class ToolsConfig:
 class AgentConfig:
     """Agent harness settings — orchestration, tools, system prompt."""
 
-    default_agent: str = "simple"
+    default_agent: str = field(
+        default_factory=lambda: "react" if _is_android() else "simple"
+    )
     max_turns: int = 10
-    tools: str = ""  # comma-separated tool names
+    tools: str = field(
+        default_factory=lambda: "all" if _is_android() else ""
+    )  # comma-separated tool names ("all" includes registered android tools)
     objective: str = ""  # concise purpose for routing/learning/docs
     system_prompt: str = ""  # inline system prompt (takes precedence if set)
     system_prompt_path: str = ""  # path to system prompt file (.txt, .md)

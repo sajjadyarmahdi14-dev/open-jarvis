@@ -38,12 +38,46 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ---------------------------------------------------------------------------
 
 
+def normalize_openai_tools(tools: Any) -> List[Dict[str, Any]]:
+    """Convert any tool definitions (BaseTool, ToolSpec, dict) to standard OpenAI tool dicts."""
+    if not tools:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in tools:
+        if hasattr(item, "to_openai_function") and callable(item.to_openai_function):
+            normalized.append(item.to_openai_function())
+        elif isinstance(item, dict):
+            if "type" in item and "function" in item:
+                normalized.append(item)
+            elif "name" in item:
+                normalized.append({
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name"),
+                        "description": item.get("description", ""),
+                        "parameters": item.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                })
+        elif hasattr(item, "spec"):
+            spec = getattr(item, "spec")
+            normalized.append({
+                "type": "function",
+                "function": {
+                    "name": getattr(spec, "name", str(item)),
+                    "description": getattr(spec, "description", ""),
+                    "parameters": getattr(spec, "parameters", {"type": "object", "properties": {}}),
+                },
+            })
+    return normalized
+
+
 def convert_tools_to_gemini(
-    openai_tools: List[Dict[str, Any]],
+    openai_tools: Sequence[Any],
 ) -> List[Dict[str, Any]]:
     """Convert OpenAI-format function tools to Gemini function declarations."""
+    normalized = normalize_openai_tools(openai_tools)
     declarations = []
-    for tool in openai_tools:
+    for tool in normalized:
         func = tool.get("function", {})
         declarations.append(
             {
@@ -365,6 +399,7 @@ def generate_openai_compat_rest(
     if extra_headers:
         headers.update(extra_headers)
 
+    raw_tools = kwargs.pop("tools", None)
     payload: Dict[str, Any] = {
         "model": model,
         "messages": messages_to_dicts(messages),
@@ -373,8 +408,16 @@ def generate_openai_compat_rest(
         "stream": False,
         **kwargs,
     }
-    if "tools" in payload and "tool_choice" not in payload:
-        payload["tool_choice"] = "auto"
+    if raw_tools:
+        norm_tools = normalize_openai_tools(raw_tools)
+        if norm_tools:
+            payload["tools"] = norm_tools
+            if "tool_choice" not in payload:
+                payload["tool_choice"] = "auto"
+    elif "tools" in payload:
+        payload["tools"] = normalize_openai_tools(payload["tools"])
+        if "tool_choice" not in payload:
+            payload["tool_choice"] = "auto"
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     t0 = time.monotonic()
@@ -455,6 +498,7 @@ async def stream_full_openai_compat_rest(
     if extra_headers:
         headers.update(extra_headers)
 
+    raw_tools = kwargs.pop("tools", None)
     payload: Dict[str, Any] = {
         "model": model,
         "messages": messages_to_dicts(messages),
@@ -463,8 +507,16 @@ async def stream_full_openai_compat_rest(
         "stream": True,
         **kwargs,
     }
-    if "tools" in payload and "tool_choice" not in payload:
-        payload["tool_choice"] = "auto"
+    if raw_tools:
+        norm_tools = normalize_openai_tools(raw_tools)
+        if norm_tools:
+            payload["tools"] = norm_tools
+            if "tool_choice" not in payload:
+                payload["tool_choice"] = "auto"
+    elif "tools" in payload:
+        payload["tools"] = normalize_openai_tools(payload["tools"])
+        if "tool_choice" not in payload:
+            payload["tool_choice"] = "auto"
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
@@ -539,6 +591,7 @@ __all__ = [
     "convert_tools_to_gemini",
     "generate_gemini_rest",
     "generate_openai_compat_rest",
+    "normalize_openai_tools",
     "stream_full_gemini_rest",
     "stream_full_openai_compat_rest",
 ]

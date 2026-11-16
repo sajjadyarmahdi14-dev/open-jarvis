@@ -31,6 +31,12 @@ def check_and_route(ctx: click.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
+    # On Android, default bare `jarvis` to launching the Mobile Web UI
+    if _cfg._is_android():
+        from openjarvis.cli.ui_cmd import ui as ui_cmd
+        ctx.invoke(ui_cmd)
+        return
+
     # Late imports to avoid circular import with cli/__init__.py.
     from openjarvis.cli.chat_cmd import chat as chat_cmd
     from openjarvis.cli.init_cmd import init as init_cmd

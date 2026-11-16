@@ -37,10 +37,18 @@ def _run_termux_cmd(
     cmd: List[str],
     timeout: float = DEFAULT_TIMEOUT,
     input_text: Optional[str] = None,
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> Tuple[bool, str]:
     """Execute a Termux:API or Android shell command with strict timeout guards."""
     binary = cmd[0]
-    if not shutil.which(binary):
+    env = dict(os.environ)
+    system_paths = "/data/data/com.termux/files/usr/bin:/system/bin:/system/xbin"
+    current_path = env.get("PATH", "")
+    env["PATH"] = f"{system_paths}:{current_path}"
+    if extra_env:
+        env.update(extra_env)
+
+    if not shutil.which(binary, path=env["PATH"]):
         return (
             False,
             f"Binary '{binary}' was not found on PATH. "
@@ -56,6 +64,7 @@ def _run_termux_cmd(
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
         if res.returncode != 0:
             err = res.stderr.strip() or f"Command exited with code {res.returncode}"
@@ -541,7 +550,7 @@ class AndroidIntentTool(BaseTool):
         if not uri:
             return ToolResult(tool_name=self.spec.name, content="URI is required", success=False)
 
-        cmd = ["am", "start", "-a", action, "-d", uri]
+        cmd = ["am", "start", "--user", "0", "-a", action, "-d", uri]
         if pkg:
             cmd.extend(["-p", pkg])
 
@@ -555,11 +564,179 @@ class AndroidIntentTool(BaseTool):
         )
 
 
+COMMON_ANDROID_APPS: Dict[str, str] = {
+    "telegram": "org.telegram.messenger",
+    "whatsapp": "com.whatsapp",
+    "youtube": "com.google.android.youtube",
+    "chrome": "com.android.chrome",
+    "google chrome": "com.android.chrome",
+    "browser": "com.android.chrome",
+    "firefox": "org.mozilla.firefox",
+    "settings": "com.android.settings",
+    "camera": "com.android.camera",
+    "termux": "com.termux",
+    "spotify": "com.spotify.music",
+    "instagram": "com.instagram.android",
+    "twitter": "com.twitter.android",
+    "x": "com.twitter.android",
+    "gmail": "com.google.android.gm",
+    "maps": "com.google.android.apps.maps",
+    "google maps": "com.google.android.apps.maps",
+    "calculator": "com.google.android.calculator",
+    "clock": "com.google.android.deskclock",
+    "alarm": "com.google.android.deskclock",
+    "gallery": "com.google.android.apps.photos",
+    "photos": "com.google.android.apps.photos",
+    "files": "com.google.android.documentsui",
+    "playstore": "com.android.vending",
+    "play store": "com.android.vending",
+    "discord": "com.discord",
+    "tiktok": "com.zhiliaoapp.musically",
+    "facebook": "com.facebook.katana",
+    "messenger": "com.facebook.orca",
+    "reddit": "com.reddit.frontpage",
+    "netflix": "com.netflix.mediaclient",
+    "uber": "com.ubercab",
+}
+
+
+@ToolRegistry.register("android_launch_app")
+class AndroidLaunchAppTool(BaseTool):
+    """Launch an Android application by common name or package identifier."""
+
+    tool_id = "android_launch_app"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="android_launch_app",
+            description=(
+                "Launch an Android application by its common name (e.g. 'Telegram', 'WhatsApp', "
+                "'YouTube', 'Chrome', 'Settings', 'Camera', 'Termux', 'Spotify', 'Instagram', "
+                "'Gmail', 'Maps', 'Calculator') or package name (e.g. 'org.telegram.messenger')."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "app": {
+                        "type": "string",
+                        "description": "Common name of the app (e.g. 'Telegram', 'YouTube', 'Settings', 'Camera') or package name",
+                    },
+                    "package": {
+                        "type": "string",
+                        "description": "Optional explicit package name to launch",
+                    },
+                },
+                "required": ["app"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        app_name = str(params.get("app", "")).strip()
+        explicit_pkg = params.get("package")
+
+        if not app_name and not explicit_pkg:
+            return ToolResult(tool_name=self.spec.name, content="App name or package is required", success=False)
+
+        pkg = explicit_pkg
+        if not pkg:
+            app_lower = app_name.lower()
+            if "." in app_name and " " not in app_name:
+                pkg = app_name
+            elif app_lower in COMMON_ANDROID_APPS:
+                pkg = COMMON_ANDROID_APPS[app_lower]
+            else:
+                for key, val in COMMON_ANDROID_APPS.items():
+                    if key in app_lower or app_lower in key:
+                        pkg = val
+                        break
+
+            if not pkg:
+                ok, output = _run_termux_cmd(["pm", "list", "packages", app_lower])
+                if ok and output:
+                    for line in output.splitlines():
+                        if "package:" in line:
+                            candidate = line.replace("package:", "").strip()
+                            if candidate:
+                                pkg = candidate
+                                break
+
+        if not pkg:
+            pkg = app_name
+
+        # Known component shortcuts
+        COMPONENTS = {
+            "termux": "com.termux/.app.TermuxActivity",
+            "settings": "com.android.settings/.Settings",
+            "camera": "com.android.camera",
+        }
+
+        # Specialized action shortcuts
+        if app_name.lower() in ("camera", "take photo", "photo"):
+            ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.media.action.IMAGE_CAPTURE"])
+            if ok:
+                return ToolResult(tool_name=self.spec.name, content="Launched Camera app via Android Intent", success=True)
+
+        if app_name.lower() in ("settings", "system settings"):
+            ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.settings.SETTINGS"])
+            if ok:
+                return ToolResult(tool_name=self.spec.name, content="Launched Android Settings", success=True)
+
+        if app_lower in COMPONENTS:
+            comp = COMPONENTS[app_lower]
+            if "/" in comp:
+                ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-n", comp])
+                if ok and "Error" not in msg:
+                    return ToolResult(
+                        tool_name=self.spec.name,
+                        content=f"Successfully launched '{app_name}' ({comp})",
+                        success=True,
+                    )
+
+        # Attempt 1: am start launcher intent with user 0
+        am_cmd = ["am", "start", "--user", "0", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", pkg]
+        ok, msg = _run_termux_cmd(am_cmd)
+        if ok and "Error:" not in msg:
+            return ToolResult(
+                tool_name=self.spec.name,
+                content=f"Successfully launched '{app_name}' (package: {pkg})",
+                success=True,
+            )
+
+        # Attempt 2: am start package target
+        am_basic = ["am", "start", "--user", "0", "-p", pkg]
+        ok, msg = _run_termux_cmd(am_basic)
+        if ok and "Error:" not in msg:
+            return ToolResult(
+                tool_name=self.spec.name,
+                content=f"Successfully launched '{app_name}' ({pkg})",
+                success=True,
+            )
+
+        # Attempt 3: monkey via sh
+        monkey_cmd = ["sh", "-c", f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1"]
+        ok, msg = _run_termux_cmd(monkey_cmd)
+        if ok and "No activities found" not in msg and "Error" not in msg:
+            return ToolResult(
+                tool_name=self.spec.name,
+                content=f"Successfully launched '{app_name}' via monkey",
+                success=True,
+            )
+
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Failed to launch '{app_name}' (package: {pkg}): {msg}",
+            success=False,
+        )
+
+
 __all__ = [
     "AndroidBatteryTool",
     "AndroidClipboardGetTool",
     "AndroidClipboardSetTool",
     "AndroidIntentTool",
+    "AndroidLaunchAppTool",
     "AndroidMediaPlayerTool",
     "AndroidNotificationTool",
     "AndroidToastTool",

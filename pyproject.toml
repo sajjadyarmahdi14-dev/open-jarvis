@@ -42,6 +42,8 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
     "tomlkit>=0.12",
     "websockets>=13.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.28",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +58,8 @@ android = [
     "psutil>=5.9",
     "tomlkit>=0.12",
     "websockets>=13.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.28",
 ]
 dev = [
     "maturin>=1.12.6",
