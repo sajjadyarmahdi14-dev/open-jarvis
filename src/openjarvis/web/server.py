@@ -265,13 +265,23 @@ async def tts_endpoint(req: TTSRequest):
     return {"success": True}
 
 
+@app.get("/api/camera/latest")
+async def get_latest_camera():
+    """Serve the latest camera photo captured by android_camera_capture."""
+    cam_file = Path("/tmp/jarvis_cam.jpg")
+    if not cam_file.exists():
+        raise HTTPException(status_code=404, detail="No camera photo captured yet")
+    return FileResponse(cam_file, media_type="image/jpeg")
+
+
 @app.post("/api/tools/{tool_name}")
-async def direct_tool_endpoint(tool_name: str, params: Dict[str, Any]):
+async def direct_tool_endpoint(tool_name: str, params: Optional[Dict[str, Any]] = None):
     """Directly execute an Android tool (e.g. for quick action chips)."""
     import openjarvis.tools  # noqa: F401
     if not ToolRegistry.contains(tool_name):
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
 
+    params = params or {}
     tcls = ToolRegistry.get(tool_name)
     config = load_config()
     tool_instance = tcls(**file_tool_kwargs(tool_name, config)) if isinstance(tcls, type) else tcls

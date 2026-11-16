@@ -462,9 +462,15 @@
   <!-- Quick Action Chips -->
   <div id="chips-bar">
     <div class="chip" onclick="executeChip('android_battery', {})">🔋 Battery Status</div>
+    <div class="chip" onclick="executeChip('android_camera_capture', {camera_id: 0, prompt: 'Describe what you see in this photo'})">📷 Vision Snap</div>
+    <div class="chip" onclick="executeChip('android_sms_inbox', {limit: 5})">📩 Recent SMS</div>
+    <div class="chip" onclick="executeChip('android_gps_location', {provider: 'gps'})">📍 Live GPS</div>
+    <div class="chip" onclick="executeChip('android_set_alarm', {hour: 8, minute: 0, message: 'Jarvis Morning Alarm'})">⏰ Set Alarm 08:00</div>
+    <div class="chip" onclick="executeChip('android_wifi_control', {action: 'info'})">📶 Wi-Fi Status</div>
     <div class="chip" onclick="executeChip('android_torch', {state: 'toggle'})">💡 Torch Toggle</div>
     <div class="chip" onclick="executeChip('android_launch_app', {app: 'Telegram'})">📱 Telegram</div>
     <div class="chip" onclick="executeChip('android_launch_app', {app: 'YouTube'})">▶️ YouTube</div>
+    <div class="chip" onclick="executeChip('android_launch_app', {app: 'Minecraft'})">🎮 Minecraft</div>
     <div class="chip" onclick="executeChip('android_launch_app', {app: 'Settings'})">⚙️ Settings</div>
     <div class="chip" onclick="executeChip('android_clipboard_get', {})">📋 Clipboard</div>
   </div>
@@ -537,20 +543,49 @@
       row.className = `message-row ${role}`;
 
       let toolHtml = '';
+      let hasCameraCapture = false;
       if (toolCalls && toolCalls.length > 0) {
         toolHtml = '<div class="tool-badge-group">';
         toolCalls.forEach(tc => {
-          const icon = tc.name.includes('torch') ? '⚡' :
-                       tc.name.includes('battery') ? '🔋' :
-                       tc.name.includes('app') ? '📱' :
-                       tc.name.includes('clipboard') ? '📋' :
-                       tc.name.includes('notification') ? '🔔' : '⚙️';
+          const name = tc.name || '';
+          const icon = name.includes('camera') ? '📷' :
+                       name.includes('torch') ? '💡' :
+                       name.includes('battery') ? '🔋' :
+                       name.includes('contact') ? '👤' :
+                       name.includes('sms') ? '📩' :
+                       name.includes('phone') ? '📞' :
+                       name.includes('gps') || name.includes('location') ? '📍' :
+                       name.includes('alarm') ? '⏰' :
+                       name.includes('wifi') ? '📶' :
+                       name.includes('email') ? '✉️' :
+                       name.includes('telegram') ? '✈️' :
+                       name.includes('search') ? '🔍' :
+                       name.includes('app') ? '📱' :
+                       name.includes('clipboard') ? '📋' :
+                       name.includes('notification') ? '🔔' : '⚙️';
           const isErr = tc.success === false;
+          if (name === 'android_camera_capture' && !isErr) {
+            hasCameraCapture = true;
+          }
           toolHtml += `<div class="tool-badge ${isErr ? 'error' : ''}" title="${escapeHtml(tc.content || '')}">
-            <span class="tool-badge-icon">${icon}</span> ${escapeHtml(tc.name)}
+            <span class="tool-badge-icon">${icon}</span> ${escapeHtml(name)}
           </div>`;
         });
         toolHtml += '</div>';
+      }
+
+      let cameraCardHtml = '';
+      if (hasCameraCapture) {
+        const cacheBuster = Date.now();
+        cameraCardHtml = `
+          <div class="camera-card" style="margin-top: 10px; border-radius: 12px; overflow: hidden; border: 1px solid var(--cyan); max-width: 340px; background: rgba(0,0,0,0.5);">
+            <img src="/api/camera/latest?t=${cacheBuster}" alt="Jarvis Vision Photo" style="width: 100%; max-height: 240px; object-fit: cover; display: block;" onerror="this.parentElement.style.display='none'">
+            <div style="padding: 6px 12px; background: rgba(0, 240, 255, 0.12); font-size: 11px; color: var(--cyan); display: flex; justify-content: space-between; align-items: center;">
+              <span>📷 JARVIS VISION CAPTURE</span>
+              <a href="/api/camera/latest" target="_blank" style="color: var(--cyan); text-decoration: underline; font-weight: 600;">Full Photo</a>
+            </div>
+          </div>
+        `;
       }
 
       const dirClass = isRtl(text) ? 'rtl' : 'ltr';
@@ -560,6 +595,7 @@
         ${toolHtml}
         <div class="bubble ${dirClass}">
           ${formattedText}
+          ${cameraCardHtml}
         </div>
       `;
 
