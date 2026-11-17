@@ -1167,11 +1167,12 @@ private fun JarvisSettingsDialog(
                         singleLine = true,
                         visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         trailingIcon = {
-                            IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
-                                Icon(
-                                    imageVector = if (isPasswordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                    contentDescription = if (isPasswordVisible) "Hide API Key" else "Show API Key",
-                                    tint = CyanDim
+                            TextButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
+                                Text(
+                                    text = if (isPasswordVisible) "HIDE" else "SHOW",
+                                    color = CyanDim,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         },
