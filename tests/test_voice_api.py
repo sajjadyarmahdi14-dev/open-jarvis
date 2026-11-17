@@ -697,6 +697,33 @@ def test_test_connection_endpoint():
         assert "Invalid API Key (HTTP 401 Unauthorized)" in d["message"]
 
 
+def test_get_free_models_endpoint():
+    """Verify GET /api/models/free returns free models list with fallbacks and metadata."""
+    client = TestClient(app)
+
+    # 1. Normal call with fallback/live models
+    resp = client.get("/api/models/free")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["status"] == "success"
+    assert d["count"] >= 5
+    models = d["models"]
+    assert any(m["id"] == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" for m in models)
+    assert any(m["id"] == "meta-llama/llama-3.3-70b-instruct:free" for m in models)
+    assert any(m["id"] == "google/gemma-3-27b-it:free" for m in models)
+    # Check shape of model objects
+    for m in models:
+        assert "id" in m
+        assert "name" in m
+        assert m["id"].endswith(":free")
+
+    # 2. Call with Authorization header
+    resp2 = client.get("/api/models/free", headers={"Authorization": "Bearer test-key"})
+    assert resp2.status_code == 200
+    assert resp2.json()["status"] == "success"
+
+
+
 
 
 

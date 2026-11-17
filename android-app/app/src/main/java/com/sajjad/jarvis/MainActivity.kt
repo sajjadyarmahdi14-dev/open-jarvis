@@ -90,6 +90,46 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class FreeModelItem(
+    val id: String,
+    val name: String,
+    val contextLength: Int = 32768,
+    val description: String = ""
+)
+
+private val CuratedFreeModels = listOf(
+    FreeModelItem(
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "NVIDIA: Nemotron-3 Nano Omni (Free)",
+        32768,
+        "Omni-modal reasoning model with fast real-time latency (Default)"
+    ),
+    FreeModelItem(
+        "google/gemma-3-27b-it:free",
+        "Google: Gemma 3 27B Instruct (Free)",
+        32768,
+        "Google cutting-edge open weight instruction-tuned model"
+    ),
+    FreeModelItem(
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "Meta: Llama 3.3 70B Instruct (Free)",
+        131072,
+        "State-of-the-art 70B open model with 128k context"
+    ),
+    FreeModelItem(
+        "qwen/qwen-2.5-72b-instruct:free",
+        "Qwen: Qwen 2.5 72B Instruct (Free)",
+        32768,
+        "High intelligence Alibaba instruction model"
+    ),
+    FreeModelItem(
+        "mistralai/mistral-small-3.1-24b-instruct:free",
+        "Mistral: Mistral Small 3.1 24B (Free)",
+        32768,
+        "Efficient low-latency multimodal reasoning"
+    )
+)
+
 class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener {
 
     private var serverUrlState = mutableStateOf("http://104.252.175.159:8765")
@@ -1087,6 +1127,10 @@ private fun JarvisSettingsDialog(
     var testDialogMessage by remember { mutableStateOf<String?>(null) }
     var testDialogIsError by remember { mutableStateOf(false) }
 
+    var isFetchingModels by remember { mutableStateOf(false) }
+    var showModelSelectionDialog by remember { mutableStateOf(false) }
+    var availableModels by remember { mutableStateOf(CuratedFreeModels) }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             color = DarkCard,
@@ -1154,6 +1198,78 @@ private fun JarvisSettingsDialog(
                             unfocusedTextColor = TextPrimary
                         )
                     )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Button(
+                        onClick = {
+                            if (!isFetchingModels) {
+                                isFetchingModels = true
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    val fetchedList = mutableListOf<FreeModelItem>()
+                                    try {
+                                        val server = urlText.trim().removeSuffix("/")
+                                        val u = URL("$server/api/models/free")
+                                        val conn = u.openConnection() as HttpURLConnection
+                                        conn.requestMethod = "GET"
+                                        conn.setRequestProperty("Accept", "application/json")
+                                        val k = apiKeyText.trim()
+                                        if (k.isNotBlank()) {
+                                            conn.setRequestProperty("Authorization", "Bearer $k")
+                                        }
+                                        conn.connectTimeout = 7000
+                                        conn.readTimeout = 12000
+
+                                        val code = conn.responseCode
+                                        if (code in 200..299) {
+                                            val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                                            val json = JSONObject(respStr)
+                                            val arr = json.optJSONArray("models")
+                                            if (arr != null && arr.length() > 0) {
+                                                for (i in 0 until arr.length()) {
+                                                    val obj = arr.getJSONObject(i)
+                                                    val id = obj.optString("id", "")
+                                                    if (id.isNotBlank() && id.endsWith(":free")) {
+                                                        val name = obj.optString("name", id)
+                                                        val ctx = obj.optInt("context_length", 32768)
+                                                        val desc = obj.optString("description", "")
+                                                        fetchedList.add(FreeModelItem(id, name, ctx, desc))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.w("JarvisSettings", "Failed fetching free models from server: ${e.message}")
+                                    }
+
+                                    withContext(Dispatchers.Main) {
+                                        isFetchingModels = false
+                                        if (fetchedList.isNotEmpty()) {
+                                            availableModels = fetchedList
+                                        } else {
+                                            availableModels = CuratedFreeModels
+                                        }
+                                        showModelSelectionDialog = true
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isFetchingModels,
+                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                        border = BorderStroke(1.dp, if (isFetchingModels) CyanDim.copy(alpha = 0.5f) else CyanNeon.copy(alpha = 0.7f)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (isFetchingModels) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                color = CyanNeon,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = "Fetching free models...", color = CyanNeon, fontSize = 12.sp)
+                        } else {
+                            Text(text = "🔍 Search Free Models", color = CyanNeon, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
                 }
 
                 // AI API Key Field
@@ -1346,6 +1462,114 @@ private fun JarvisSettingsDialog(
                 }
             },
             containerColor = DarkSurface,
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 6.dp
+        )
+    }
+
+    if (showModelSelectionDialog) {
+        AlertDialog(
+            onDismissRequest = { showModelSelectionDialog = false },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "SELECT FREE MODEL",
+                        color = CyanNeon,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "${availableModels.size} available",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Select a verified free model to power J.A.R.V.I.S.:",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(availableModels) { item ->
+                            val isSelected = modelText.trim() == item.id
+                            Surface(
+                                onClick = {
+                                    modelText = item.id
+                                    showModelSelectionDialog = false
+                                },
+                                color = if (isSelected) CyanNeon.copy(alpha = 0.15f) else DarkSurface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) CyanNeon else CyanDim.copy(alpha = 0.25f)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = {
+                                            modelText = item.id
+                                            showModelSelectionDialog = false
+                                        },
+                                        colors = RadioButtonDefaults.colors(
+                                            selectedColor = CyanNeon,
+                                            unselectedColor = CyanDim.copy(alpha = 0.4f)
+                                        )
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = item.name,
+                                            color = if (isSelected) CyanNeon else TextPrimary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = item.id,
+                                            color = TextSecondary,
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        if (item.contextLength > 0) {
+                                            Text(
+                                                text = "Context: ${item.contextLength / 1024}k tokens • Free",
+                                                color = GreenActive,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showModelSelectionDialog = false }) {
+                    Text("Close", color = CyanNeon, fontWeight = FontWeight.Bold)
+                }
+            },
+            containerColor = DarkCard,
             shape = RoundedCornerShape(16.dp),
             tonalElevation = 6.dp
         )

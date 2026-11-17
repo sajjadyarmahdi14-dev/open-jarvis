@@ -613,6 +613,29 @@ async def update_config(req: ConfigUpdateRequest):
         }
 
 
+@app.get("/api/models/free")
+async def get_free_models_endpoint(
+    request: Request,
+    api_key: Optional[str] = None,
+):
+    """Return live free models available on OpenRouter, sorted with curated fallbacks."""
+    key = (api_key or "").strip()
+    if not key:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            key = auth_header[7:].strip()
+    if not key:
+        key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+
+    from openjarvis.engine.cloud_rest import fetch_detailed_free_models
+    models = fetch_detailed_free_models(api_key=key)
+    return {
+        "status": "success",
+        "count": len(models),
+        "models": models,
+    }
+
+
 @app.post("/api/test-connection")
 async def test_connection_endpoint(req: TestConnectionRequest, request: Request):
     """Test AI model connection with provided API key and model parameters."""

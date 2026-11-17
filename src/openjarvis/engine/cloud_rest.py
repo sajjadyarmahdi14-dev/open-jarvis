@@ -388,8 +388,104 @@ FREE_MODEL_FALLBACK_POOL: List[str] = [
     "mistralai/mistral-small-3.1-24b-instruct:free",
 ]
 
+CURATED_FREE_MODELS: List[Dict[str, Any]] = [
+    {
+        "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "name": "NVIDIA: Nemotron-3 Nano Omni Reasoning (Free)",
+        "context_length": 32768,
+        "pricing": "free",
+        "description": "Fast multi-modal reasoning engine with low latency.",
+    },
+    {
+        "id": "google/gemma-3-27b-it:free",
+        "name": "Google: Gemma 3 27B Instruct (Free)",
+        "context_length": 32768,
+        "pricing": "free",
+        "description": "Google lightweight instruction-tuned model.",
+    },
+    {
+        "id": "meta-llama/llama-3.3-70b-instruct:free",
+        "name": "Meta: Llama 3.3 70B Instruct (Free)",
+        "context_length": 131072,
+        "pricing": "free",
+        "description": "State-of-the-art open weights flagship by Meta.",
+    },
+    {
+        "id": "qwen/qwen-2.5-72b-instruct:free",
+        "name": "Qwen: Qwen 2.5 72B Instruct (Free)",
+        "context_length": 32768,
+        "pricing": "free",
+        "description": "High intelligence multilingual model by Alibaba.",
+    },
+    {
+        "id": "mistralai/mistral-small-3.1-24b-instruct:free",
+        "name": "Mistral: Mistral Small 3.1 24B (Free)",
+        "context_length": 32768,
+        "pricing": "free",
+        "description": "Efficient and powerful instruction model by Mistral AI.",
+    },
+]
+
 _OPENROUTER_LIVE_FREE_MODELS: List[str] = []
 _OPENROUTER_LIVE_MODELS_FETCHED: bool = False
+
+
+def fetch_detailed_free_models(api_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Fetch live free models list from OpenRouter with metadata, sorted with curated fallbacks."""
+    headers = {}
+    effective_key = api_key or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if effective_key:
+        headers["Authorization"] = f"Bearer {effective_key}"
+
+    results: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    try:
+        with httpx.Client(timeout=6.0) as client:
+            resp = client.get("https://openrouter.ai/api/v1/models", headers=headers)
+            if resp.is_success:
+                data = resp.json().get("data", [])
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    m_id = str(item.get("id", "")).strip()
+                    pricing = item.get("pricing") or {}
+                    prompt_price = str(pricing.get("prompt", "")).strip()
+                    is_free = m_id.endswith(":free") or (prompt_price in ("0", "0.0") and m_id.endswith(":free"))
+                    if is_free and m_id != "openrouter/free" and m_id not in seen_ids:
+                        seen_ids.add(m_id)
+                        results.append({
+                            "id": m_id,
+                            "name": item.get("name") or m_id,
+                            "context_length": item.get("context_length") or 32768,
+                            "pricing": "free",
+                            "description": item.get("description", "")[:160],
+                        })
+    except Exception as exc:
+        logger.warning("Error fetching live models from OpenRouter: %s", exc)
+
+    # Curated fallbacks/priority items
+    curated_map = {c["id"]: c for c in CURATED_FREE_MODELS}
+    final_list: List[Dict[str, Any]] = []
+
+    # 1. Add curated models first (updating with live metadata if available)
+    for c_id, c_item in curated_map.items():
+        matched = next((r for r in results if r["id"] == c_id), None)
+        if matched:
+            final_list.append(matched)
+        else:
+            final_list.append(dict(c_item))
+        seen_ids.add(c_id)
+
+    # 2. Add remaining live free models discovered from OpenRouter
+    for r in results:
+        if r["id"] not in curated_map:
+            final_list.append(r)
+
+    # Ensure default reasoning model is strictly at the very top
+    top_model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    final_list.sort(key=lambda x: 0 if x["id"] == top_model else 1)
+    return final_list
 
 
 def get_openrouter_free_models(api_key: Optional[str] = None) -> List[str]:
@@ -397,24 +493,14 @@ def get_openrouter_free_models(api_key: Optional[str] = None) -> List[str]:
     global _OPENROUTER_LIVE_FREE_MODELS, _OPENROUTER_LIVE_MODELS_FETCHED
     if _OPENROUTER_LIVE_MODELS_FETCHED and _OPENROUTER_LIVE_FREE_MODELS:
         return list(_OPENROUTER_LIVE_FREE_MODELS)
-    try:
-        headers = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        with httpx.Client(timeout=4.0) as cl:
-            resp = cl.get("https://openrouter.ai/api/v1/models", headers=headers)
-            if resp.is_success:
-                items = resp.json().get("data", [])
-                free_ids = [m["id"] for m in items if isinstance(m, dict) and m.get("id", "").endswith(":free")]
-                if free_ids:
-                    _OPENROUTER_LIVE_FREE_MODELS = free_ids
-                    _OPENROUTER_LIVE_MODELS_FETCHED = True
-                    logger.info("Loaded %d live free models from OpenRouter", len(free_ids))
-                    return list(_OPENROUTER_LIVE_FREE_MODELS)
-    except Exception as exc:
-        logger.debug("Live OpenRouter models lookup skipped: %s", exc)
+    detailed = fetch_detailed_free_models(api_key)
+    free_ids = [m["id"] for m in detailed if m.get("id")]
+    if free_ids:
+        _OPENROUTER_LIVE_FREE_MODELS = free_ids
+        _OPENROUTER_LIVE_MODELS_FETCHED = True
+        return list(_OPENROUTER_LIVE_FREE_MODELS)
     _OPENROUTER_LIVE_MODELS_FETCHED = True
-    return []
+    return list(FREE_MODEL_FALLBACK_POOL)
 
 
 def generate_openai_compat_rest(
