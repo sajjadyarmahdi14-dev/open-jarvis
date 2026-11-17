@@ -140,6 +140,13 @@ class JarvisAndroidBridge(
     }
 
     @JavascriptInterface
+    fun triggerImmediateListen() {
+        activity.runOnUiThread {
+            onStartVoice()
+        }
+    }
+
+    @JavascriptInterface
     fun startVoiceRecognition() {
         activity.runOnUiThread {
             onStartVoice()

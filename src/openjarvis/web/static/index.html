@@ -751,9 +751,9 @@
         <p id="status-label">ANDROID // ONLINE</p>
       </div>
     </div>
-    <div id="hud-wake-pill" class="hud-wake-pill active" onclick="toggleWakeWord()" title="Toggle Wake Word ('Jarvis')">
+    <div id="hud-wake-pill" class="hud-wake-pill active" onclick="toggleWakeWord()" title="Native 24/7 Background Voice Service">
       <span class="wake-dot"></span>
-      <span id="wake-status-text">🎙️ Listening for "Jarvis"...</span>
+      <span id="wake-status-text">⚡ 24/7 Voice Service: ACTIVE</span>
     </div>
     <div class="header-actions">
       <button class="btn-icon" id="btn-settings" title="Engine & API Settings" onclick="openSettingsModal()">
@@ -887,11 +887,15 @@
   </footer>
 
   <script>
-    // Disable ALL WebView mic capture when running in native Android app (exclusive to JarvisVoiceService!)
-    const isNativeAndroid = !!(window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis);
-    if (isNativeAndroid && navigator.mediaDevices) {
+    // Disable ALL WebView mic capture when running on Android (exclusive to JarvisVoiceService!)
+    const isAndroid = /Android/i.test(navigator.userAgent) || !!(window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis);
+    if (isAndroid) {
       try {
-        navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Microphone is managed exclusively by JarvisVoiceService"));
+        if (navigator.mediaDevices) {
+          navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Microphone is managed exclusively by JarvisVoiceService"));
+        }
+        window.SpeechRecognition = null;
+        window.webkitSpeechRecognition = null;
       } catch (_) {}
     }
 
@@ -930,8 +934,12 @@
       if (bridge && typeof bridge.setWakeWordEnabled === 'function') {
         bridge.setWakeWordEnabled(wakeWordEnabled);
       }
-      window.setWakeStatus(wakeWordEnabled ? 'listening_wake' : 'paused');
+      window.setWakeStatus(wakeWordEnabled ? 'active' : 'paused');
     }
+
+    window.onNativeServiceState = function(state) {
+      window.setWakeStatus(state);
+    };
 
     window.setWakeStatus = function(state) {
       const pill = document.getElementById('hud-wake-pill');
@@ -939,18 +947,18 @@
       if (!pill || !txt) return;
 
       pill.className = 'hud-wake-pill';
-      if (state === 'listening_wake') {
-        pill.classList.add('active');
-        txt.innerText = '🎙️ Listening for "Jarvis"...';
-      } else if (state === 'listening_cmd') {
+      if (state === 'listening_cmd') {
         pill.classList.add('active-cmd');
         txt.innerText = '🟢 Listening for command...';
       } else if (state === 'processing') {
         pill.classList.add('processing');
         txt.innerText = '⚡ J.A.R.V.I.S. Processing...';
-      } else if (state === 'paused') {
+      } else if (state === 'paused' || state === 'sleep') {
         pill.classList.add('paused');
-        txt.innerText = '💤 Wake word paused';
+        txt.innerText = '💤 24/7 Service: Sleeping';
+      } else {
+        pill.classList.add('active');
+        txt.innerText = '⚡ 24/7 Voice Service: ACTIVE';
       }
     };
 
@@ -1314,9 +1322,16 @@
 
       // 1. Android Native App: Strictly delegate to JarvisVoiceService (NEVER capture audio inside WebView!)
       if (bridge) {
-        if (typeof bridge.startVoiceRecognition === 'function') {
+        if (typeof bridge.triggerImmediateListen === 'function') {
+          bridge.triggerImmediateListen();
+        } else if (typeof bridge.startVoiceRecognition === 'function') {
           bridge.startVoiceRecognition();
         }
+        return;
+      }
+
+      if (isAndroid) {
+        // In Android WebView, never capture audio in browser!
         return;
       }
 

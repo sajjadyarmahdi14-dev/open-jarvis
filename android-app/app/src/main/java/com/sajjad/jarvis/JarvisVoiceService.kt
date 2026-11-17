@@ -247,6 +247,29 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         createNotificationChannel()
         initTextToSpeech()
 
+        // Acquire persistent non-reference-counted PARTIAL_WAKE_LOCK so CPU and AudioRecord stay alive indefinitely
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (wakeLock == null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Jarvis::AlwaysOnVoiceLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld != true) {
+                wakeLock?.acquire()
+                Log.i(TAG, "Persistent AlwaysOnVoiceLock acquired")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "WakeLock acquire error: ${e.message}")
+        }
+
+        // Show verification toast on main thread
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            try {
+                Toast.makeText(applicationContext, "Jarvis 24/7 Background Service Active", Toast.LENGTH_SHORT).show()
+            } catch (_: Throwable) {}
+        }
+
         // Dynamic Real-Time App Discovery Engine: initial index and sync
         AppLauncher.refreshInstalledApps(applicationContext)
         AppLauncher.syncAppsToServer(applicationContext, getServerUrl())
@@ -638,9 +661,22 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     // Utterance Dispatch to Backend & 100% Native Action Execution
     // -----------------------------------------------------------------------
 
+    private fun broadcastUiUpdate(userText: String? = null, assistantReply: String? = null, wakeStatus: String? = null) {
+        try {
+            val intent = Intent("com.openjarvis.ACTION_UI_UPDATE").apply {
+                userText?.let { putExtra("user_text", it) }
+                assistantReply?.let { putExtra("assistant_reply", it) }
+                wakeStatus?.let { putExtra("wake_status", it) }
+                setPackage(packageName)
+            }
+            sendBroadcast(intent)
+        } catch (_: Throwable) {}
+    }
+
     private fun dispatchVadUtterance(wavBytes: ByteArray) {
         scope.launch {
             serviceListener?.onWakeStateChanged("processing")
+            broadcastUiUpdate(wakeStatus = "processing")
             updateNotification("Processing speech...")
 
             val (batPct, isCharging) = getBatteryTelemetry()
@@ -658,12 +694,14 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
                 if (transcript.isNotBlank()) {
                     serviceListener?.onFinalSpeech(transcript)
+                    broadcastUiUpdate(userText = transcript)
                 }
 
                 // If server ignored the speech (ambient room noise in standby without wake word), discard silently!
                 if (status == "ignored" || status == "no_speech") {
-                    val st = "listening_wake"
+                    val st = "active"
                     serviceListener?.onWakeStateChanged(st)
+                    broadcastUiUpdate(wakeStatus = st)
                     updateNotification("J.A.R.V.I.S. Standby — Say 'Jarvis' anytime")
                     return@launch
                 }
@@ -688,6 +726,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                                   else if (isFa) "به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید."
                                   else "Going into standby mode, sir. Just say Jarvis whenever you need me."
                     serviceListener?.onAssistantResponse(sleepMsg)
+                    broadcastUiUpdate(assistantReply = sleepMsg, wakeStatus = "paused")
                     speakBritish(sleepMsg)
                     return@launch
                 } else if (status == "awake" || action == "wake_alone") {
@@ -716,15 +755,18 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
                 if (response.isNotBlank()) {
                     serviceListener?.onAssistantResponse(response)
+                    broadcastUiUpdate(assistantReply = response)
                     speakBritish(response)
                 } else {
-                    val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
+                    val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "active"
                     serviceListener?.onWakeStateChanged(st)
+                    broadcastUiUpdate(wakeStatus = st)
                     updateNotification()
                 }
             } else {
-                val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
+                val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "active"
                 serviceListener?.onWakeStateChanged(st)
+                broadcastUiUpdate(wakeStatus = st)
                 updateNotification()
             }
         }
@@ -1202,15 +1244,20 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     // -----------------------------------------------------------------------
 
     private fun startAsForeground() {
-        val notification = buildNotification()
         try {
+            val notification = buildNotification()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                try {
+                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "startForeground with microphone type failed: ${t.message}. Falling back.")
+                    startForeground(NOTIFICATION_ID, notification)
+                }
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "startForeground error: ${t.message}", t)
+            Log.e(TAG, "startForeground fatal error: ${t.message}", t)
         }
     }
 

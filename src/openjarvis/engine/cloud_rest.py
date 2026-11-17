@@ -382,10 +382,10 @@ async def stream_full_gemini_rest(
 
 FREE_MODEL_FALLBACK_POOL: List[str] = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "google/gemma-3-27b-it:free",
-    "google/gemma-3-12b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
     "qwen/qwen-2.5-72b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-12b-it:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
 ]
 

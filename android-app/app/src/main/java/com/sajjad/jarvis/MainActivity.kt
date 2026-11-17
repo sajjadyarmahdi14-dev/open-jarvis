@@ -122,6 +122,14 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
         promptOverlayPermission()
         startVoiceService()
 
+        // Register receiver for background voice service updates
+        val uiFilter = IntentFilter("com.openjarvis.ACTION_UI_UPDATE")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.registerReceiver(this, uiUpdateReceiver, uiFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(uiUpdateReceiver, uiFilter)
+        }
+
         initWebView()
         setupSwipeRefresh()
 
@@ -137,9 +145,32 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
         startHealthCheckLoop()
     }
 
+    private val uiUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val userText = intent?.getStringExtra("user_text")
+            val assistantReply = intent?.getStringExtra("assistant_reply")
+            val wakeStatus = intent?.getStringExtra("wake_status")
+            if (!userText.isNullOrBlank()) {
+                val esc = escapeJs(userText)
+                webView.evaluateJavascript("if (window.appendUserMessage) window.appendUserMessage('$esc');", null)
+            }
+            if (!assistantReply.isNullOrBlank()) {
+                val esc = escapeJs(assistantReply)
+                webView.evaluateJavascript("if (window.appendAssistantMessage) window.appendAssistantMessage('$esc');", null)
+            }
+            if (!wakeStatus.isNullOrBlank()) {
+                val esc = escapeJs(wakeStatus)
+                webView.evaluateJavascript("if (window.setWakeStatus) window.setWakeStatus('$esc'); if (window.onNativeServiceState) window.onNativeServiceState('$esc');", null)
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         JarvisVoiceService.serviceListener = this
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startVoiceService()
+        }
     }
 
     override fun onPause() {
@@ -323,19 +354,26 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
     // -----------------------------------------------------------------------
 
     private fun initWebView() {
+        webView.clearCache(true)
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
         settings.mediaPlaybackRequiresUserGesture = false
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        settings.cacheMode = WebSettings.LOAD_NO_CACHE
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.allowContentAccess = true
         settings.allowFileAccess = true
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
-                request.grant(request.resources)
+                // Strictly deny RESOURCE_AUDIO_CAPTURE to WebView so browser never intercepts or kills mic
+                val granted = request.resources.filter { it != PermissionRequest.RESOURCE_AUDIO_CAPTURE }.toTypedArray()
+                if (granted.isNotEmpty()) {
+                    request.grant(granted)
+                } else {
+                    request.deny()
+                }
             }
         }
 
@@ -581,6 +619,7 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
     override fun onDestroy() {
         try {
             healthJob?.cancel()
+            unregisterReceiver(uiUpdateReceiver)
             bridge?.shutdown()
         } catch (_: Throwable) {}
         super.onDestroy()
