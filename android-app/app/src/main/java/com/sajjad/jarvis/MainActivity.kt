@@ -1,15 +1,15 @@
 package com.sajjad.jarvis
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioManager
-import android.media.ToneGenerator
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import android.os.PowerManager
+import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -23,7 +23,6 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -38,9 +37,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.Locale
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener {
 
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
@@ -52,77 +50,25 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStartTermux: Button
     private lateinit var btnRetrySplash: Button
 
-    private var speechRecognizer: SpeechRecognizer? = null
     private var bridge: JarvisAndroidBridge? = null
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var healthJob: Job? = null
-    private var restartListeningJob: Job? = null
     private var isUrlLoaded = false
-
-    // Hands-Free Wake-Word ("Jarvis") Engine States
-    enum class WakeState {
-        WAITING_FOR_WAKE_WORD,
-        WAITING_FOR_COMMAND,
-        PROCESSING
-    }
-
-    private var currentWakeState = WakeState.WAITING_FOR_WAKE_WORD
-    private var isWakeWordListeningEnabled = true
-    private var isTtsSpeaking = false
 
     private val targetUrl = "http://127.0.0.1:8765"
     private val permissionsCode = 101
-
-    // Smart Aliases for 100% App & Game Launching on Xiaomi HyperOS / Android 14
-    private val appAliases = mapOf(
-        "تلگرام" to "telegram",
-        "واتساپ" to "whatsapp",
-        "واتس اپ" to "whatsapp",
-        "واتس‌اپ" to "whatsapp",
-        "اینستاگرام" to "instagram",
-        "اینستا" to "instagram",
-        "یوتیوب" to "youtube",
-        "یوتوب" to "youtube",
-        "ماینکرفت" to "minecraft",
-        "ماینکرافت" to "minecraft",
-        "دوربین" to "camera",
-        "عکس" to "camera",
-        "تنظیمات" to "settings",
-        "گالری" to "gallery",
-        "جیمیل" to "gmail",
-        "ایمیل" to "gmail",
-        "کروم" to "chrome",
-        "مرورگر" to "chrome",
-        "ماشین حساب" to "calculator",
-        "ساعت" to "clock",
-        "آلارم" to "clock",
-        "نقشه" to "maps",
-        "مخاطبین" to "contacts",
-        "پیامک" to "messages",
-        "پیام‌ها" to "messages",
-        "پیام ها" to "messages",
-        "تلفن" to "phone",
-        "تماس" to "phone",
-        "ترموکس" to "termux",
-        "فایل" to "files",
-        "فایل‌ها" to "files",
-        "مدیریت فایل" to "files",
-        "موسیقی" to "spotify",
-        "آهنگ" to "spotify"
-    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
             initApp(savedInstanceState)
         } catch (t: Throwable) {
-            android.util.Log.e("Jarvis", "Fatal crash during MainActivity initialization", t)
+            Log.e("Jarvis", "Fatal crash during MainActivity initialization", t)
             renderCrashScreen(t)
         }
     }
 
     private fun initApp(savedInstanceState: Bundle?) {
-        // Fix 1: setContentView MUST be called BEFORE any window insets/decorView styling
         setContentView(R.layout.activity_main)
         applyEdgeToEdgeDarkTheme()
 
@@ -137,6 +83,9 @@ class MainActivity : AppCompatActivity() {
         btnRetrySplash = findViewById(R.id.btnRetrySplash)
 
         requestRequiredPermissions()
+        promptIgnoreBatteryOptimizations()
+        startVoiceService()
+
         initWebView()
         setupSwipeRefresh()
 
@@ -149,9 +98,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         handleIncomingIntent(intent)
-
-        // Fix 2: Zero-touch background server auto-start & poll
         startHealthCheckLoop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        JarvisVoiceService.serviceListener = this
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (JarvisVoiceService.serviceListener === this) {
+            JarvisVoiceService.serviceListener = null
+        }
     }
 
     private fun applyEdgeToEdgeDarkTheme() {
@@ -223,6 +182,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Always-On Foreground Service & Xiaomi HyperOS Battery Exemption
+    // -----------------------------------------------------------------------
+
+    fun startVoiceService() {
+        try {
+            val serviceIntent = Intent(this, JarvisVoiceService::class.java).apply {
+                action = JarvisVoiceService.ACTION_START
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        } catch (t: Throwable) {
+            Log.w("Jarvis", "startVoiceService error: ${t.message}")
+        }
+    }
+
+    private fun promptIgnoreBatteryOptimizations() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                    val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                    val prompted = prefs.getBoolean("battery_optimization_requested", false)
+                    if (!prompted) {
+                        prefs.edit().putBoolean("battery_optimization_requested", true).apply()
+                        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            data = Uri.parse("package:$packageName")
+                        }
+                        startActivity(intent)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("Jarvis", "Battery optimization prompt failed: ${e.message}")
+        }
+    }
+
     private fun requestRequiredPermissions() {
         val needed = mutableListOf<String>()
         val checks = arrayOf(
@@ -258,17 +257,14 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         try {
             if (requestCode == permissionsCode) {
-                val recordIndex = permissions.indexOf(Manifest.permission.RECORD_AUDIO)
-                if (recordIndex != -1 && grantResults.getOrNull(recordIndex) == PackageManager.PERMISSION_GRANTED) {
-                    scheduleRestartListening(500L)
-                }
-                val postNotifIndex = permissions.indexOf(Manifest.permission.POST_NOTIFICATIONS)
-                if (postNotifIndex != -1 && grantResults.getOrNull(postNotifIndex) == PackageManager.PERMISSION_GRANTED) {
-                    startBackgroundService()
-                }
+                startVoiceService()
             }
         } catch (_: Throwable) {}
     }
+
+    // -----------------------------------------------------------------------
+    // WebView & JavaScript Bridge Setup
+    // -----------------------------------------------------------------------
 
     private fun initWebView() {
         val settings = webView.settings
@@ -291,9 +287,8 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 swipeRefresh.isRefreshing = false
-                if (isWakeWordListeningEnabled) {
-                    scheduleRestartListening(600L)
-                }
+                val st = if (JarvisVoiceService.isServiceMuted) "paused" else "listening_wake"
+                webView.evaluateJavascript("if (window.setWakeStatus) window.setWakeStatus('$st');", null)
             }
 
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -311,7 +306,6 @@ class MainActivity : AppCompatActivity() {
             onStartVoice = { startListeningVoice() },
             onStopVoice = { stopListeningVoice() }
         )
-        // Expose bridge across all requested namespaces
         webView.addJavascriptInterface(bridge!!, "JarvisNative")
         webView.addJavascriptInterface(bridge!!, "JarvisAndroid")
         webView.addJavascriptInterface(bridge!!, "AndroidJarvis")
@@ -339,7 +333,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Zero-Touch Server Health-Check & Auto-Boot Loop
     private fun startHealthCheckLoop() {
         healthJob?.cancel()
         val startTime = System.currentTimeMillis()
@@ -364,10 +357,6 @@ class MainActivity : AppCompatActivity() {
                     if (!isUrlLoaded) {
                         isUrlLoaded = true
                         webView.loadUrl(targetUrl)
-                    }
-                    // Server online: start wake word listening if enabled
-                    if (isWakeWordListeningEnabled && !isTtsSpeaking) {
-                        scheduleRestartListening(500L)
                     }
                     delay(4000)
                 } else {
@@ -437,304 +426,83 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Wake Word ("Jarvis") Engine & Continuous Speech Recognizer
-    fun setWakeWordListening(enabled: Boolean) {
-        isWakeWordListeningEnabled = enabled
-        if (enabled) {
-            currentWakeState = WakeState.WAITING_FOR_WAKE_WORD
-            scheduleRestartListening(200L)
-        } else {
-            stopListeningVoice()
-        }
-    }
+    // -----------------------------------------------------------------------
+    // Voice Service Events -> Live HUD Sync
+    // -----------------------------------------------------------------------
 
-    fun isWakeWordListening(): Boolean = isWakeWordListeningEnabled
-
-    fun onTtsStarted() {
-        isTtsSpeaking = true
-        restartListeningJob?.cancel()
+    override fun onWakeStateChanged(state: String) {
         runOnUiThread {
-            try {
-                speechRecognizer?.stopListening()
-                speechRecognizer?.cancel()
-            } catch (_: Throwable) {}
+            webView.evaluateJavascript("if (window.setWakeStatus) window.setWakeStatus('$state');", null)
         }
     }
 
-    fun onTtsFinished() {
-        isTtsSpeaking = false
-        if (isWakeWordListeningEnabled) {
-            scheduleRestartListening(300L)
+    override fun onSpeechStarted() {
+        runOnUiThread {
+            webView.evaluateJavascript("if (window.onSpeechStarted) window.onSpeechStarted();", null)
         }
     }
 
-    private fun scheduleRestartListening(delayMs: Long = 300L) {
-        if (!isWakeWordListeningEnabled || isTtsSpeaking || isFinishing) return
-        restartListeningJob?.cancel()
-        restartListeningJob = scope.launch {
-            delay(delayMs)
-            if (isActive && isWakeWordListeningEnabled && !isTtsSpeaking && !isFinishing) {
-                startContinuousListening()
-            }
+    override fun onSpeechEnded() {
+        runOnUiThread {
+            webView.evaluateJavascript("if (window.onSpeechEnded) window.onSpeechEnded();", null)
+        }
+    }
+
+    override fun onPartialSpeech(text: String) {
+        runOnUiThread {
+            val escaped = escapeJs(text)
+            webView.evaluateJavascript("if (window.onPartialSpeech) window.onPartialSpeech('$escaped');", null)
+        }
+    }
+
+    override fun onFinalSpeech(userText: String) {
+        runOnUiThread {
+            val escaped = escapeJs(userText)
+            webView.evaluateJavascript("if (window.appendUserMessage) window.appendUserMessage('$escaped'); else if (window.handleWakeCommand) window.handleWakeCommand('$escaped');", null)
+        }
+    }
+
+    override fun onAssistantResponse(response: String) {
+        runOnUiThread {
+            val escaped = escapeJs(response)
+            webView.evaluateJavascript("if (window.appendAssistantMessage) window.appendAssistantMessage('$escaped');", null)
+        }
+    }
+
+    override fun onTtsStarted() {
+        runOnUiThread {
+            webView.evaluateJavascript("if (window.onTtsStarted) window.onTtsStarted();", null)
+        }
+    }
+
+    override fun onTtsFinished() {
+        runOnUiThread {
+            webView.evaluateJavascript("if (window.onTtsFinished) window.onTtsFinished();", null)
         }
     }
 
     fun startListeningVoice() {
-        currentWakeState = WakeState.WAITING_FOR_COMMAND
-        startContinuousListening()
-    }
-
-    private fun startContinuousListening() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            return
-        }
-        if (isTtsSpeaking || isFinishing) {
-            return
-        }
-
-        runOnUiThread {
-            try {
-                speechRecognizer?.destroy()
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-                    setRecognitionListener(object : RecognitionListener {
-                        override fun onReadyForSpeech(params: Bundle?) {
-                            val st = if (currentWakeState == WakeState.WAITING_FOR_COMMAND) "listening_cmd" else "listening_wake"
-                            webView.evaluateJavascript("if (window.setWakeStatus) window.setWakeStatus('$st');", null)
-                        }
-
-                        override fun onBeginningOfSpeech() {
-                            webView.evaluateJavascript("if (window.onSpeechStarted) window.onSpeechStarted();", null)
-                        }
-
-                        override fun onRmsChanged(rmsdB: Float) {}
-                        override fun onBufferReceived(buffer: ByteArray?) {}
-
-                        override fun onEndOfSpeech() {
-                            webView.evaluateJavascript("if (window.onSpeechEnded) window.onSpeechEnded();", null)
-                        }
-
-                        override fun onError(error: Int) {
-                            webView.evaluateJavascript("if (window.onSpeechError) window.onSpeechError($error);", null)
-                            if (isWakeWordListeningEnabled && !isTtsSpeaking) {
-                                scheduleRestartListening(350L)
-                            }
-                        }
-
-                        override fun onPartialResults(partialResults: Bundle?) {
-                            val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            val text = matches?.firstOrNull()?.trim() ?: return
-
-                            if (currentWakeState == WakeState.WAITING_FOR_WAKE_WORD) {
-                                if (containsWakeWord(text)) {
-                                    val remainder = stripWakeWord(text)
-                                    if (remainder.length > 2) {
-                                        // Case A: Inline command caught in partial speech!
-                                        currentWakeState = WakeState.PROCESSING
-                                        playActivationChime()
-                                        bridge?.vibrate(40)
-                                        stopListeningVoice()
-                                        val escaped = escapeJs(remainder)
-                                        webView.evaluateJavascript("if (window.handleWakeCommand) window.handleWakeCommand('$escaped');", null)
-                                    }
-                                }
-                            }
-                        }
-
-                        override fun onResults(results: Bundle?) {
-                            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            val text = matches?.firstOrNull()?.trim() ?: ""
-
-                            if (text.isBlank()) {
-                                scheduleRestartListening(250L)
-                                return
-                            }
-
-                            if (currentWakeState == WakeState.WAITING_FOR_WAKE_WORD) {
-                                if (containsWakeWord(text)) {
-                                    val remainder = stripWakeWord(text)
-                                    if (remainder.isNotBlank()) {
-                                        // Case A: Wake word + inline command
-                                        currentWakeState = WakeState.PROCESSING
-                                        playActivationChime()
-                                        bridge?.vibrate(40)
-                                        val escaped = escapeJs(remainder)
-                                        webView.evaluateJavascript("if (window.handleWakeCommand) window.handleWakeCommand('$escaped');", null)
-                                    } else {
-                                        // Case B: Only wake word
-                                        currentWakeState = WakeState.WAITING_FOR_COMMAND
-                                        playActivationChime()
-                                        bridge?.vibrate(40)
-                                        bridge?.speak("At your service, sir")
-                                        webView.evaluateJavascript("if (window.setWakeStatus) window.setWakeStatus('listening_cmd');", null)
-                                        scheduleRestartListening(1100L)
-                                    }
-                                } else {
-                                    scheduleRestartListening(250L)
-                                }
-                            } else if (currentWakeState == WakeState.WAITING_FOR_COMMAND) {
-                                currentWakeState = WakeState.WAITING_FOR_WAKE_WORD
-                                bridge?.vibrate(30)
-                                val escaped = escapeJs(text)
-                                webView.evaluateJavascript("if (window.handleWakeCommand) window.handleWakeCommand('$escaped');", null)
-                            }
-                        }
-
-                        override fun onEvent(eventType: Int, params: Bundle?) {}
-                    })
-                }
-
-                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-                    putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "fa-IR"))
-                }
-                speechRecognizer?.startListening(intent)
-            } catch (_: Throwable) {
-                scheduleRestartListening(1500L)
-            }
-        }
+        JarvisVoiceService.forceStartListening(this)
     }
 
     fun stopListeningVoice() {
-        runOnUiThread {
-            try {
-                speechRecognizer?.stopListening()
-                speechRecognizer?.cancel()
-            } catch (_: Exception) {}
+        // Managed by JarvisVoiceService
+    }
+
+    fun setWakeWordListening(enabled: Boolean) {
+        if (JarvisVoiceService.isServiceMuted == enabled) {
+            val intent = Intent(this, JarvisVoiceService::class.java).apply {
+                action = JarvisVoiceService.ACTION_TOGGLE_MUTE
+            }
+            startService(intent)
         }
     }
 
-    private fun containsWakeWord(text: String): Boolean {
-        val lower = text.lowercase(Locale.ROOT)
-        return lower.contains("jarvis") || text.contains("جارویس")
-    }
+    fun isWakeWordListening(): Boolean = !JarvisVoiceService.isServiceMuted
 
-    private fun stripWakeWord(text: String): String {
-        var cleaned = text
-        val patterns = arrayOf(
-            "(?i)^\\s*(hey|hi|hello|ok|okay|dear)?\\s*jarvis[,.!?\\s]*",
-            "(?i)[,.!?\\s]*jarvis[,.!?\\s]*",
-            "^\\s*(سلام|هی|درود)?\\s*جارویس[,.!?\\s]*",
-            "[,.!?\\s]*جارویس[,.!?\\s]*"
-        )
-        for (pattern in patterns) {
-            cleaned = cleaned.replaceFirst(Regex(pattern), " ")
-        }
-        return cleaned.trim()
-    }
+    fun launchApp(query: String): String = AppLauncher.launchApp(this, query)
 
-    private fun playActivationChime() {
-        try {
-            val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 85)
-            tg.startTone(ToneGenerator.TONE_PROP_BEEP2, 180)
-            scope.launch {
-                delay(300)
-                try { tg.release() } catch (_: Throwable) {}
-            }
-        } catch (_: Throwable) {}
-    }
-
-    // Bulletproof Universal App & Game Launcher (Foreground Context for Xiaomi HyperOS)
-    fun launchApp(query: String): String {
-        return try {
-            var clean = query.trim().lowercase(Locale.ROOT)
-            val stripPrefixes = arrayOf(
-                "open", "launch", "start", "run", "play",
-                "باز کن", "بازکن", "اجرا کن", "اجراکن", "برنامه", "بازی"
-            )
-            for (p in stripPrefixes) {
-                if (clean.startsWith(p)) {
-                    clean = clean.removePrefix(p).trim()
-                }
-            }
-            val normalized = appAliases[clean] ?: appAliases[query.trim()] ?: clean
-
-            val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
-            }
-            val launchableApps = packageManager.queryIntentActivities(mainIntent, 0)
-
-            var matched = launchableApps.firstOrNull {
-                val label = it.loadLabel(packageManager).toString().lowercase(Locale.ROOT)
-                label == normalized || label == clean
-            }
-            if (matched == null) {
-                matched = launchableApps.firstOrNull {
-                    val label = it.loadLabel(packageManager).toString().lowercase(Locale.ROOT)
-                    label.startsWith(normalized) || label.startsWith(clean)
-                }
-            }
-            if (matched == null) {
-                matched = launchableApps.firstOrNull {
-                    val label = it.loadLabel(packageManager).toString().lowercase(Locale.ROOT)
-                    label.contains(normalized) || label.contains(clean)
-                }
-            }
-            if (matched == null) {
-                matched = launchableApps.firstOrNull {
-                    val pkg = it.activityInfo.packageName.lowercase(Locale.ROOT)
-                    pkg.contains(normalized) || pkg.contains(clean)
-                }
-            }
-
-            if (matched != null) {
-                val pkg = matched.activityInfo.packageName
-                val label = matched.loadLabel(packageManager).toString()
-                val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
-                if (launchIntent != null) {
-                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    startActivity(launchIntent)
-                    return """{"success": true, "package": "$pkg", "label": "$label"}"""
-                }
-            }
-            """{"success": false, "error": "App not found for query: $query"}"""
-        } catch (e: Exception) {
-            """{"success": false, "error": "${e.message}"}"""
-        }
-    }
-
-    fun listInstalledApps(): String {
-        return try {
-            val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
-            }
-            val launchableApps = packageManager.queryIntentActivities(mainIntent, 0)
-            val sb = StringBuilder("[")
-            launchableApps.forEachIndexed { index, resolveInfo ->
-                val label = resolveInfo.loadLabel(packageManager).toString().replace("\"", "\\\"")
-                val pkg = resolveInfo.activityInfo.packageName
-                sb.append("""{"label": "$label", "package": "$pkg"}""")
-                if (index < launchableApps.size - 1) sb.append(",")
-            }
-            sb.append("]")
-            sb.toString()
-        } catch (e: Exception) {
-            "[]"
-        }
-    }
-
-    private fun startBackgroundService() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                    return
-                }
-            }
-            val serviceIntent = Intent(this, JarvisForegroundService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
-        } catch (t: Throwable) {
-            android.util.Log.w("Jarvis", "startBackgroundService failed: ${t.message}")
-        }
-    }
+    fun listInstalledApps(): String = AppLauncher.listInstalledApps(this)
 
     private fun escapeJs(str: String): String {
         return str.replace("\\", "\\\\")
@@ -747,9 +515,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         try {
             healthJob?.cancel()
-            restartListeningJob?.cancel()
             bridge?.shutdown()
-            speechRecognizer?.destroy()
         } catch (_: Throwable) {}
         super.onDestroy()
     }

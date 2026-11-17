@@ -131,7 +131,7 @@ def _get_or_create_agent():
     _cached_tools = tools
     bus = EventBus(record_history=False)
 
-    model = cfg_status.get("active_model") or "google/gemma-3-27b-it:free"
+    model = cfg_status.get("active_model") or "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 
     agent = agent_cls(
         engine=engine,
@@ -145,16 +145,122 @@ def _get_or_create_agent():
     return _cached_agent
 
 
+def _clean_tts_response(text: str) -> str:
+    """Strip reasoning tokens <think>...</think> and markdown syntax for clean spoken voice."""
+    import re
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
+    cleaned = re.sub(r"[*_#`]", "", cleaned)
+    return cleaned.strip()
+
+
 def _speak_async(text: str) -> None:
     """Invoke Android TTS in a background thread so web response is immediate."""
+    clean_text = _clean_tts_response(text)
+    if not clean_text:
+        return
+
     def _run():
         try:
             from openjarvis.speech.android_tts import AndroidTTS
-            AndroidTTS().speak(text)
+            AndroidTTS().speak(clean_text)
         except Exception as exc:
             logger.debug("Android TTS failed: %s", exc)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
+    """Instant local fast-path (<150ms) for high-frequency direct Android commands."""
+    import re
+    from openjarvis.tools.android_tools import (
+        AndroidBatteryTool,
+        AndroidLaunchAppTool,
+        AndroidTorchTool,
+    )
+
+    msg = message.strip()
+    msg_lower = msg.lower()
+
+    # 1. Open / Launch App: English & Persian
+    m_en = re.match(r"^(?:please\s+)?(?:open|launch|start|run|play)\s+(?:the\s+)?([a-zA-Z0-9_\- ]+?)[.!?]*$", msg, re.IGNORECASE)
+    m_fa = re.match(r"^(?:لطفاً\s+|لطفا\s+)?(?:برنامه\s+|بازی\s+)?(.+?)\s*(?:رو|را)?\s*(?:باز\s*کن|اجرا\s*کن|بالا\s*بیار)[.!?]*$", msg)
+    m_fa_prefix = re.match(r"^(?:لطفاً\s+|لطفا\s+)?(?:باز\s*کن|اجرا\s*کن)\s+(?:برنامه\s+|بازی\s+)?(.+?)[.!?]*$", msg)
+
+    app_target = None
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in msg)
+    if m_en:
+        app_target = m_en.group(1).strip()
+    elif m_fa:
+        app_target = m_fa.group(1).strip()
+    elif m_fa_prefix:
+        app_target = m_fa_prefix.group(1).strip()
+
+    if app_target and len(app_target) <= 40:
+        res = AndroidLaunchAppTool().execute(app=app_target)
+        reply = (
+            f"چشم قربان، در حال باز کردن {app_target}."
+            if is_persian
+            else f"Right away, sir. Opening {app_target}."
+        )
+        pkg = res.metadata.get("package", "") if hasattr(res, "metadata") and res.metadata else ""
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_launch_app", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [{"type": "launch_app", "target": app_target, "package": pkg}],
+            "fast_path": True,
+        }
+
+    # 2. Flashlight / Torch: English & Persian
+    if re.search(r"\b(?:turn\s+on\s+flashlight|flashlight\s+on|turn\s+on\s+torch|torch\s+on|روشن\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*روشن\s*کن|فلش\s*(?:رو|را)?\s*روشن\s*کن)\b", msg_lower):
+        res = AndroidTorchTool().execute(state="on")
+        reply = "چراغ قوه روشن شد قربان." if is_persian else "Flashlight turned on, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_torch", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [{"type": "torch", "state": "on"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:turn\s+off\s+flashlight|flashlight\s+off|turn\s+off\s+torch|torch\s+off|خاموش\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*خاموش\s*کن|فلش\s*(?:رو|را)?\s*خاموش\s*کن)\b", msg_lower):
+        res = AndroidTorchTool().execute(state="off")
+        reply = "چراغ قوه خاموش شد قربان." if is_persian else "Flashlight turned off, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_torch", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [{"type": "torch", "state": "off"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:toggle\s+flashlight|flashlight|torch|چراغ\s*قوه)\b", msg_lower) and len(msg_lower.split()) <= 3:
+        res = AndroidTorchTool().execute(state="toggle")
+        reply = "چراغ قوه تغییر وضعیت داد قربان." if is_persian else "Flashlight toggled, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_torch", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [{"type": "torch", "state": "toggle"}],
+            "fast_path": True,
+        }
+
+    # 3. Battery status: English & Persian
+    if re.search(r"\b(?:battery|battery\s+status|check\s+battery|how\s+much\s+battery|باتری|درصد\s*باتری|وضعیت\s*باتری|شارژ\s*باتری|شارژ\s*چقدره)\b", msg_lower) and len(msg_lower.split()) <= 5:
+        res = AndroidBatteryTool().execute()
+        reply = (
+            f"گزارش باتری: {res.content}"
+            if is_persian
+            else f"Battery status, sir: {res.content}."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_battery", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+
+    return None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -249,6 +355,13 @@ async def get_status():
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
+    # 0. Instant Local Fast-Path (<150ms)
+    fast_res = _handle_fast_path(req.message)
+    if fast_res is not None:
+        if req.tts and fast_res.get("response"):
+            _speak_async(fast_res["response"])
+        return fast_res
+
     try:
         agent = _get_or_create_agent()
     except Exception as exc:
@@ -289,11 +402,12 @@ async def chat_endpoint(req: ChatRequest):
                     "target": req.message,
                 })
 
-        if req.tts and result.content:
-            _speak_async(result.content)
+        clean_content = _clean_tts_response(result.content) if result.content else ""
+        if req.tts and clean_content:
+            _speak_async(clean_content)
 
         return {
-            "response": result.content,
+            "response": clean_content or result.content,
             "tool_calls": tool_calls,
             "turns": result.turns,
             "client_actions": client_actions,
@@ -388,6 +502,17 @@ async def voice_upload_endpoint(
             "response": chat_res.get("response", ""),
             "tool_calls": chat_res.get("tool_calls", []),
         }
+    except RuntimeError as exc:
+        if "GEMINI_API_KEY" in str(exc) or "Gemini STT" in str(exc):
+            return {
+                "error": (
+                    "Gemini API key is not configured or is the default placeholder. "
+                    "On Android devices, speech recognition is handled directly on-device "
+                    "via native Android SpeechRecognizer."
+                )
+            }
+        logger.exception("Voice upload pipeline failed: %s", exc)
+        return {"error": f"Voice upload error: {exc}"}
     except Exception as exc:
         logger.exception("Voice upload pipeline failed: %s", exc)
         return {"error": f"Voice upload error: {exc}"}
@@ -399,7 +524,10 @@ async def _synthesize_edge_tts(
     rate: Optional[str] = "+5%",
     pitch: Optional[str] = "-2Hz",
 ) -> Response:
-    is_persian = any("\u0600" <= c <= "\u06FF" for c in text)
+    clean_text = _clean_tts_response(text)
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in clean_text)
     selected_voice = voice or ("fa-IR-FaridNeural" if is_persian else "en-GB-RyanNeural")
 
     try:
@@ -407,13 +535,26 @@ async def _synthesize_edge_tts(
         import edge_tts
 
         connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
-        comm = edge_tts.Communicate(
-            text=text,
-            voice=selected_voice,
-            rate=rate or "+5%",
-            pitch=pitch or "-2Hz",
-            connector=connector,
-        )
+        comm_kwargs = {
+            "text": clean_text,
+            "voice": selected_voice,
+            "rate": rate or "+5%",
+            "pitch": pitch or "-2Hz",
+        }
+        try:
+            import inspect
+            sig = inspect.signature(edge_tts.Communicate)
+            if "connector" in sig.parameters:
+                comm_kwargs["connector"] = connector
+        except Exception:
+            pass
+
+        try:
+            comm = edge_tts.Communicate(**comm_kwargs)
+        except TypeError:
+            comm_kwargs.pop("connector", None)
+            comm = edge_tts.Communicate(**comm_kwargs)
+
         buffer = bytearray()
         async for chunk in comm.stream():
             if chunk.get("type") == "audio":
@@ -462,7 +603,8 @@ async def tts_audio_get_endpoint(
 @app.get("/api/camera/latest")
 async def get_latest_camera():
     """Serve the latest camera photo captured by android_camera_capture."""
-    cam_file = Path("/tmp/jarvis_cam.jpg")
+    from openjarvis.tools.android_tools import get_cam_photo_path
+    cam_file = get_cam_photo_path()
     if not cam_file.exists():
         raise HTTPException(status_code=404, detail="No camera photo captured yet")
     return FileResponse(cam_file, media_type="image/jpeg")

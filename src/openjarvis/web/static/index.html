@@ -801,10 +801,10 @@
 
         <div class="form-group">
           <label>Active Model ID</label>
-          <input type="text" id="input-active-model" placeholder="e.g. google/gemma-3-27b-it:free">
+          <input type="text" id="input-active-model" placeholder="e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free">
           <div class="model-presets">
             <span class="preset-pill" onclick="selectModelPreset('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')">⚡ Nemotron Reasoning (Free)</span>
-            <span class="preset-pill" onclick="selectModelPreset('google/gemma-4-31b-it:free')">✨ Gemma 4 31B (Free)</span>
+            <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Free)</span>
             <span class="preset-pill" onclick="selectModelPreset('openrouter/free')">🆓 OpenRouter Free</span>
             <span class="preset-pill" onclick="selectModelPreset('gemini-2.5-flash')">⚡ Gemini 2.5 Flash</span>
           </div>
@@ -1250,92 +1250,9 @@
 
     async function toggleVoice() {
       const micBtn = document.getElementById('btn-mic');
-      const bridge = window.JarvisAndroid || window.AndroidJarvis;
+      const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
 
-      // 1. If currently recording with MediaRecorder, stop and upload immediately
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        if (recordTimer) clearTimeout(recordTimer);
-        mediaRecorder.stop();
-        return;
-      }
-
-      // 2. Try Web/App direct mic recording via navigator.mediaDevices
-      if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          audioChunks = [];
-
-          let mimeType = 'audio/webm';
-          if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
-            if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-              mimeType = 'audio/webm;codecs=opus';
-            } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-              mimeType = 'audio/mp4';
-            } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
-              mimeType = 'audio/ogg';
-            }
-          }
-
-          mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-
-          mediaRecorder.ondataavailable = (event) => {
-            if (event.data && event.data.size > 0) {
-              audioChunks.push(event.data);
-            }
-          };
-
-          mediaRecorder.onstop = async () => {
-            micBtn.classList.remove('recording');
-            stream.getTracks().forEach((track) => track.stop());
-
-            if (audioChunks.length === 0) return;
-            const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
-
-            showTypingIndicator();
-            try {
-              const formData = new FormData();
-              const ext = mimeType.includes('mp4') ? 'm4a' : (mimeType.includes('ogg') ? 'ogg' : 'webm');
-              formData.append('audio', audioBlob, `voice_input.${ext}`);
-              formData.append('tts', ttsEnabled ? 'true' : 'false');
-
-              const resp = await fetch('/api/voice/upload', {
-                method: 'POST',
-                body: formData
-              });
-              const data = await resp.json();
-              removeTypingIndicator();
-
-              if (data.transcription) {
-                appendMessage('user', data.transcription);
-                if (data.response) {
-                  appendMessage('assistant', data.response, data.tool_calls || []);
-                }
-              } else if (data.error) {
-                appendMessage('assistant', '⚠️ Voice Error: ' + data.error);
-              }
-            } catch (err) {
-              removeTypingIndicator();
-              appendMessage('assistant', '⚠️ Voice upload failed: ' + err.message);
-            }
-          };
-
-          mediaRecorder.start();
-          micBtn.classList.add('recording');
-
-          // Auto stop after 7 seconds max if user doesn't tap again
-          recordTimer = setTimeout(() => {
-            if (mediaRecorder && mediaRecorder.state === 'recording') {
-              mediaRecorder.stop();
-            }
-          }, 7000);
-
-          return;
-        } catch (mediaErr) {
-          console.warn('getUserMedia unavailable or denied, falling back:', mediaErr);
-        }
-      }
-
-      // 3. Fallback to native Android Bridge if available
+      // 1. Android Native App: Always use on-device SpeechRecognizer for free, zero-latency speech-to-text
       if (bridge && typeof bridge.startVoiceRecognition === 'function') {
         if (micBtn.classList.contains('recording')) {
           if (typeof bridge.stopVoiceRecognition === 'function') {
@@ -1343,8 +1260,54 @@
           }
           micBtn.classList.remove('recording');
         } else {
+          micBtn.classList.add('recording');
           bridge.startVoiceRecognition();
         }
+        return;
+      }
+
+      // 2. Browser Web Speech API: Free, on-device browser speech recognition
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        if (window._browserRecognizer) {
+          try { window._browserRecognizer.stop(); } catch (_) {}
+          window._browserRecognizer = null;
+          micBtn.classList.remove('recording');
+          return;
+        }
+        try {
+          const recognizer = new SpeechRecognition();
+          recognizer.lang = 'en-US';
+          recognizer.interimResults = false;
+          recognizer.maxAlternatives = 1;
+          window._browserRecognizer = recognizer;
+          micBtn.classList.add('recording');
+
+          recognizer.onresult = (event) => {
+            micBtn.classList.remove('recording');
+            window._browserRecognizer = null;
+            const text = event.results[0][0].transcript;
+            if (text && text.trim()) {
+              sendMessage(text.trim());
+            }
+          };
+          recognizer.onerror = () => {
+            micBtn.classList.remove('recording');
+            window._browserRecognizer = null;
+          };
+          recognizer.onend = () => {
+            micBtn.classList.remove('recording');
+            window._browserRecognizer = null;
+          };
+          recognizer.start();
+          return;
+        } catch (_) {}
+      }
+
+      // 3. Fallback: MediaRecorder audio upload (only if SpeechRecognition unavailable)
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        if (recordTimer) clearTimeout(recordTimer);
+        mediaRecorder.stop();
         return;
       }
 

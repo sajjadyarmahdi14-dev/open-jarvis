@@ -408,6 +408,10 @@ def generate_openai_compat_rest(
         "stream": False,
         **kwargs,
     }
+    # Optimize TTFT (time-to-first-token) on reasoning models on OpenRouter
+    model_lower = model.lower()
+    if ("openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen"))) and "reasoning" not in payload:
+        payload["reasoning"] = {"effort": "low"}
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:
@@ -507,6 +511,10 @@ async def stream_full_openai_compat_rest(
         "stream": True,
         **kwargs,
     }
+    # Optimize TTFT (time-to-first-token) on reasoning models on OpenRouter
+    model_lower = model.lower()
+    if ("openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen"))) and "reasoning" not in payload:
+        payload["reasoning"] = {"effort": "low"}
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:

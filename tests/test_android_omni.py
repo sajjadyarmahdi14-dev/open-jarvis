@@ -224,12 +224,12 @@ def test_config_api_endpoints():
     # 2. POST /api/config
     post_res = client.post(
         "/api/config",
-        json={"active_model": "google/gemma-3-27b-it:free"}
+        json={"active_model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
     )
     assert post_res.status_code == 200
     pdata = post_res.json()
     assert pdata["success"] is True
-    assert pdata["config"]["active_model"] == "google/gemma-3-27b-it:free"
+    assert pdata["config"]["active_model"] == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 
 
 def test_sms_inbox():

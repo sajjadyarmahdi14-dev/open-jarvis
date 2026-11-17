@@ -232,12 +232,12 @@ class JarvisAndroidBridge(
 
     @JavascriptInterface
     fun acquireWakeLock() {
-        JarvisForegroundService.acquireWakeLock(activity)
+        JarvisVoiceService.acquireWakeLock(activity)
     }
 
     @JavascriptInterface
     fun releaseWakeLock() {
-        JarvisForegroundService.releaseWakeLock()
+        JarvisVoiceService.releaseWakeLock()
     }
 
     fun shutdown() {

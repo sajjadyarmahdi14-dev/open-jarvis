@@ -40,7 +40,8 @@ class GeminiSpeechBackend(SpeechBackend):
 
     def health(self) -> bool:
         """True if a valid Gemini API key is present."""
-        return bool(self.api_key.strip())
+        k = self.api_key.strip()
+        return bool(k) and k != "your_gemini_api_key_here"
 
     def supported_formats(self) -> List[str]:
         return ["wav", "mp3", "m4a", "ogg", "aac", "flac", "webm"]
@@ -55,8 +56,8 @@ class GeminiSpeechBackend(SpeechBackend):
         """Transcribe audio bytes or audio file path using Gemini multimodal audio REST call."""
         if not self.health():
             raise RuntimeError(
-                "Gemini STT requires GEMINI_API_KEY or GOOGLE_API_KEY. "
-                "Set it in your .env file."
+                "Gemini STT requires a valid GEMINI_API_KEY. "
+                "Default placeholder 'your_gemini_api_key_here' is not valid."
             )
 
         if isinstance(audio, (str, Path)):

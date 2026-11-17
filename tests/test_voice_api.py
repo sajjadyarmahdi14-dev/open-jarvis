@@ -216,3 +216,44 @@ def test_client_actions_in_chat_and_tools():
     assert actions[0]["type"] == "launch_app"
     assert "Telegram" in actions[0]["target"] or "telegram" in actions[0]["package"].lower()
 
+
+def test_fast_path_and_clean_tts():
+    """Verify <150ms instant local fast-path and <think> token stripping."""
+    client = TestClient(app)
+
+    # 1. English fast path app launch
+    resp1 = client.post("/api/chat", json={"message": "open camera"})
+    assert resp1.status_code == 200
+    d1 = resp1.json()
+    assert d1.get("fast_path") is True
+    assert "Opening camera" in d1["response"]
+    assert d1["client_actions"][0]["type"] == "launch_app"
+
+    # 2. Persian fast path app launch
+    resp2 = client.post("/api/chat", json={"message": "دوربین رو باز کن"})
+    assert resp2.status_code == 200
+    d2 = resp2.json()
+    assert d2.get("fast_path") is True
+    assert "در حال باز کردن" in d2["response"]
+
+    # 3. Flashlight fast path
+    resp3 = client.post("/api/chat", json={"message": "turn on flashlight"})
+    assert resp3.status_code == 200
+    d3 = resp3.json()
+    assert d3.get("fast_path") is True
+    assert "Flashlight" in d3["response"]
+
+    # 4. Battery fast path
+    resp4 = client.post("/api/chat", json={"message": "battery status"})
+    assert resp4.status_code == 200
+    d4 = resp4.json()
+    assert d4.get("fast_path") is True
+    assert "Battery" in d4["response"]
+
+    # 5. Clean reasoning blocks <think>...</think>
+    from openjarvis.web.server import _clean_tts_response
+    raw = "<think>Let me think carefully about this...</think>Hello, sir. How can I help you today?"
+    cleaned = _clean_tts_response(raw)
+    assert cleaned == "Hello, sir. How can I help you today?"
+    assert "<think>" not in cleaned
+

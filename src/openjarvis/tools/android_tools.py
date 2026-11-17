@@ -22,6 +22,8 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.core.registry import ToolRegistry
@@ -79,6 +81,38 @@ def _run_termux_cmd(
         )
     except Exception as exc:
         return False, f"Execution failed for '{binary}': {exc}"
+
+
+def get_cam_photo_path() -> Path:
+    """Return a guaranteed-writable file path for camera photo capture on Android / Termux.
+
+    Avoids using root '/tmp' which is read-only and permission denied on Android devices.
+    """
+    candidates = [
+        os.environ.get("TMPDIR"),
+        "/data/data/com.termux/files/usr/tmp",
+        str(Path.home() / ".openjarvis"),
+        tempfile.gettempdir(),
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        p = Path(c)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            test_f = p / ".cam_write_test"
+            test_f.write_text("ok")
+            if test_f.exists():
+                test_f.unlink()
+            return p / "jarvis_cam.jpg"
+        except Exception:
+            continue
+    fallback = Path(tempfile.gettempdir()) / "jarvis_cam.jpg"
+    try:
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -682,16 +716,18 @@ class AndroidLaunchAppTool(BaseTool):
         return ToolSpec(
             name="android_launch_app",
             description=(
-                "Launch an Android application or game by common name (e.g. 'Telegram', 'WhatsApp', "
-                "'Minecraft', 'Roblox', 'YouTube', 'Chrome', 'Settings', 'Camera', 'Termux', "
-                "'Spotify', 'Instagram', 'Gmail', 'Maps', 'Calculator') or package name."
+                "Launch an Android application or game by common name (e.g. 'Camera', 'Telegram', 'WhatsApp', "
+                "'Minecraft', 'Roblox', 'YouTube', 'Chrome', 'Settings', 'Termux', "
+                "'Spotify', 'Instagram', 'Gmail', 'Maps', 'Calculator') or package name. "
+                "When the user asks to open or launch the camera ('open camera' / 'دوربین رو باز کن'), "
+                "ALWAYS call this tool with app='camera' (do NOT call android_camera_capture)."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "app": {
                         "type": "string",
-                        "description": "Common name of the app or game (e.g. 'Telegram', 'Minecraft', 'YouTube', 'Settings', 'Camera') or package name",
+                        "description": "Common name of the app or game (e.g. 'Camera', 'Telegram', 'Minecraft', 'YouTube', 'Settings') or package name",
                     },
                     "package": {
                         "type": "string",
@@ -753,13 +789,15 @@ class AndroidLaunchAppTool(BaseTool):
         }
 
         # Specialized action shortcuts
-        if app_name.lower() in ("camera", "take photo", "photo"):
-            ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.media.action.IMAGE_CAPTURE"])
+        if app_name.lower() in ("camera", "take photo", "photo", "دوربین"):
+            ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.media.action.STILL_IMAGE_CAMERA"])
+            if not ok:
+                ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-n", "com.android.camera/.Camera"])
             return ToolResult(
                 tool_name=self.spec.name,
                 content="Launched Camera app via Android Intent",
                 success=True,
-                metadata={"client_action": "launch_app", "target": "Camera", "package": "com.android.camera"},
+                metadata={"client_action": "launch_app", "target": "camera", "package": "com.android.camera"},
             )
 
         if app_name.lower() in ("settings", "system settings"):
@@ -1175,7 +1213,11 @@ class AndroidCameraCaptureTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="android_camera_capture",
-            description="Capture a photo with the Android camera and analyze the scene.",
+            description=(
+                "Capture a background snapshot photo with the Android camera and analyze the scene with vision AI. "
+                "NOTE: This tool is strictly for capturing an image to analyze in background; "
+                "to launch or open the camera app on screen for the user, use android_launch_app(app='camera') instead."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -1195,7 +1237,8 @@ class AndroidCameraCaptureTool(BaseTool):
     def execute(self, **params: Any) -> ToolResult:
         camera_id = int(params.get("camera_id", 0))
         prompt = str(params.get("prompt", "Describe what you see in this photo captured by the Android camera.")).strip()
-        out_file = "/tmp/jarvis_cam.jpg"
+        out_path = get_cam_photo_path()
+        out_file = str(out_path)
 
         if os.path.exists(out_file):
             try:
