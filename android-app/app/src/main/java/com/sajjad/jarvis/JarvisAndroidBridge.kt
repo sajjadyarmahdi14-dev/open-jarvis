@@ -84,6 +84,16 @@ class JarvisAndroidBridge(
     fun isNativeApp(): Boolean = true
 
     @JavascriptInterface
+    fun getServerUrl(): String {
+        return activity.getStoredServerUrl()
+    }
+
+    @JavascriptInterface
+    fun setServerUrl(url: String) {
+        activity.setStoredServerUrl(url)
+    }
+
+    @JavascriptInterface
     fun speak(text: String) {
         if (text.isBlank()) return
         activity.runOnUiThread {

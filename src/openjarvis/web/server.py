@@ -57,6 +57,8 @@ class ChatRequest(BaseModel):
     message: str
     history: Optional[List[Dict[str, str]]] = None
     tts: Optional[bool] = False
+    device_battery: Optional[int] = None
+    device_charging: Optional[bool] = None
 
 
 class TTSRequest(BaseModel):
@@ -174,7 +176,11 @@ def _speak_async(text: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
+def _handle_fast_path(
+    message: str,
+    device_battery: Optional[int] = None,
+    device_charging: Optional[bool] = None,
+) -> Optional[Dict[str, Any]]:
     """Instant local fast-path (<50ms) for high-frequency direct Android commands and greetings."""
     import re
     from datetime import datetime
@@ -311,8 +317,23 @@ def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
             "fast_path": True,
         }
 
-    # 4. Battery status: English & Persian
+    # 4. Battery status: English & Persian (Works remotely on VPS via device telemetry!)
     if re.search(r"\b(?:battery|battery\s+status|check\s+battery|how\s+much\s+battery|باتری|درصد\s*باتری|وضعیت\s*باتری|شارژ\s*باتری|شارژ\s*چقدره)\b", msg_lower) and len(msg_lower.split()) <= 5:
+        if device_battery is not None and device_battery >= 0:
+            chg_str = " (در حال شارژ)" if device_charging else ""
+            chg_en = " (charging)" if device_charging else ""
+            reply = (
+                f"میزان شارژ باتری دستگاه شما {device_battery}% است{chg_str} قربان."
+                if is_persian
+                else f"Device battery is at {device_battery}%{chg_en}, sir."
+            )
+            return {
+                "response": reply,
+                "tool_calls": [],
+                "turns": 1,
+                "client_actions": [{"type": "battery_status", "percentage": device_battery, "charging": device_charging}],
+                "fast_path": True,
+            }
         res = AndroidBatteryTool().execute()
         reply = (
             f"گزارش باتری: {res.content}"
@@ -356,6 +377,64 @@ def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
             "tool_calls": [{"name": "android_volume", "content": res.content, "success": res.success}],
             "turns": 1,
             "client_actions": [{"type": "volume", "action": "mute"}],
+            "fast_path": True,
+        }
+
+    # 6. Set Alarm
+    m_alarm_en = re.search(r"\b(?:set\s+(?:an?\s+)?alarm\s+(?:for|at)|alarm\s+at|wake\s+me\s+up\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", msg_lower)
+    m_alarm_fa = re.search(r"\b(?:ساعت\s*(\d{1,2})(?::(\d{2}))?\s*(?:زنگ\s*بذار|آلارم\s*بذار|بیدارم\s*کن))\b", msg_lower)
+    if m_alarm_en or m_alarm_fa:
+        h = 7
+        m = 0
+        if m_alarm_en:
+            h = int(m_alarm_en.group(1))
+            m = int(m_alarm_en.group(2) or 0)
+            ampm = (m_alarm_en.group(3) or "").lower()
+            if ampm == "pm" and h < 12:
+                h += 12
+            elif ampm == "am" and h == 12:
+                h = 0
+        elif m_alarm_fa:
+            h = int(m_alarm_fa.group(1))
+            m = int(m_alarm_fa.group(2) or 0)
+        reply = (
+            f"آلارم برای ساعت {h:02d}:{m:02d} تنظیم شد قربان."
+            if is_persian
+            else f"Alarm set for {h:02d}:{m:02d}, sir."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_alarm", "content": f"Alarm set for {h:02d}:{m:02d}", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "alarm", "hour": h, "minute": m, "message": "Jarvis Alarm"}],
+            "fast_path": True,
+        }
+
+    # 7. Phone call
+    m_call_en = re.search(r"\b(?:call|phone|dial)\s+([0-9+]+)\b", msg_lower)
+    m_call_fa = re.search(r"\b(?:تماس\s+بگیر\s+با|زنگ\s+بزن\s+به)\s+([0-9+]+)\b", msg_lower)
+    if m_call_en or m_call_fa:
+        num = (m_call_en.group(1) if m_call_en else m_call_fa.group(1)).strip()
+        reply = f"در حال برقراری تماس با {num} قربان." if is_persian else f"Calling {num}, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_call", "content": f"Calling {num}", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "call", "number": num}],
+            "fast_path": True,
+        }
+
+    # 8. Open URL / Website
+    m_url = re.search(r"\b(?:open\s+website|open\s+url|go\s+to)\s+(https?://[^\s]+|[a-zA-Z0-9.\-]+\.[a-z]{2,})\b", msg_lower)
+    if m_url:
+        raw_url = m_url.group(1)
+        full_url = raw_url if raw_url.startswith("http") else f"https://{raw_url}"
+        reply = f"Opening {full_url}, sir."
+        return {
+            "response": reply,
+            "tool_calls": [],
+            "turns": 1,
+            "client_actions": [{"type": "open_url", "url": full_url}],
             "fast_path": True,
         }
 
@@ -460,8 +539,12 @@ async def get_status():
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
-    # 0. Instant Local Fast-Path (<150ms)
-    fast_res = _handle_fast_path(req.message)
+    # 0. Instant Local Fast-Path (<100ms) with device telemetry
+    fast_res = _handle_fast_path(
+        req.message,
+        device_battery=req.device_battery,
+        device_charging=req.device_charging,
+    )
     if fast_res is not None:
         if req.tts and fast_res.get("response"):
             _speak_async(fast_res["response"])
@@ -703,9 +786,15 @@ async def voice_vad_utterance_endpoint(request: Request):
     is_awake = (now < _voice_session.get("awake_until", 0.0))
     is_persian = any("\u0600" <= c <= "\u06FF" for c in transcript)
 
-    # Wake patterns (including phonetic variants)
+    # Extract device telemetry (if provided by native phone client)
+    battery_param = request.query_params.get("battery") or request.headers.get("x-device-battery")
+    charging_param = request.query_params.get("charging") or request.headers.get("x-device-charging")
+    dev_battery = int(battery_param) if battery_param and battery_param.isdigit() else None
+    dev_charging = str(charging_param).lower() in ("true", "1", "yes") if charging_param else None
+
+    # Wake patterns (including phonetic variants: javis, travis, service, etc.)
     wake_regex = re.compile(
-        r"^(?:(?:hey|hi|ok|okay)\s+)?(?:jarvis|service|harvey|travis|چاویس|جارویس|جارویز)(?:[,\s]+(.*))?$",
+        r"^(?:(?:hey|hi|ok|okay|dear)\s+)?(?:jarvis\s+jarvis|jarvis|javis|service|harvey|travis|چاویس|جارویس|جارویز)(?:[,\s]+(.*))?$",
         re.IGNORECASE,
     )
     m_wake = wake_regex.match(transcript)
@@ -745,8 +834,13 @@ async def voice_vad_utterance_endpoint(request: Request):
             "state": "STANDBY",
         }
 
-    # Execute the command
-    chat_req = ChatRequest(message=command_to_run, tts=False)
+    # Execute the command with device telemetry
+    chat_req = ChatRequest(
+        message=command_to_run,
+        tts=False,
+        device_battery=dev_battery,
+        device_charging=dev_charging,
+    )
     chat_res = await chat_endpoint(chat_req)
 
     return {
@@ -906,8 +1000,8 @@ async def direct_tool_endpoint(tool_name: str, params: Optional[Dict[str, Any]] 
         }
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765):
-    """Start uvicorn server."""
+def run_server(host: str = "0.0.0.0", port: int = 8765):
+    """Start uvicorn server bound to 0.0.0.0 for local and remote VPS access."""
     import uvicorn
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
@@ -915,8 +1009,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8765):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Open Jarvis Web Server")
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind (0.0.0.0 for all interfaces)")
     parser.add_argument("--port", type=int, default=8765, help="Port to bind")
     args, _ = parser.parse_known_args()
     run_server(host=args.host, port=args.port)
-    run_server()

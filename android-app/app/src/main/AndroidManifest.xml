@@ -6,10 +6,15 @@
     <!-- Essential Network Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
     <!-- Audio & Voice Control -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Alarm & Clock Control -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
     <!-- Camera Vision & Flashlight -->
     <uses-permission android:name="android.permission.CAMERA" />

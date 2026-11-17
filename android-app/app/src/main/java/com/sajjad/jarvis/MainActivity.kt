@@ -55,8 +55,27 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
     private var healthJob: Job? = null
     private var isUrlLoaded = false
 
-    private val targetUrl = "http://127.0.0.1:8765"
+    private var targetUrl = "http://127.0.0.1:8765"
     private val permissionsCode = 101
+
+    fun getStoredServerUrl(): String {
+        val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        val raw = prefs.getString("server_url", "http://127.0.0.1:8765")?.trim() ?: "http://127.0.0.1:8765"
+        return if (raw.isBlank()) "http://127.0.0.1:8765" else raw.removeSuffix("/")
+    }
+
+    fun setStoredServerUrl(newUrl: String) {
+        val clean = newUrl.trim().removeSuffix("/")
+        if (clean.isBlank()) return
+        val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("server_url", clean).apply()
+        runOnUiThread {
+            targetUrl = clean
+            isUrlLoaded = false
+            startHealthCheckLoop()
+            webView.loadUrl(clean)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +89,7 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
 
     private fun initApp(savedInstanceState: Bundle?) {
         setContentView(R.layout.activity_main)
+        targetUrl = getStoredServerUrl()
         applyEdgeToEdgeDarkTheme()
 
         webView = findViewById(R.id.webView)
@@ -108,9 +128,8 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
 
     override fun onPause() {
         super.onPause()
-        if (JarvisVoiceService.serviceListener === this) {
-            JarvisVoiceService.serviceListener = null
-        }
+        // Background AudioRecord & native playback run 100% inside JarvisVoiceService!
+        // Never stop JarvisVoiceService or AudioRecord when backgrounded.
     }
 
     private fun applyEdgeToEdgeDarkTheme() {

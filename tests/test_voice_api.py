@@ -385,4 +385,70 @@ def test_vad_utterance_wake_word_and_commands(monkeypatch):
         assert d4["status"] == "executed"
         assert "It is currently" in d4["response"]
 
+    # 5. Phonetic wake word ("javis") -> triggers wake
+    _voice_session["state"] = "STANDBY"
+    _voice_session["awake_until"] = 0.0
+    with patch("speech_recognition.Recognizer.recognize_google", return_value="javis"):
+        r5 = client.post("/api/voice/vad_utterance", content=wav_data, headers={"Content-Type": "audio/wav"})
+        assert r5.status_code == 200
+        d5 = r5.json()
+        assert d5["status"] == "awake"
+
+
+def test_remote_vps_battery_telemetry():
+    """Verify device battery telemetry sent by Android phone works even on remote VPS."""
+    client = TestClient(app)
+
+    # English battery with telemetry
+    resp1 = client.post("/api/chat", json={
+        "message": "check battery",
+        "device_battery": 88,
+        "device_charging": True
+    })
+    assert resp1.status_code == 200
+    d1 = resp1.json()
+    assert d1.get("fast_path") is True
+    assert "88%" in d1["response"]
+    assert "charging" in d1["response"]
+
+    # Persian battery with telemetry
+    resp2 = client.post("/api/chat", json={
+        "message": "وضعیت باتری چقدره",
+        "device_battery": 45,
+        "device_charging": False
+    })
+    assert resp2.status_code == 200
+    d2 = resp2.json()
+    assert d2.get("fast_path") is True
+    assert "45%" in d2["response"]
+
+
+def test_alarm_and_phone_call_fast_paths():
+    """Verify native client actions for alarm and phone calls."""
+    client = TestClient(app)
+
+    # 1. Alarm English
+    resp1 = client.post("/api/chat", json={"message": "set an alarm for 7:30 am"})
+    assert resp1.status_code == 200
+    d1 = resp1.json()
+    assert d1.get("fast_path") is True
+    assert "07:30" in d1["response"]
+    assert any(a.get("type") == "alarm" and a.get("hour") == 7 and a.get("minute") == 30 for a in d1["client_actions"])
+
+    # 2. Alarm Persian
+    resp2 = client.post("/api/chat", json={"message": "ساعت 8 زنگ بذار"})
+    assert resp2.status_code == 200
+    d2 = resp2.json()
+    assert d2.get("fast_path") is True
+    assert "08:00" in d2["response"]
+
+    # 3. Phone call
+    resp3 = client.post("/api/chat", json={"message": "call 09123456789"})
+    assert resp3.status_code == 200
+    d3 = resp3.json()
+    assert d3.get("fast_path") is True
+    assert "09123456789" in d3["response"]
+    assert any(a.get("type") == "call" and a.get("number") == "09123456789" for a in d3["client_actions"])
+
+
 

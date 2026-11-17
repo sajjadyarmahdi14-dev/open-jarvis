@@ -793,6 +793,12 @@
 
       <div class="modal-body">
         <div class="form-group">
+          <label>Backend Server URL <span class="badge" style="background:rgba(6,182,212,0.15); color:var(--cyan)">VPS / Termux</span></label>
+          <input type="text" id="input-server-url" placeholder="http://127.0.0.1:8765 or http://<VPS_IP>:8765" autocomplete="off">
+          <small>Default is <code>http://127.0.0.1:8765</code>. Set to your Linux VPS IP to host OpenJarvis 24/7 without Termux.</small>
+        </div>
+
+        <div class="form-group">
           <label>OpenRouter API Key <span class="badge" id="openrouter-badge">Checking...</span></label>
           <div class="input-with-button">
             <input type="password" id="input-openrouter-key" placeholder="sk-or-v1-..." autocomplete="off">
@@ -812,11 +818,11 @@
 
         <div class="form-group">
           <label>Active Model ID</label>
-          <input type="text" id="input-active-model" placeholder="e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free">
+          <input type="text" id="input-active-model" placeholder="e.g. google/gemma-4-31b-it:free">
           <div class="model-presets">
-            <span class="preset-pill" onclick="selectModelPreset('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')">⚡ Nemotron Reasoning (Free)</span>
-            <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Free)</span>
+            <span class="preset-pill" onclick="selectModelPreset('google/gemma-4-31b-it:free')">⚡ Gemma 4 31B (Fast & Free)</span>
             <span class="preset-pill" onclick="selectModelPreset('openrouter/free')">🆓 OpenRouter Free</span>
+            <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Free)</span>
             <span class="preset-pill" onclick="selectModelPreset('gemini-2.5-flash')">⚡ Gemini 2.5 Flash</span>
           </div>
         </div>
@@ -949,8 +955,14 @@
     // Authentic British Neural Voice Player (with fallback to Native UK Male TTS)
     async function playBritishTTS(text) {
       const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
-      if (bridge && typeof bridge.speakBritish === 'function') {
-        bridge.speakBritish(text);
+      if (bridge) {
+        // In native Android app, JarvisVoiceService is the sole audio player!
+        // Never play Web Audio in WebView to prevent double voice overlap!
+        if (typeof bridge.speakBritish === 'function') {
+          bridge.speakBritish(text);
+        } else if (typeof bridge.speak === 'function') {
+          bridge.speak(text);
+        }
         return;
       }
       if (bridge && typeof bridge.onTtsStarted === 'function') {
@@ -1457,6 +1469,16 @@
         }
 
         document.getElementById('input-active-model').value = data.active_model || '';
+
+        const serverInput = document.getElementById('input-server-url');
+        if (serverInput) {
+          const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
+          if (bridge && typeof bridge.getServerUrl === 'function') {
+            serverInput.value = bridge.getServerUrl() || 'http://127.0.0.1:8765';
+          } else {
+            serverInput.value = localStorage.getItem('server_url') || window.location.origin || 'http://127.0.0.1:8765';
+          }
+        }
       } catch (err) {
         console.error('Failed to load config:', err);
       }
@@ -1468,6 +1490,16 @@
       const orKey = document.getElementById('input-openrouter-key').value.trim();
       const gemKey = document.getElementById('input-gemini-key').value.trim();
       const model = document.getElementById('input-active-model').value.trim();
+
+      const serverInput = document.getElementById('input-server-url');
+      if (serverInput && serverInput.value.trim()) {
+        const newServerUrl = serverInput.value.trim().replace(/\/+$/, '');
+        localStorage.setItem('server_url', newServerUrl);
+        const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
+        if (bridge && typeof bridge.setServerUrl === 'function') {
+          bridge.setServerUrl(newServerUrl);
+        }
+      }
 
       saveBtn.disabled = true;
       saveBtn.innerText = 'Hot-Reloading Engine...';
