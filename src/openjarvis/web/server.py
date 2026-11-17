@@ -77,9 +77,18 @@ class VoiceRequest(BaseModel):
     tts: Optional[bool] = False
 
 
+class TestConnectionRequest(BaseModel):
+    server_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    provider: Optional[str] = None
+    save: Optional[bool] = True
+
+
 class ConfigUpdateRequest(BaseModel):
     openrouter_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
+    api_key: Optional[str] = None
     openrouter_model: Optional[str] = None
     gemini_model: Optional[str] = None
     active_model: Optional[str] = None
@@ -568,9 +577,18 @@ async def update_config(req: ConfigUpdateRequest):
     """Save persistent configuration and hot-reload the inference engine."""
     global _cached_agent, _cached_tools
 
+    op_key = req.openrouter_api_key
+    gem_key = req.gemini_api_key
+    if req.api_key:
+        clean_k = req.api_key.strip()
+        if clean_k.startswith("AIza"):
+            gem_key = clean_k
+        else:
+            op_key = clean_k
+
     updated_status = save_persistent_config(
-        openrouter_api_key=req.openrouter_api_key,
-        gemini_api_key=req.gemini_api_key,
+        openrouter_api_key=op_key,
+        gemini_api_key=gem_key,
         openrouter_model=req.openrouter_model,
         gemini_model=req.gemini_model,
         active_model=req.active_model,
@@ -592,6 +610,126 @@ async def update_config(req: ConfigUpdateRequest):
             "success": True,
             "config": updated_status,
             "warning": f"Config saved, but engine check reported: {exc}",
+        }
+
+
+@app.post("/api/test-connection")
+async def test_connection_endpoint(req: TestConnectionRequest, request: Request):
+    """Test AI model connection with provided API key and model parameters."""
+    import time
+    import httpx
+    from openjarvis.core.types import Message, Role
+
+    key = (req.api_key or "").strip()
+    if not key:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            key = auth_header[7:].strip()
+
+    model = (req.model or "").strip()
+    if not model or model == "openrouter/free":
+        model = os.environ.get("DEFAULT_MODEL") or DEFAULT_OPENROUTER_MODEL
+
+    # If save is requested and key is provided, persist it immediately to .env & config
+    if key and req.save:
+        op_key = None if key.startswith("AIza") else key
+        gem_key = key if key.startswith("AIza") else None
+        save_persistent_config(
+            openrouter_api_key=op_key,
+            gemini_api_key=gem_key,
+            active_model=model,
+        )
+        global _cached_agent, _cached_tools
+        _cached_agent = None
+        _cached_tools = None
+
+    if not key:
+        if "gemini" in model.lower():
+            key = os.environ.get("GEMINI_API_KEY", "")
+        else:
+            key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+
+    t0 = time.monotonic()
+    try:
+        is_gemini = "gemini" in model.lower() or (key and key.startswith("AIza"))
+        test_messages = [Message(role=Role.USER, content="Ping. Respond with 'Pong' and nothing else.")]
+
+        if is_gemini:
+            if not key or key == "your_gemini_api_key_here":
+                return {
+                    "status": "error",
+                    "message": "Gemini API key is required but missing.",
+                    "status_code": 401,
+                }
+            from openjarvis.engine.cloud_rest import generate_gemini_rest
+            with httpx.Client(timeout=10.0) as client:
+                result = generate_gemini_rest(
+                    client=client,
+                    api_key=key,
+                    model=model,
+                    messages=test_messages,
+                    max_tokens=30,
+                )
+        else:
+            base_url = os.environ.get("OPENAI_BASE_URL") or "https://openrouter.ai/api/v1"
+            from openjarvis.engine.cloud_rest import generate_openai_compat_rest
+            with httpx.Client(timeout=12.0) as client:
+                result = generate_openai_compat_rest(
+                    client=client,
+                    base_url=base_url,
+                    api_key=key,
+                    model=model,
+                    messages=test_messages,
+                    max_tokens=30,
+                )
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        content = result.get("content", "").strip()
+        used_model = result.get("model", model)
+        return {
+            "status": "success",
+            "response": content or "Pong",
+            "model": used_model,
+            "latency_ms": elapsed_ms,
+            "message": f"Connection Successful! AI Model responded in {elapsed_ms}ms.",
+        }
+    except httpx.HTTPStatusError as exc:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        code = exc.response.status_code
+        err_text = exc.response.text
+        try:
+            err_json = exc.response.json()
+            if "error" in err_json:
+                err_text = err_json["error"].get("message") or str(err_json["error"])
+        except Exception:
+            pass
+        if code == 401:
+            msg = f"Invalid API Key (HTTP 401 Unauthorized): {err_text}"
+        elif code == 403:
+            msg = f"Access Forbidden / Restriction (HTTP 403): {err_text}"
+        elif code == 404:
+            msg = f"Model Not Found / Unavailable (HTTP 404): {err_text}"
+        elif code == 429:
+            msg = f"Rate Limit / Quota Exceeded (HTTP 429): {err_text}"
+        else:
+            msg = f"HTTP {code} Error: {err_text}"
+        return {
+            "status": "error",
+            "message": msg,
+            "status_code": code,
+            "latency_ms": elapsed_ms,
+        }
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        return {
+            "status": "error",
+            "message": f"Network connection failed: {exc}",
+            "status_code": 504,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Test connection error: {exc}",
+            "status_code": 500,
         }
 
 
@@ -643,11 +781,18 @@ async def get_device_apps():
 
 
 @app.post("/api/chat")
-async def chat_endpoint(req: ChatRequest):
+async def chat_endpoint(req: ChatRequest, request: Request = None):
     global _last_device_battery, _last_device_charging
     if req.device_battery is not None and req.device_battery >= 0:
         _last_device_battery = req.device_battery
         _last_device_charging = req.device_charging
+
+    if request is not None:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth[7:].strip()
+            if bearer and not os.environ.get("OPENROUTER_API_KEY"):
+                save_persistent_config(openrouter_api_key=bearer)
 
     # 0. Instant Local Fast-Path (<100ms) with device telemetry
     fast_res = _handle_fast_path(

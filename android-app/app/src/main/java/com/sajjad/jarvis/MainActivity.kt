@@ -25,6 +25,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -46,6 +48,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -90,6 +94,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     private var serverUrlState = mutableStateOf("http://104.252.175.159:8765")
     private var activeModelState = mutableStateOf("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free")
+    private var apiKeyState = mutableStateOf("")
     private var isConnectedState = mutableStateOf(false)
     private var isServiceActiveState = mutableStateOf(true)
     private var voiceStateText = mutableStateOf("STANDBY: Say \"Jarvis\"")
@@ -204,9 +209,10 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                             JarvisSettingsDialog(
                                 currentUrl = serverUrlState.value,
                                 currentModel = activeModelState.value,
+                                currentApiKey = apiKeyState.value,
                                 onDismiss = { showSettings = false },
-                                onSave = { newUrl, newModel ->
-                                    savePreferences(newUrl, newModel)
+                                onSave = { newUrl, newModel, newApiKey ->
+                                    savePreferences(newUrl, newModel, newApiKey)
                                     showSettings = false
                                     startHealthCheckLoop()
                                 },
@@ -254,18 +260,24 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
         val rawModel = prefs.getString("active_model", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free") ?: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
         activeModelState.value = if (rawModel == "openrouter/free" || rawModel.isBlank()) "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" else rawModel
+
+        val rawApiKey = prefs.getString("api_key", "")?.trim() ?: ""
+        apiKeyState.value = rawApiKey
     }
 
-    private fun savePreferences(newUrl: String, newModel: String) {
+    private fun savePreferences(newUrl: String, newModel: String, newApiKey: String) {
         val cleanUrl = newUrl.trim().removeSuffix("/")
         val cleanModel = newModel.trim()
+        val cleanApiKey = newApiKey.trim()
         val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
         prefs.edit()
             .putString("server_url", cleanUrl)
             .putString("active_model", cleanModel)
+            .putString("api_key", cleanApiKey)
             .apply()
         serverUrlState.value = cleanUrl
         activeModelState.value = cleanModel
+        apiKeyState.value = cleanApiKey
         Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show()
     }
 
@@ -441,6 +453,10 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
                 conn.setRequestProperty("Accept", "application/json")
+                val currentKey = apiKeyState.value.trim()
+                if (currentKey.isNotBlank()) {
+                    conn.setRequestProperty("Authorization", "Bearer $currentKey")
+                }
                 conn.connectTimeout = 6000
                 conn.readTimeout = 25000
                 conn.doOutput = true
@@ -1053,14 +1069,23 @@ private fun JarvisBottomInputBar(
 private fun JarvisSettingsDialog(
     currentUrl: String,
     currentModel: String,
+    currentApiKey: String,
     onDismiss: () -> Unit,
-    onSave: (String, String) -> Unit,
+    onSave: (String, String, String) -> Unit,
     onAssistantSetup: () -> Unit,
     onOverlaySetup: () -> Unit,
     onBatterySetup: () -> Unit
 ) {
     var urlText by remember { mutableStateOf(currentUrl) }
     var modelText by remember { mutableStateOf(currentModel) }
+    var apiKeyText by remember { mutableStateOf(currentApiKey) }
+    var isPasswordVisible by remember { mutableStateOf(false) }
+
+    val coroutineScope = rememberCoroutineScope()
+    var isTestingConnection by remember { mutableStateOf(false) }
+    var testDialogTitle by remember { mutableStateOf<String?>(null) }
+    var testDialogMessage by remember { mutableStateOf<String?>(null) }
+    var testDialogIsError by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1074,6 +1099,7 @@ private fun JarvisSettingsDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
@@ -1130,6 +1156,127 @@ private fun JarvisSettingsDialog(
                     )
                 }
 
+                // AI API Key Field
+                Column {
+                    Text(text = "AI API Key (OpenRouter / OpenAI / Gemini)", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = apiKeyText,
+                        onValueChange = { apiKeyText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
+                                Icon(
+                                    imageVector = if (isPasswordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = if (isPasswordVisible) "Hide API Key" else "Show API Key",
+                                    tint = CyanDim
+                                )
+                            }
+                        },
+                        placeholder = {
+                            Text(
+                                text = "sk-or-v1-... or AIzaSy...",
+                                color = TextSecondary.copy(alpha = 0.4f),
+                                fontSize = 12.sp
+                            )
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyanNeon,
+                            unfocusedBorderColor = CyanDim.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        )
+                    )
+                }
+
+                // Test AI Connection Button
+                Button(
+                    onClick = {
+                        if (!isTestingConnection) {
+                            isTestingConnection = true
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    val server = urlText.trim().removeSuffix("/")
+                                    val u = URL("$server/api/test-connection")
+                                    val conn = u.openConnection() as HttpURLConnection
+                                    conn.requestMethod = "POST"
+                                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                                    conn.setRequestProperty("Accept", "application/json")
+                                    val k = apiKeyText.trim()
+                                    if (k.isNotBlank()) {
+                                        conn.setRequestProperty("Authorization", "Bearer $k")
+                                    }
+                                    conn.connectTimeout = 8000
+                                    conn.readTimeout = 18000
+                                    conn.doOutput = true
+
+                                    val body = JSONObject().apply {
+                                        put("server_url", urlText.trim())
+                                        put("model", modelText.trim())
+                                        put("api_key", k)
+                                        put("save", true)
+                                    }
+                                    OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(body.toString()) }
+
+                                    val code = conn.responseCode
+                                    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                                    val respStr = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                                    val json = if (respStr.isNotBlank()) JSONObject(respStr) else JSONObject()
+                                    val status = json.optString("status", if (code in 200..299) "success" else "error")
+                                    val msg = json.optString("message", if (status == "success") "Connection Successful!" else "HTTP $code Error")
+                                    val latency = json.optInt("latency_ms", -1)
+
+                                    withContext(Dispatchers.Main) {
+                                        isTestingConnection = false
+                                        if (status == "success") {
+                                            testDialogIsError = false
+                                            testDialogTitle = "Connection Successful!"
+                                            testDialogMessage = if (latency > 0) "$msg\nLatency: ${latency}ms" else msg
+                                        } else {
+                                            testDialogIsError = true
+                                            testDialogTitle = "Connection Failed"
+                                            testDialogMessage = msg
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        isTestingConnection = false
+                                        testDialogIsError = true
+                                        testDialogTitle = "Connection Error"
+                                        testDialogMessage = "Failed to reach server: ${e.message}"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    enabled = !isTestingConnection,
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(1.dp, if (isTestingConnection) CyanDim else CyanNeon),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isTestingConnection) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = CyanNeon,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Testing AI Connection...", color = CyanNeon, fontSize = 13.sp)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.NetworkCheck,
+                            contentDescription = "Test Connection",
+                            tint = CyanNeon,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Test AI Connection", color = CyanNeon, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
                 HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
 
                 // One-Tap System Assistant Setup Buttons (Pillar 1)
@@ -1172,7 +1319,7 @@ private fun JarvisSettingsDialog(
 
                 // Save Button
                 Button(
-                    onClick = { onSave(urlText, modelText) },
+                    onClick = { onSave(urlText, modelText, apiKeyText) },
                     colors = ButtonDefaults.buttonColors(containerColor = CyanNeon),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
@@ -1182,4 +1329,32 @@ private fun JarvisSettingsDialog(
             }
         }
     }
+
+    if (testDialogMessage != null) {
+        AlertDialog(
+            onDismissRequest = { testDialogMessage = null },
+            title = {
+                Text(
+                    text = testDialogTitle ?: "Connection Test",
+                    color = if (testDialogIsError) RedOffline else GreenActive,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = testDialogMessage ?: "",
+                    color = TextPrimary
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { testDialogMessage = null }) {
+                    Text("OK", color = CyanNeon, fontWeight = FontWeight.Bold)
+                }
+            },
+            containerColor = DarkSurface,
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 6.dp
+        )
+    }
+}
 }

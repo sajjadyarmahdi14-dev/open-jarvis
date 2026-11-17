@@ -659,6 +659,45 @@ def test_openrouter_fallback_pool_and_404_resilience():
     assert call_counts[0] != "openrouter/free"  # openrouter/free was purged and replaced
 
 
+def test_test_connection_endpoint():
+    """Verify POST /api/test-connection tests AI credentials, returns latency and status."""
+    import httpx
+    client = TestClient(app)
+
+    # 1. Success test with OpenRouter / OpenAI key
+    with patch("openjarvis.engine.cloud_rest.generate_openai_compat_rest") as mock_gen:
+        mock_gen.return_value = {"content": "Pong", "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"}
+        resp = client.post("/api/test-connection", json={
+            "server_url": "http://104.252.175.159:8765",
+            "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "api_key": "sk-or-v1-dummytestkey12345",
+            "save": False
+        })
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["status"] == "success"
+        assert "Connection Successful!" in d["message"]
+        assert d["response"] == "Pong"
+        assert "latency_ms" in d
+
+    # 2. HTTP 401 Unauthorized test
+    with patch("openjarvis.engine.cloud_rest.generate_openai_compat_rest") as mock_gen:
+        req = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        resp_obj = httpx.Response(401, request=req, json={"error": {"message": "Invalid API key provided", "code": 401}})
+        mock_gen.side_effect = httpx.HTTPStatusError("401 Unauthorized", request=req, response=resp_obj)
+        resp = client.post("/api/test-connection", json={
+            "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "api_key": "invalid-key",
+            "save": False
+        })
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["status"] == "error"
+        assert d["status_code"] == 401
+        assert "Invalid API Key (HTTP 401 Unauthorized)" in d["message"]
+
+
+
 
 
 

@@ -812,6 +812,11 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             conn.setRequestProperty("Accept", "application/json")
             conn.setRequestProperty("X-Device-Battery", batteryPct.toString())
             conn.setRequestProperty("X-Device-Charging", isCharging.toString())
+            val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+            val apiKey = prefs.getString("api_key", "") ?: ""
+            if (apiKey.isNotBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            }
             conn.connectTimeout = 5000
             conn.readTimeout = 15000
             conn.doOutput = true
