@@ -595,22 +595,18 @@ async def update_config(req: ConfigUpdateRequest):
         }
 
 
+_last_device_battery: Optional[int] = None
+_last_device_charging: Optional[bool] = None
+
+
 @app.get("/api/status")
 async def get_status():
     import openjarvis.tools  # noqa: F401
-    from openjarvis.tools.android_tools import _run_termux_cmd
 
-    battery_info = "Unknown"
-    ok, bat_out = _run_termux_cmd(["termux-battery-status"])
-    if ok and bat_out:
-        try:
-            import json
-            data = json.loads(bat_out)
-            pct = data.get("percentage")
-            status = data.get("status", "")
-            battery_info = f"{pct}% ({status})"
-        except Exception:
-            battery_info = bat_out
+    battery_info = "Connected (24/7 Voice Service)"
+    if _last_device_battery is not None and _last_device_battery >= 0:
+        chg = "charging" if _last_device_charging else "discharging"
+        battery_info = f"{_last_device_battery}% ({chg})"
 
     cfg_status = get_config_status()
 
@@ -648,6 +644,11 @@ async def get_device_apps():
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
+    global _last_device_battery, _last_device_charging
+    if req.device_battery is not None and req.device_battery >= 0:
+        _last_device_battery = req.device_battery
+        _last_device_charging = req.device_charging
+
     # 0. Instant Local Fast-Path (<100ms) with device telemetry
     fast_res = _handle_fast_path(
         req.message,

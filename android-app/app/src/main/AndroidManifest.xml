@@ -36,15 +36,11 @@
 
     <!-- Background Persistence & Notifications -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- Termux Daemon Automation -->
-    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
     <!-- Overlay & Background Window Launching for Android 14+ & Xiaomi HyperOS -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -73,6 +69,7 @@
         android:hardwareAccelerated="true"
         tools:targetApi="35">
 
+        <!-- 100% Native Jetpack Compose Main Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -83,14 +80,53 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Official Android Assistant Intent Filters -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <action android:name="android.intent.action.VOICE_COMMAND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
+        <!-- Translucent Assistant Activity for quick invocation -->
+        <activity
+            android:name=".JarvisAssistActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <action android:name="android.intent.action.VOICE_COMMAND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- 24/7 Always-On Native Voice Foreground Service -->
         <service
             android:name=".JarvisVoiceService"
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- System Digital Voice Interaction Services -->
+        <service
+            android:name=".JarvisVoiceInteractionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction_service" />
+        </service>
+
+        <service
+            android:name=".JarvisVoiceInteractionSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true" />
 
         <receiver
             android:name=".ServiceRestartReceiver"
@@ -112,12 +148,6 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
-
-        <service
-            android:name=".JarvisForegroundService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="dataSync|microphone" />
 
     </application>
 
