@@ -29,6 +29,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.AlarmClock
+import android.provider.ContactsContract
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -259,6 +260,15 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         }
         ContextCompat.registerReceiver(this, packageReceiver, packageFilter, ContextCompat.RECEIVER_EXPORTED)
 
+        // Sanitize active model preference
+        try {
+            val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+            val storedM = prefs.getString("active_model", null)
+            if (storedM == "openrouter/free" || storedM.isNullOrBlank()) {
+                prefs.edit().putString("active_model", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free").apply()
+            }
+        } catch (_: Exception) {}
+
         startAsForeground()
         startContinuousAudioRecord()
         preCacheCommonAudio()
@@ -285,6 +295,14 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             }
             else -> {
                 acquireLocks(this)
+                try {
+                    val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                    val storedM = prefs.getString("active_model", null)
+                    if (storedM == "openrouter/free" || storedM.isNullOrBlank()) {
+                        prefs.edit().putString("active_model", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free").apply()
+                    }
+                } catch (_: Exception) {}
+
                 startAsForeground()
                 if (!isRecordingLoopActive) {
                     startContinuousAudioRecord()
@@ -296,22 +314,25 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Log.i(TAG, "onTaskRemoved: App swiped away. Scheduling instant restart to remain always-on!")
+        Log.i(TAG, "onTaskRemoved: App swiped away. Scheduling instant restart via ServiceRestartReceiver!")
         try {
-            val restartIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
-                action = ACTION_START
+            val broadcastIntent = Intent(applicationContext, ServiceRestartReceiver::class.java).apply {
+                action = ServiceRestartReceiver.ACTION_RESTART_VOICE_SERVICE
             }
-            val pi = PendingIntent.getService(
+            val pi = PendingIntent.getBroadcast(
                 applicationContext,
-                9999,
-                restartIntent,
+                9998,
+                broadcastIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val am = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                am?.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1000L, pi)
+                am?.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 500L, pi)
             } else {
-                am?.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1000L, pi)
+                am?.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 500L, pi)
+            }
+            val restartIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
+                action = ACTION_START
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(restartIntent)
@@ -319,7 +340,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 startService(restartIntent)
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "onTaskRemoved restart error: ${t.message}")
+            Log.w(TAG, "onTaskRemoved restart notice: ${t.message}")
         }
     }
 
@@ -736,6 +757,48 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun findContactNumber(contactName: String): String? {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            return null
+        }
+        val cleanQuery = contactName.trim().lowercase(Locale.ROOT)
+        var matchedNumber: String? = null
+        val projection = arrayOf(
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+            ContactsContract.CommonDataKinds.Phone.NUMBER
+        )
+        try {
+            contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                projection,
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                var exactMatch: String? = null
+                var partialMatch: String? = null
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameIdx)?.lowercase(Locale.ROOT) ?: continue
+                    val number = cursor.getString(numIdx) ?: continue
+                    if (name == cleanQuery) {
+                        exactMatch = number
+                        break
+                    } else if (name.contains(cleanQuery) || cleanQuery.contains(name)) {
+                        if (partialMatch == null) {
+                            partialMatch = number
+                        }
+                    }
+                }
+                matchedNumber = exactMatch ?: partialMatch
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Contacts query exception: ${e.message}")
+        }
+        return matchedNumber
+    }
+
     private fun executeNativeClientAction(act: JSONObject) {
         try {
             when (act.optString("type")) {
@@ -765,17 +828,31 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    startActivity(alarmIntent)
+                    AppLauncher.launchWithOverlayFallback(this, alarmIntent)
                 }
                 "call" -> {
-                    val num = act.optString("number", "").trim()
+                    var num = act.optString("number", "").trim()
+                    val name = act.optString("name", "").trim()
+                    if (num.isBlank() && name.isNotBlank()) {
+                        num = findContactNumber(name) ?: ""
+                    }
                     if (num.isNotBlank()) {
+                        val cleanPhone = num.replace(" ", "").replace("-", "")
                         val callIntent = if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
-                            Intent(Intent.ACTION_CALL, Uri.parse("tel:$num"))
+                            Intent(Intent.ACTION_CALL, Uri.parse("tel:$cleanPhone"))
                         } else {
-                            Intent(Intent.ACTION_DIAL, Uri.parse("tel:$num"))
+                            Intent(Intent.ACTION_DIAL, Uri.parse("tel:$cleanPhone"))
                         }.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-                        startActivity(callIntent)
+                        AppLauncher.launchWithOverlayFallback(this, callIntent)
+                    } else {
+                        val dialerIntent = Intent(Intent.ACTION_DIAL).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        AppLauncher.launchWithOverlayFallback(this, dialerIntent)
+                        val isFa = name.any { it in '\u0600'..'\u06FF' }
+                        val dialerMsg = if (isFa) "صفحه تماس برای $name باز شد قربان." else "Opening dialer for $name, sir."
+                        serviceListener?.onAssistantResponse(dialerMsg)
+                        speakBritish(dialerMsg)
                     }
                 }
                 "sms" -> {
@@ -785,7 +862,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         putExtra("sms_body", body)
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    startActivity(smsIntent)
+                    AppLauncher.launchWithOverlayFallback(this, smsIntent)
                 }
                 "volume" -> {
                     val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -802,7 +879,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(urlStr)).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
-                        startActivity(viewIntent)
+                        AppLauncher.launchWithOverlayFallback(this, viewIntent)
                     }
                 }
             }
@@ -1128,11 +1205,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         val notification = buildNotification()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                var fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                    fgsType = fgsType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                }
-                startForeground(NOTIFICATION_ID, notification, fgsType)
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }

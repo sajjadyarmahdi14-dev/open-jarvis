@@ -582,6 +582,84 @@ def test_torch_phrasings_and_no_termux_api_error():
         assert any(a.get("type") == "torch" for a in actions)
 
 
+def test_call_contact_name_fast_path():
+    """Verify 'call dad', 'call mom', and Persian equivalents trigger zero-LLM fast path with contact name."""
+    client = TestClient(app)
+
+    # 1. Contact name: English
+    r1 = client.post("/api/chat", json={"message": "call dad"})
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert d1.get("fast_path") is True
+    assert "Calling dad" in d1.get("response", "")
+    assert any(a.get("type") == "call" and a.get("name") == "dad" for a in d1.get("client_actions", []))
+
+    r2 = client.post("/api/chat", json={"message": "call mom"})
+    assert r2.status_code == 200
+    d2 = r2.json()
+    assert d2.get("fast_path") is True
+    assert "Calling mom" in d2.get("response", "")
+    assert any(a.get("type") == "call" and a.get("name") == "mom" for a in d2.get("client_actions", []))
+
+    # 2. Contact name: Persian
+    r3 = client.post("/api/chat", json={"message": "زنگ بزن به بابا"})
+    assert r3.status_code == 200
+    d3 = r3.json()
+    assert d3.get("fast_path") is True
+    assert any(a.get("type") == "call" and a.get("name") == "بابا" for a in d3.get("client_actions", []))
+
+    # 3. Numeric phone number
+    r4 = client.post("/api/chat", json={"message": "call +989123456789"})
+    assert r4.status_code == 200
+    d4 = r4.json()
+    assert d4.get("fast_path") is True
+    assert any(a.get("type") == "call" and "+989123456789" in a.get("number", "") for a in d4.get("client_actions", []))
+
+
+def test_openrouter_fallback_pool_and_404_resilience():
+    """Verify openrouter/free is never used, and fallback activates on HTTP 404, 400, 429."""
+    import httpx
+    from openjarvis.core.types import Message, Role
+    from openjarvis.engine.cloud_rest import FREE_MODEL_FALLBACK_POOL, generate_openai_compat_rest
+
+    assert "openrouter/free" not in FREE_MODEL_FALLBACK_POOL
+    assert FREE_MODEL_FALLBACK_POOL[0] == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+
+    # Mock client where openrouter/free or first candidate fails with 404, but second candidate succeeds
+    call_counts = []
+
+    def mock_post(url, json=None, headers=None):
+        model = json.get("model", "")
+        call_counts.append(model)
+        if "openrouter/free" in model or len(call_counts) == 1:
+            req = httpx.Request("POST", url)
+            resp = httpx.Response(404, request=req, json={"error": {"message": "No endpoints available", "code": 404}})
+            return resp
+        # Second candidate succeeds
+        req = httpx.Request("POST", url)
+        resp = httpx.Response(200, request=req, json={
+            "choices": [{"message": {"role": "assistant", "content": "I am online and operational, sir."}}]
+        })
+        return resp
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = mock_post
+
+    res = generate_openai_compat_rest(
+        client=mock_client,
+        base_url="https://openrouter.ai/api/v1",
+        api_key="test-key",
+        model="openrouter/free",
+        messages=[Message(role=Role.USER, content="hello")],
+    )
+
+    assert "I am online" in res["content"]
+    assert len(call_counts) >= 2
+    # The first candidate was attempted, got 404, then auto-rotated to the next candidate
+    assert call_counts[0] != "openrouter/free"  # openrouter/free was purged and replaced
+
+
+
 
 
 

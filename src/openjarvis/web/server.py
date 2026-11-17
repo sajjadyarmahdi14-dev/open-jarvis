@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from openjarvis.core.config import _is_android, load_config
 from openjarvis.core.env_config import (
+    DEFAULT_OPENROUTER_MODEL,
     get_config_status,
     load_all_env_and_config,
     save_persistent_config,
@@ -138,7 +139,9 @@ def _get_or_create_agent():
     _cached_tools = tools
     bus = EventBus(record_history=False)
 
-    model = cfg_status.get("active_model") or "meta-llama/llama-3.3-70b-instruct:free"
+    model = cfg_status.get("active_model") or DEFAULT_OPENROUTER_MODEL
+    if model == "openrouter/free":
+        model = DEFAULT_OPENROUTER_MODEL
 
     agent = agent_cls(
         engine=engine,
@@ -488,19 +491,26 @@ def _handle_fast_path(
             "fast_path": True,
         }
 
-    # 7. Phone call
-    m_call_en = re.search(r"\b(?:call|phone|dial)\s+([0-9+]+)\b", norm)
-    m_call_fa = re.search(r"\b(?:تماس\s+بگیر\s+با|زنگ\s+بزن\s+به)\s+([0-9+]+)\b", norm)
+    # 7. Phone call: by phone number or contact name (e.g. "call dad", "call mom", "زنگ بزن به بابا")
+    m_call_en = re.search(r"\b(?:call|phone|dial)\s+([a-zA-Z0-9_+ -]+?)[.!?]*$", norm)
+    m_call_fa = re.search(r"\b(?:تماس\s+بگیر\s+با|زنگ\s+بزن\s+به)\s+(.+?)[.!?]*$", norm)
     if m_call_en or m_call_fa:
-        num = (m_call_en.group(1) if m_call_en else m_call_fa.group(1)).strip()
-        reply = f"در حال برقراری تماس با {num} قربان." if is_persian else f"Calling {num}, sir."
-        return {
-            "response": reply,
-            "tool_calls": [{"name": "android_call", "content": f"Calling {num}", "success": True}],
-            "turns": 1,
-            "client_actions": [{"type": "call", "number": num}],
-            "fast_path": True,
-        }
+        target = (m_call_en.group(1) if m_call_en else m_call_fa.group(1)).strip()
+        if target and len(target) <= 35 and target.lower() not in ("me", "back", "later", "it"):
+            is_digits = bool(re.match(r"^[0-9+ \-]+$", target))
+            reply = f"در حال برقراری تماس با {target} قربان." if is_persian else f"Calling {target}, sir."
+            client_act = {"type": "call"}
+            if is_digits:
+                client_act["number"] = target.replace(" ", "").replace("-", "")
+            else:
+                client_act["name"] = target
+            return {
+                "response": reply,
+                "tool_calls": [{"name": "android_call", "content": f"Calling {target}", "success": True}],
+                "turns": 1,
+                "client_actions": [client_act],
+                "fast_path": True,
+            }
 
     # 8. Open URL / Website
     m_url = re.search(r"\b(?:open\s+website|open\s+url|go\s+to)\s+(https?://[^\s]+|[a-zA-Z0-9.\-]+\.[a-z]{2,})\b", norm)

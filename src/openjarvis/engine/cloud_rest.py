@@ -381,12 +381,41 @@ async def stream_full_gemini_rest(
 # ---------------------------------------------------------------------------
 
 FREE_MODEL_FALLBACK_POOL: List[str] = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-3-27b-it:free",
-    "qwen/qwen-2.5-72b-instruct:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "openrouter/free",
+    "google/gemma-3-27b-it:free",
+    "google/gemma-3-12b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
 ]
+
+_OPENROUTER_LIVE_FREE_MODELS: List[str] = []
+_OPENROUTER_LIVE_MODELS_FETCHED: bool = False
+
+
+def get_openrouter_free_models(api_key: Optional[str] = None) -> List[str]:
+    """Fetch live free models list from OpenRouter API, cached in memory."""
+    global _OPENROUTER_LIVE_FREE_MODELS, _OPENROUTER_LIVE_MODELS_FETCHED
+    if _OPENROUTER_LIVE_MODELS_FETCHED and _OPENROUTER_LIVE_FREE_MODELS:
+        return list(_OPENROUTER_LIVE_FREE_MODELS)
+    try:
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        with httpx.Client(timeout=4.0) as cl:
+            resp = cl.get("https://openrouter.ai/api/v1/models", headers=headers)
+            if resp.is_success:
+                items = resp.json().get("data", [])
+                free_ids = [m["id"] for m in items if isinstance(m, dict) and m.get("id", "").endswith(":free")]
+                if free_ids:
+                    _OPENROUTER_LIVE_FREE_MODELS = free_ids
+                    _OPENROUTER_LIVE_MODELS_FETCHED = True
+                    logger.info("Loaded %d live free models from OpenRouter", len(free_ids))
+                    return list(_OPENROUTER_LIVE_FREE_MODELS)
+    except Exception as exc:
+        logger.debug("Live OpenRouter models lookup skipped: %s", exc)
+    _OPENROUTER_LIVE_MODELS_FETCHED = True
+    return []
 
 
 def generate_openai_compat_rest(
@@ -430,15 +459,27 @@ def generate_openai_compat_rest(
     url = f"{base_url.rstrip('/')}/chat/completions"
     t0 = time.monotonic()
 
-    # Prioritized model pool with auto-rotation on 429, 502, 503, timeout, or blank reply
-    models_to_try = [model]
+    # Prioritized model pool with auto-rotation on 400, 404, 429, 5xx, timeout, or blank reply
+    initial_model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" if model == "openrouter/free" else model
+    models_to_try = [initial_model]
     if "openrouter" in base_url.lower():
         for pm in FREE_MODEL_FALLBACK_POOL:
-            if pm not in models_to_try:
+            if pm not in models_to_try and pm != "openrouter/free":
                 models_to_try.append(pm)
+        try:
+            live_free = get_openrouter_free_models(api_key)
+            for lm in live_free:
+                if lm not in models_to_try and lm != "openrouter/free":
+                    models_to_try.append(lm)
+        except Exception:
+            pass
+    # Strictly purge any occurrence of openrouter/free
+    models_to_try = [m for m in models_to_try if m != "openrouter/free"]
+    if not models_to_try:
+        models_to_try = ["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]
 
     data = None
-    selected_model = model
+    selected_model = initial_model
     last_exc = None
 
     for candidate in models_to_try:
@@ -455,13 +496,16 @@ def generate_openai_compat_rest(
 
         try:
             resp = client.post(url, json=cand_payload, headers=headers)
-            if resp.status_code in (429, 502, 503, 504) and candidate != models_to_try[-1]:
+            if resp.status_code in (404, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
                 logger.warning("Model %s returned HTTP %d, rotating to next candidate...", candidate, resp.status_code)
                 continue
             if resp.status_code == 400 and "tools" in cand_payload:
                 cand_payload.pop("tools", None)
                 cand_payload.pop("tool_choice", None)
                 resp = client.post(url, json=cand_payload, headers=headers)
+                if not resp.is_success and candidate != models_to_try[-1]:
+                    logger.warning("Model %s failed without tools (HTTP %d), rotating...", candidate, resp.status_code)
+                    continue
 
             resp.raise_for_status()
             cand_data = resp.json()
@@ -482,7 +526,7 @@ def generate_openai_compat_rest(
             break
         except httpx.HTTPStatusError as exc:
             last_exc = exc
-            if exc.response.status_code in (429, 502, 503, 504) and candidate != models_to_try[-1]:
+            if exc.response.status_code in (400, 404, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
                 logger.warning("HTTP %d on model %s, rotating...", exc.response.status_code, candidate)
                 continue
             err_msg = exc.response.text
@@ -510,7 +554,6 @@ def generate_openai_compat_rest(
         }
 
     elapsed = time.monotonic() - t0
-    data = resp.json()
     choices = data.get("choices", [])
     if not choices:
         return {
@@ -604,8 +647,18 @@ async def stream_full_openai_compat_rest(
     models_to_try = [model]
     if "openrouter" in base_url.lower():
         for pm in FREE_MODEL_FALLBACK_POOL:
-            if pm not in models_to_try:
+            if pm not in models_to_try and pm != "openrouter/free":
                 models_to_try.append(pm)
+        try:
+            live_free = get_openrouter_free_models(api_key)
+            for lm in live_free:
+                if lm not in models_to_try and lm != "openrouter/free":
+                    models_to_try.append(lm)
+        except Exception:
+            pass
+    models_to_try = [m for m in models_to_try if m != "openrouter/free"]
+    if not models_to_try:
+        models_to_try = ["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]
 
     stream_started = False
     last_exc = None
@@ -627,7 +680,7 @@ async def stream_full_openai_compat_rest(
                 if not resp.is_success:
                     await resp.aread()
                     err_text = resp.text
-                    if resp.status_code in (429, 502, 503, 504) and candidate != models_to_try[-1]:
+                    if resp.status_code in (400, 404, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
                         logger.warning("Stream model %s failed HTTP %d, rotating...", candidate, resp.status_code)
                         continue
                     if looks_like_context_length_error(err_text):

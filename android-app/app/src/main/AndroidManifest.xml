@@ -90,7 +90,16 @@
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="microphone|mediaPlayback" />
+            android:foregroundServiceType="microphone" />
+
+        <receiver
+            android:name=".ServiceRestartReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.sajjad.jarvis.RESTART_VOICE_SERVICE" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name=".BootReceiver"

@@ -95,6 +95,16 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
     private fun initApp(savedInstanceState: Bundle?) {
         setContentView(R.layout.activity_main)
         targetUrl = getStoredServerUrl()
+
+        // Sanitize active model preference
+        try {
+            val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+            val storedM = prefs.getString("active_model", null)
+            if (storedM == "openrouter/free" || storedM.isNullOrBlank()) {
+                prefs.edit().putString("active_model", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free").apply()
+            }
+        } catch (_: Exception) {}
+
         applyEdgeToEdgeDarkTheme()
 
         webView = findViewById(R.id.webView)
@@ -514,7 +524,7 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
     override fun onFinalSpeech(userText: String) {
         runOnUiThread {
             val escaped = escapeJs(userText)
-            webView.evaluateJavascript("if (window.appendUserMessage) window.appendUserMessage('$escaped'); else if (window.handleWakeCommand) window.handleWakeCommand('$escaped');", null)
+            webView.evaluateJavascript("if (window.appendUserMessage) window.appendUserMessage('$escaped');", null)
         }
     }
 

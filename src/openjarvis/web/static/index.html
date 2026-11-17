@@ -818,13 +818,12 @@
 
         <div class="form-group">
           <label>Active Model ID</label>
-          <input type="text" id="input-active-model" placeholder="e.g. meta-llama/llama-3.3-70b-instruct:free">
+          <input type="text" id="input-active-model" placeholder="e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free">
           <div class="model-presets">
-            <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Primary Default)</span>
+            <span class="preset-pill" onclick="selectModelPreset('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')">⚡ Nemotron Nano (Reasoning Default)</span>
             <span class="preset-pill" onclick="selectModelPreset('google/gemma-3-27b-it:free')">⚡ Gemma 3 27B (Fast Fallback)</span>
+            <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Instruct)</span>
             <span class="preset-pill" onclick="selectModelPreset('qwen/qwen-2.5-72b-instruct:free')">🧠 Qwen 2.5 72B (Free)</span>
-            <span class="preset-pill" onclick="selectModelPreset('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')">⚡ Nemotron Nano (Reasoning)</span>
-            <span class="preset-pill" onclick="selectModelPreset('openrouter/free')">🆓 OpenRouter Free Router</span>
           </div>
         </div>
 
@@ -956,9 +955,32 @@
     };
 
     window.handleWakeCommand = function(cmd) {
+      const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
+      if (bridge) {
+        // In native Android app, JarvisVoiceService handles the dispatch and speech directly
+        appendMessage('user', cmd);
+        return;
+      }
       playSciFiChime();
       window.setWakeStatus('processing');
       sendMessage(cmd);
+    };
+
+    window.appendUserMessage = function(text) {
+      if (!text) return;
+      appendMessage('user', text);
+    };
+
+    window.appendAssistantMessage = function(text, toolCalls) {
+      if (!text) return;
+      removeTypingIndicator();
+      appendMessage('assistant', text, toolCalls || []);
+    };
+
+    window.displayVoiceInteraction = function(userText, assistantReply, toolCalls) {
+      removeTypingIndicator();
+      if (userText) appendMessage('user', userText);
+      if (assistantReply) appendMessage('assistant', assistantReply, toolCalls || []);
     };
 
     // Authentic British Neural Voice Player (with fallback to Native UK Male TTS)
@@ -1471,7 +1493,11 @@
           document.getElementById('input-gemini-key').placeholder = 'AIzaSy...';
         }
 
-        document.getElementById('input-active-model').value = data.active_model || 'meta-llama/llama-3.3-70b-instruct:free';
+        let activeM = data.active_model || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+        if (activeM === 'openrouter/free' || !activeM) {
+          activeM = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+        }
+        document.getElementById('input-active-model').value = activeM;
 
         const serverInput = document.getElementById('input-server-url');
         if (serverInput) {
@@ -1587,6 +1613,13 @@
       return false;
     }
     setInterval(checkServerPing, 6000);
+
+    // Overwrite any legacy openrouter/free model in local storage
+    try {
+      if (localStorage.getItem('active_model') === 'openrouter/free') {
+        localStorage.setItem('active_model', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free');
+      }
+    } catch (_) {}
 
     // Initialize status check
     fetch('/api/status')
