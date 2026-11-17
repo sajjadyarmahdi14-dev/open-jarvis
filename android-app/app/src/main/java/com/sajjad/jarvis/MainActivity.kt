@@ -1267,7 +1267,7 @@ private fun JarvisSettingsDialog(
                         Text(text = "Testing AI Connection...", color = CyanNeon, fontSize = 13.sp)
                     } else {
                         Icon(
-                            imageVector = Icons.Default.NetworkCheck,
+                            imageVector = Icons.Default.Refresh,
                             contentDescription = "Test Connection",
                             tint = CyanNeon,
                             modifier = Modifier.size(18.dp)
