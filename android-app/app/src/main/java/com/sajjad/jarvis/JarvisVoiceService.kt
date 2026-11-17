@@ -145,6 +145,14 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             } catch (_: Exception) {}
         }
 
+        fun acquireWakeLock(context: Context) {
+            acquireLocks(context)
+        }
+
+        fun releaseWakeLock() {
+            releaseLocks()
+        }
+
         fun forceStartListening(context: Context) {
             val intent = Intent(context, JarvisVoiceService::class.java).apply {
                 action = ACTION_FORCE_LISTEN
@@ -295,6 +303,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     // Continuous AudioRecord + Two-Stage RMS VAD Loop
     // -----------------------------------------------------------------------
 
+    @SuppressLint("MissingPermission")
     private fun startContinuousAudioRecord() {
         if (recordingJob?.isActive == true) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -315,7 +324,6 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 try {
                     // Try VOICE_RECOGNITION source first, fallback to MIC
                     record = try {
-                        @SuppressLint("MissingPermission")
                         AudioRecord(
                             MediaRecorder.AudioSource.VOICE_RECOGNITION,
                             SAMPLE_RATE,
@@ -324,24 +332,29 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             bufferSize
                         )
                     } catch (_: Exception) {
-                        @SuppressLint("MissingPermission")
-                        AudioRecord(
-                            MediaRecorder.AudioSource.MIC,
-                            SAMPLE_RATE,
-                            AudioFormat.CHANNEL_IN_MONO,
-                            AudioFormat.ENCODING_PCM_16BIT,
-                            bufferSize
-                        )
+                        try {
+                            AudioRecord(
+                                MediaRecorder.AudioSource.MIC,
+                                SAMPLE_RATE,
+                                AudioFormat.CHANNEL_IN_MONO,
+                                AudioFormat.ENCODING_PCM_16BIT,
+                                bufferSize
+                            )
+                        } catch (_: Exception) {
+                            null
+                        }
                     }
 
-                    if (record.state != AudioRecord.STATE_INITIALIZED) {
+                    val activeRecord = record
+                    if (activeRecord == null || activeRecord.state != AudioRecord.STATE_INITIALIZED) {
                         Log.e(TAG, "AudioRecord state not initialized, retrying in 1s...")
+                        record?.release()
                         delay(1000)
                         continue
                     }
 
-                    audioRecord = record
-                    record.startRecording()
+                    audioRecord = activeRecord
+                    activeRecord.startRecording()
                     isRecordingLoopActive = true
                     Log.i(TAG, "Continuous AudioRecord running (zero beeps, persistent mic in background)")
 
@@ -369,7 +382,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             continue
                         }
 
-                        val readCount = record.read(readBuffer, 0, CHUNK_SAMPLES)
+                        val readCount = activeRecord.read(readBuffer, 0, CHUNK_SAMPLES)
                         if (readCount <= 0) {
                             consecutiveZeroReads++
                             if (consecutiveZeroReads > 30) {
