@@ -5,13 +5,17 @@ Provides REST endpoints for chat, tool execution, voice STT, and TTS.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
+import io
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
@@ -171,24 +175,85 @@ def _speak_async(text: str) -> None:
 
 
 def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
-    """Instant local fast-path (<150ms) for high-frequency direct Android commands."""
+    """Instant local fast-path (<50ms) for high-frequency direct Android commands and greetings."""
     import re
+    from datetime import datetime
     from openjarvis.tools.android_tools import (
         AndroidBatteryTool,
         AndroidLaunchAppTool,
+        AndroidSetAlarmTool,
         AndroidTorchTool,
+        AndroidVolumeTool,
     )
 
     msg = message.strip()
     msg_lower = msg.lower()
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in msg)
+    cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", msg_lower).strip()
 
-    # 1. Open / Launch App: English & Persian
+    # 0. Conversational greetings and wake checks (<5ms)
+    greetings_en = {
+        "hi", "hello", "hey", "jarvis", "hey jarvis", "hi jarvis", "dear jarvis",
+        "good morning", "good afternoon", "good evening", "how are you",
+        "are you there", "who are you", "what's up", "whats up", "status", "ping"
+    }
+    greetings_fa = {
+        "سلام", "درود", "خوبی", "چطوری", "جارویس", "هی jarvis", "هی جارویس",
+        "سلام جارویس", "هستی", "آنلاینی", "صبح بخیر", "عصر بخیر", "شب بخیر"
+    }
+    if cleaned in greetings_en or msg_lower in greetings_en:
+        return {
+            "response": "At your service, sir. All systems are online. How may I help you?",
+            "tool_calls": [],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+    if cleaned in greetings_fa or msg_lower in greetings_fa:
+        return {
+            "response": "در خدمت شما هستم قربان. تمام سیستم‌ها آنلاین و آماده هستند. چطور می‌توانم کمکتان کنم؟",
+            "tool_calls": [],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+
+    # 1. Time and Date queries (<5ms)
+    if re.search(r"\b(?:what(?:\s+is|\s*'s)?\s+the\s+time|what\s+time\s+is\s+it|current\s+time|time\s+now|ساعت\s*چنده|ساعت\s*چند\s*است|ساعت\s*الان|زمان\s*الان)\b", msg_lower) or cleaned in {"time", "ساعت", "زمان"}:
+        now_dt = datetime.now()
+        reply = (
+            f"قربان، ساعت هم‌اکنون {now_dt.strftime('%H:%M')} است."
+            if is_persian
+            else f"It is currently {now_dt.strftime('%I:%M %p')}, sir."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:what(?:\s+is|\s*'s)?\s+the\s+date|what\s+date\s+is\s+today|today(?:\s*'s)?\s+date|current\s+date|تاریخ\s*امروز|امروز\s*چندمه|امروز\s*چه\s*روزیه)\b", msg_lower) or cleaned in {"date", "today", "امروز", "تاریخ"}:
+        now_dt = datetime.now()
+        reply = (
+            f"قربان، امروز {now_dt.strftime('%A, %d %B %Y')} است."
+            if is_persian
+            else f"Today is {now_dt.strftime('%A, %B %d, %Y')}, sir."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+
+    # 2. Open / Launch App: English & Persian
     m_en = re.match(r"^(?:please\s+)?(?:open|launch|start|run|play)\s+(?:the\s+)?([a-zA-Z0-9_\- ]+?)[.!?]*$", msg, re.IGNORECASE)
     m_fa = re.match(r"^(?:لطفاً\s+|لطفا\s+)?(?:برنامه\s+|بازی\s+)?(.+?)\s*(?:رو|را)?\s*(?:باز\s*کن|اجرا\s*کن|بالا\s*بیار)[.!?]*$", msg)
     m_fa_prefix = re.match(r"^(?:لطفاً\s+|لطفا\s+)?(?:باز\s*کن|اجرا\s*کن)\s+(?:برنامه\s+|بازی\s+)?(.+?)[.!?]*$", msg)
 
     app_target = None
-    is_persian = any("\u0600" <= c <= "\u06FF" for c in msg)
     if m_en:
         app_target = m_en.group(1).strip()
     elif m_fa:
@@ -197,6 +262,8 @@ def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
         app_target = m_fa_prefix.group(1).strip()
 
     if app_target and len(app_target) <= 40:
+        if app_target.lower() in ("camera", "cam", "دوربین"):
+            app_target = "camera"
         res = AndroidLaunchAppTool().execute(app=app_target)
         reply = (
             f"چشم قربان، در حال باز کردن {app_target}."
@@ -212,7 +279,7 @@ def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
             "fast_path": True,
         }
 
-    # 2. Flashlight / Torch: English & Persian
+    # 3. Flashlight / Torch: English & Persian
     if re.search(r"\b(?:turn\s+on\s+flashlight|flashlight\s+on|turn\s+on\s+torch|torch\s+on|روشن\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*روشن\s*کن|فلش\s*(?:رو|را)?\s*روشن\s*کن)\b", msg_lower):
         res = AndroidTorchTool().execute(state="on")
         reply = "چراغ قوه روشن شد قربان." if is_persian else "Flashlight turned on, sir."
@@ -244,7 +311,7 @@ def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
             "fast_path": True,
         }
 
-    # 3. Battery status: English & Persian
+    # 4. Battery status: English & Persian
     if re.search(r"\b(?:battery|battery\s+status|check\s+battery|how\s+much\s+battery|باتری|درصد\s*باتری|وضعیت\s*باتری|شارژ\s*باتری|شارژ\s*چقدره)\b", msg_lower) and len(msg_lower.split()) <= 5:
         res = AndroidBatteryTool().execute()
         reply = (
@@ -257,6 +324,38 @@ def _handle_fast_path(message: str) -> Optional[Dict[str, Any]]:
             "tool_calls": [{"name": "android_battery", "content": res.content, "success": res.success}],
             "turns": 1,
             "client_actions": [],
+            "fast_path": True,
+        }
+
+    # 5. Volume adjustment
+    if re.search(r"\b(?:volume\s+up|increase\s+volume|louder|صدا\s*(?:رو|را)?\s*زیاد\s*کن|صدا\s*بیشتر)\b", msg_lower):
+        res = AndroidVolumeTool().execute(stream="music", volume=12)
+        reply = "صدای رسانه افزایش یافت قربان." if is_persian else "Volume increased, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_volume", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [{"type": "volume", "action": "up"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:volume\s+down|decrease\s+volume|lower\s+volume|صدا\s*(?:رو|را)?\s*کم\s*کن|صدا\s*کمتر)\b", msg_lower):
+        res = AndroidVolumeTool().execute(stream="music", volume=5)
+        reply = "صدای رسانه کاهش یافت قربان." if is_persian else "Volume decreased, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_volume", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [{"type": "volume", "action": "down"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:mute|silent|بی\s*صدا|صدا\s*(?:رو|را)?\s*قطع\s*کن)\b", msg_lower):
+        res = AndroidVolumeTool().execute(stream="music", volume=0)
+        reply = "صدا قطع شد قربان." if is_persian else "Audio muted, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_volume", "content": res.content, "success": res.success}],
+            "turns": 1,
+            "client_actions": [{"type": "volume", "action": "mute"}],
             "fast_path": True,
         }
 
@@ -283,6 +382,12 @@ async def serve_manifest():
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/ping")
+async def ping_endpoint():
+    """Ultra-lightweight ping (<5ms) for connection status check without blocking."""
+    return {"status": "ok", "time": time.time()}
 
 
 @app.get("/api/config")
@@ -377,7 +482,8 @@ async def chat_endpoint(req: ChatRequest):
         context = AgentContext(conversation=conv)
 
     try:
-        result = agent.run(input=req.message, context=context)
+        # Run agent in background thread so async event loop and ping checks are never blocked!
+        result = await asyncio.to_thread(agent.run, input=req.message, context=context)
         tool_calls = [
             {
                 "name": tr.tool_name,
@@ -516,6 +622,144 @@ async def voice_upload_endpoint(
     except Exception as exc:
         logger.exception("Voice upload pipeline failed: %s", exc)
         return {"error": f"Voice upload error: {exc}"}
+
+
+_voice_session: Dict[str, Any] = {
+    "state": "STANDBY",
+    "awake_until": 0.0,
+}
+
+
+@app.post("/api/voice/vad_utterance")
+async def voice_vad_utterance_endpoint(request: Request):
+    """Process a PCM WAV utterance from client continuous AudioRecord VAD.
+
+    Transcribes audio using Google Chromium free STT (no API key required).
+    Handles wake-word states (STANDBY vs AWAKE_WAITING_FOR_COMMAND) and executes commands.
+    """
+    global _voice_session
+
+    content_type = request.headers.get("content-type", "")
+    tts_requested = True
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        audio_file = form.get("audio")
+        if audio_file and hasattr(audio_file, "read"):
+            audio_bytes = await audio_file.read()
+        else:
+            audio_bytes = b""
+        tts_val = form.get("tts", "true")
+        tts_requested = str(tts_val).lower() in ("true", "1", "yes")
+    else:
+        audio_bytes = await request.body()
+        tts_val = request.query_params.get("tts", "true")
+        tts_requested = str(tts_val).lower() in ("true", "1", "yes")
+
+    if not audio_bytes or len(audio_bytes) < 44:
+        return {"error": "Received empty or invalid WAV audio data", "status": "ignored"}
+
+    def _do_transcribe(data: bytes) -> str:
+        try:
+            import io
+            import speech_recognition as sr
+            r = sr.Recognizer()
+            with sr.AudioFile(io.BytesIO(data)) as source:
+                audio = r.record(source)
+            # Try English first
+            try:
+                txt = r.recognize_google(audio, language="en-US")
+                if txt and txt.strip():
+                    return txt.strip()
+            except sr.UnknownValueError:
+                pass
+            except Exception as e:
+                logger.debug("Google STT en-US error: %s", e)
+            # Try Persian fallback
+            try:
+                txt = r.recognize_google(audio, language="fa-IR")
+                if txt and txt.strip():
+                    return txt.strip()
+            except sr.UnknownValueError:
+                pass
+            except Exception as e:
+                logger.debug("Google STT fa-IR error: %s", e)
+        except Exception as exc:
+            logger.warning("VAD transcription exception: %s", exc)
+        return ""
+
+    transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
+    transcript = transcript.strip()
+    if not transcript:
+        return {
+            "status": "no_speech",
+            "transcription": "",
+            "message": "No speech detected in audio utterance.",
+        }
+
+    logger.info("VAD Utterance transcribed: '%s' (Session state: %s)", transcript, _voice_session.get("state"))
+
+    import re
+    now = time.time()
+    is_awake = (now < _voice_session.get("awake_until", 0.0))
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in transcript)
+
+    # Wake patterns (including phonetic variants)
+    wake_regex = re.compile(
+        r"^(?:(?:hey|hi|ok|okay)\s+)?(?:jarvis|service|harvey|travis|چاویس|جارویس|جارویز)(?:[,\s]+(.*))?$",
+        re.IGNORECASE,
+    )
+    m_wake = wake_regex.match(transcript)
+
+    command_to_run = None
+    if m_wake:
+        remainder = (m_wake.group(1) or "").strip()
+        if not remainder:
+            # User said "Jarvis" alone!
+            _voice_session["state"] = "AWAKE_WAITING_FOR_COMMAND"
+            _voice_session["awake_until"] = now + 15.0  # 15 seconds window
+            reply_wake = "در خدمت شما هستم قربان. گوش می‌دهم." if is_persian else "At your service, sir. I'm listening."
+            return {
+                "status": "awake",
+                "state": "AWAKE_WAITING_FOR_COMMAND",
+                "transcription": transcript,
+                "response": reply_wake,
+                "action": "wake_alone",
+                "tts": tts_requested,
+            }
+        else:
+            # User said "Jarvis, <command>"
+            command_to_run = remainder
+            _voice_session["state"] = "STANDBY"
+            _voice_session["awake_until"] = 0.0
+    elif is_awake:
+        # Already awake waiting for command!
+        command_to_run = transcript
+        _voice_session["state"] = "STANDBY"
+        _voice_session["awake_until"] = 0.0
+    else:
+        # In STANDBY and no wake word found
+        return {
+            "status": "ignored",
+            "reason": "no_wake_word",
+            "transcription": transcript,
+            "state": "STANDBY",
+        }
+
+    # Execute the command
+    chat_req = ChatRequest(message=command_to_run, tts=False)
+    chat_res = await chat_endpoint(chat_req)
+
+    return {
+        "status": "executed",
+        "state": _voice_session["state"],
+        "transcription": transcript,
+        "command": command_to_run,
+        "response": chat_res.get("response", ""),
+        "tool_calls": chat_res.get("tool_calls", []),
+        "client_actions": chat_res.get("client_actions", []),
+        "fast_path": chat_res.get("fast_path", False),
+        "tts": tts_requested,
+    }
 
 
 async def _synthesize_edge_tts(

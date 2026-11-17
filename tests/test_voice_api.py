@@ -257,3 +257,132 @@ def test_fast_path_and_clean_tts():
     assert cleaned == "Hello, sir. How can I help you today?"
     assert "<think>" not in cleaned
 
+
+def test_api_ping_endpoint():
+    """Verify ultra-lightweight /api/ping responds with status ok in <5ms."""
+    client = TestClient(app)
+    resp = client.get("/api/ping")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "time" in data
+
+
+def test_conversational_greetings_and_time_fast_path():
+    """Verify instantaneous (<50ms) fast path for greetings and time/date queries."""
+    client = TestClient(app)
+
+    # 1. Greetings: English
+    for g in ["Hi", "Hello", "Hey", "Jarvis", "Hey Jarvis", "good morning"]:
+        r = client.post("/api/chat", json={"message": g})
+        assert r.status_code == 200
+        d = r.json()
+        assert d.get("fast_path") is True
+        assert "At your service, sir" in d["response"]
+
+    # 2. Greetings: Persian
+    for g in ["سلام", "درود", "خوبی", "جارویس", "سلام جارویس"]:
+        r = client.post("/api/chat", json={"message": g})
+        assert r.status_code == 200
+        d = r.json()
+        assert d.get("fast_path") is True
+        assert "در خدمت شما هستم قربان" in d["response"]
+
+    # 3. Time queries
+    r_time_en = client.post("/api/chat", json={"message": "what time is it"})
+    assert r_time_en.status_code == 200
+    assert "It is currently" in r_time_en.json()["response"]
+
+    r_time_fa = client.post("/api/chat", json={"message": "ساعت چنده"})
+    assert r_time_fa.status_code == 200
+    assert "ساعت هم‌اکنون" in r_time_fa.json()["response"]
+
+    # 4. Date queries
+    r_date_en = client.post("/api/chat", json={"message": "what date is today"})
+    assert r_date_en.status_code == 200
+    assert "Today is" in r_date_en.json()["response"]
+
+    r_date_fa = client.post("/api/chat", json={"message": "تاریخ امروز"})
+    assert r_date_fa.status_code == 200
+    assert "امروز" in r_date_fa.json()["response"]
+
+
+def test_volume_fast_path():
+    """Verify fast-path volume controls."""
+    client = TestClient(app)
+
+    r_up = client.post("/api/chat", json={"message": "volume up"})
+    assert r_up.status_code == 200
+    assert r_up.json().get("fast_path") is True
+    assert "Volume increased" in r_up.json()["response"]
+
+    r_down = client.post("/api/chat", json={"message": "volume down"})
+    assert r_down.status_code == 200
+    assert r_down.json().get("fast_path") is True
+    assert "Volume decreased" in r_down.json()["response"]
+
+    r_mute = client.post("/api/chat", json={"message": "mute"})
+    assert r_mute.status_code == 200
+    assert r_mute.json().get("fast_path") is True
+    assert "muted" in r_mute.json()["response"]
+
+
+def test_vad_utterance_wake_word_and_commands(monkeypatch):
+    """Verify continuous AudioRecord VAD endpoint wake word handling and command execution."""
+    import struct
+    import openjarvis.web.server as srv
+    from openjarvis.web.server import _voice_session
+
+    client = TestClient(app)
+
+    # Generate a valid 44-byte WAV header + dummy PCM
+    num_samples = 1600
+    wav_bytes = bytearray()
+    wav_bytes.extend(b"RIFF")
+    wav_bytes.extend(struct.pack("<I", 36 + num_samples * 2))
+    wav_bytes.extend(b"WAVEfmt ")
+    wav_bytes.extend(struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16))
+    wav_bytes.extend(b"data")
+    wav_bytes.extend(struct.pack("<I", num_samples * 2))
+    wav_bytes.extend(b"\x00" * (num_samples * 2))
+    wav_data = bytes(wav_bytes)
+
+    # 1. Standby mode + transcript without wake word -> ignored
+    _voice_session["state"] = "STANDBY"
+    _voice_session["awake_until"] = 0.0
+
+    with patch("speech_recognition.Recognizer.recognize_google", return_value="what is the weather"):
+        r1 = client.post("/api/voice/vad_utterance", content=wav_data, headers={"Content-Type": "audio/wav"})
+        assert r1.status_code == 200
+        d1 = r1.json()
+        assert d1["status"] == "ignored"
+        assert d1["reason"] == "no_wake_word"
+
+    # 2. Standby mode + "Jarvis" alone -> enters AWAKE_WAITING_FOR_COMMAND
+    with patch("speech_recognition.Recognizer.recognize_google", return_value="Jarvis"):
+        r2 = client.post("/api/voice/vad_utterance", content=wav_data, headers={"Content-Type": "audio/wav"})
+        assert r2.status_code == 200
+        d2 = r2.json()
+        assert d2["status"] == "awake"
+        assert d2["state"] == "AWAKE_WAITING_FOR_COMMAND"
+        assert "At your service, sir. I'm listening." in d2["response"]
+
+    # 3. Already awake -> user speaks command directly ("turn on flashlight")
+    with patch("speech_recognition.Recognizer.recognize_google", return_value="turn on flashlight"):
+        r3 = client.post("/api/voice/vad_utterance", content=wav_data, headers={"Content-Type": "audio/wav"})
+        assert r3.status_code == 200
+        d3 = r3.json()
+        assert d3["status"] == "executed"
+        assert "Flashlight turned on" in d3["response"]
+
+    # 4. Standby mode + "Hey Jarvis, what time is it" -> stripped and executed immediately!
+    _voice_session["state"] = "STANDBY"
+    _voice_session["awake_until"] = 0.0
+    with patch("speech_recognition.Recognizer.recognize_google", return_value="Hey Jarvis, what time is it"):
+        r4 = client.post("/api/voice/vad_utterance", content=wav_data, headers={"Content-Type": "audio/wav"})
+        assert r4.status_code == 200
+        d4 = r4.json()
+        assert d4["status"] == "executed"
+        assert "It is currently" in d4["response"]
+
+

@@ -73,6 +73,14 @@ class JarvisAndroidBridge(
     }
 
     @JavascriptInterface
+    fun speakBritish(text: String) {
+        if (text.isBlank()) return
+        activity.runOnUiThread {
+            activity.speakBritish(text)
+        }
+    }
+
+    @JavascriptInterface
     fun isNativeApp(): Boolean = true
 
     @JavascriptInterface

@@ -24,23 +24,23 @@
 
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
-    <!-- Disconnected / Offline Sleek Red Banner at Top -->
+    <!-- Disconnected / Offline Sleek Warning (Positioned at bottom so it NEVER covers top header/settings) -->
     <LinearLayout
         android:id="@+id/offlineBanner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="28dp"
+        android:layout_marginBottom="16dp"
         android:layout_marginHorizontal="16dp"
         android:background="@drawable/bg_offline_banner"
-        android:elevation="14dp"
+        android:elevation="8dp"
         android:gravity="center"
         android:orientation="horizontal"
         android:paddingHorizontal="16dp"
         android:paddingVertical="10dp"
         android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
+        app:layout_constraintStart_toStartOf="parent">
 
         <TextView
             android:id="@+id/tvOfflineBanner"

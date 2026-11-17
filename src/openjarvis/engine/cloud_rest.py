@@ -408,10 +408,13 @@ def generate_openai_compat_rest(
         "stream": False,
         **kwargs,
     }
-    # Optimize TTFT (time-to-first-token) on reasoning models on OpenRouter
+    # Optimize TTFT (time-to-first-token) and eliminate hidden reasoning delay on OpenRouter
     model_lower = model.lower()
-    if ("openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen"))) and "reasoning" not in payload:
-        payload["reasoning"] = {"effort": "low"}
+    if "openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
+        if "reasoning" not in payload:
+            payload["reasoning"] = {"effort": "low", "exclude": True}
+        if payload.get("max_tokens", 1024) > 350:
+            payload["max_tokens"] = 350
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:
@@ -427,6 +430,11 @@ def generate_openai_compat_rest(
     t0 = time.monotonic()
     try:
         resp = client.post(url, json=payload, headers=headers)
+        if resp.status_code == 429 and "openrouter" in base_url.lower() and payload.get("model") != "openrouter/free":
+            logger.info("OpenRouter model %s returned 429, instantly falling back to openrouter/free", payload.get("model"))
+            fallback_payload = dict(payload)
+            fallback_payload["model"] = "openrouter/free"
+            resp = client.post(url, json=fallback_payload, headers=headers)
         if resp.status_code == 400 and "tools" in payload:
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
@@ -511,10 +519,13 @@ async def stream_full_openai_compat_rest(
         "stream": True,
         **kwargs,
     }
-    # Optimize TTFT (time-to-first-token) on reasoning models on OpenRouter
+    # Optimize TTFT (time-to-first-token) and eliminate hidden reasoning delay on OpenRouter
     model_lower = model.lower()
-    if ("openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen"))) and "reasoning" not in payload:
-        payload["reasoning"] = {"effort": "low"}
+    if "openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
+        if "reasoning" not in payload:
+            payload["reasoning"] = {"effort": "low", "exclude": True}
+        if payload.get("max_tokens", 1024) > 350:
+            payload["max_tokens"] = 350
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:

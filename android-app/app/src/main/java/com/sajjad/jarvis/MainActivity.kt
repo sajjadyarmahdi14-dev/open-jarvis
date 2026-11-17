@@ -338,11 +338,14 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
         val startTime = System.currentTimeMillis()
         var hasTriggeredAutoStart = false
 
+        var consecutiveCheckFailures = 0
+
         healthJob = scope.launch {
             while (isActive) {
                 val isOnline = withContext(Dispatchers.IO) { checkServerOnline() }
 
                 if (isOnline) {
+                    consecutiveCheckFailures = 0
                     offlineBanner.visibility = View.GONE
                     if (splashContainer.visibility == View.VISIBLE) {
                         splashContainer.animate()
@@ -358,8 +361,9 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
                         isUrlLoaded = true
                         webView.loadUrl(targetUrl)
                     }
-                    delay(4000)
+                    delay(5000)
                 } else {
+                    consecutiveCheckFailures++
                     if (!hasTriggeredAutoStart) {
                         hasTriggeredAutoStart = true
                         tvSplashStatus.text = getString(R.string.init_core_systems)
@@ -373,10 +377,10 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
                             splashProgressBar.visibility = View.GONE
                             tvSplashStatus.text = "ارتباط با هسته هوش مصنوعی برقرار نشد"
                         }
-                    } else {
+                    } else if (consecutiveCheckFailures >= 3) {
                         offlineBanner.visibility = View.VISIBLE
                     }
-                    delay(800)
+                    delay(2000)
                 }
             }
         }
@@ -384,26 +388,32 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
 
     private fun checkServerOnline(): Boolean {
         return try {
-            val url = URL("$targetUrl/api/config")
+            val url = URL("$targetUrl/api/ping")
             val conn = url.openConnection() as HttpURLConnection
-            conn.connectTimeout = 700
-            conn.readTimeout = 700
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            conn.requestMethod = "GET"
             val code = conn.responseCode
             conn.disconnect()
-            code in 200..299
+            code in 200..399
         } catch (_: Exception) {
             try {
-                val urlFallback = URL("$targetUrl/api/status")
+                val urlFallback = URL("$targetUrl/health")
                 val connFallback = urlFallback.openConnection() as HttpURLConnection
-                connFallback.connectTimeout = 700
-                connFallback.readTimeout = 700
+                connFallback.connectTimeout = 3000
+                connFallback.readTimeout = 3000
+                connFallback.requestMethod = "GET"
                 val codeFallback = connFallback.responseCode
                 connFallback.disconnect()
-                codeFallback in 200..299
+                codeFallback in 200..399
             } catch (_: Exception) {
                 false
             }
         }
+    }
+
+    fun speakBritish(text: String) {
+        JarvisVoiceService.speakBritishDirect(this, text)
     }
 
     fun launchTermuxServer() {

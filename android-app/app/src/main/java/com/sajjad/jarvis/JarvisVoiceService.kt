@@ -1,6 +1,7 @@
 package com.sajjad.jarvis
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,20 +11,23 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,11 +36,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 
 class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
@@ -62,12 +68,16 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_TOGGLE_MUTE = "com.sajjad.jarvis.VOICE_TOGGLE_MUTE"
         const val ACTION_FORCE_LISTEN = "com.sajjad.jarvis.VOICE_FORCE_LISTEN"
 
-        private const val API_CHAT_URL = "http://127.0.0.1:8765/api/chat"
-        private const val DEBOUNCE_SILENCE_MS = 2800L
+        private const val SAMPLE_RATE = 16000
+        private const val VAD_SILENCE_WINDOW_MS = 2800L
+        private const val PRE_ROLL_DURATION_MS = 400
+        private const val CHUNK_SAMPLES = 1600 // 100ms at 16kHz
+        private const val MIN_SPEECH_RMS = 300.0
 
         var serviceListener: VoiceEventListener? = null
         var isServiceRunning = false
         var isServiceMuted = false
+        var instance: JarvisVoiceService? = null
 
         private var wakeLock: PowerManager.WakeLock? = null
 
@@ -106,27 +116,60 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             }
             context.startService(intent)
         }
+
+        fun speakBritishDirect(context: Context, text: String, onFinished: (() -> Unit)? = null) {
+            instance?.speakBritish(text, onFinished)
+        }
     }
 
-    enum class VoiceMode {
-        STANDBY_WAKE_WORD,
-        ACTIVE_COMMAND_CAPTURE,
-        PROCESSING
+    class ShortRingBuffer(private val capacity: Int) {
+        private val buffer = ShortArray(capacity)
+        private var writePos = 0
+        private var count = 0
+
+        @Synchronized
+        fun write(data: ShortArray, length: Int) {
+            for (i in 0 until length) {
+                buffer[writePos] = data[i]
+                writePos = (writePos + 1) % capacity
+                if (count < capacity) count++
+            }
+        }
+
+        @Synchronized
+        fun toByteArray(): ByteArray {
+            val out = ByteArray(count * 2)
+            var readPos = if (count < capacity) 0 else writePos
+            for (i in 0 until count) {
+                val sample = buffer[readPos]
+                out[i * 2] = (sample.toInt() and 0xFF).toByte()
+                out[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
+                readPos = (readPos + 1) % capacity
+            }
+            return out
+        }
+
+        @Synchronized
+        fun clear() {
+            writePos = 0
+            count = 0
+        }
     }
 
     private val scope = CoroutineScope(Dispatchers.Main + Job())
-    private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var isTtsReady = false
-    private var isTtsSpeaking = false
+    @Volatile private var isTtsSpeaking = false
 
-    private var currentMode = VoiceMode.STANDBY_WAKE_WORD
-    private val utteranceBuffer = StringBuilder()
-    private var debounceJob: Job? = null
-    private var restartListeningJob: Job? = null
+    private var audioRecord: AudioRecord? = null
+    private var recordingJob: Job? = null
+    @Volatile private var isRecordingLoopActive = false
+    @Volatile private var isUtteranceActive = false
+    private var nativeTtsCallback: (() -> Unit)? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         isServiceRunning = true
         Log.i(TAG, "JarvisVoiceService onCreate")
 
@@ -135,7 +178,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         initTextToSpeech()
 
         startAsForeground()
-        scheduleRestartListening(600L)
+        startContinuousAudioRecord()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -149,37 +192,516 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             ACTION_TOGGLE_MUTE -> {
                 isServiceMuted = !isServiceMuted
                 updateNotification()
-                if (isServiceMuted) {
-                    stopRecognizer()
-                    serviceListener?.onWakeStateChanged("paused")
-                } else {
-                    currentMode = VoiceMode.STANDBY_WAKE_WORD
-                    scheduleRestartListening(200L)
-                }
+                val st = if (isServiceMuted) "paused" else "listening_wake"
+                serviceListener?.onWakeStateChanged(st)
                 return START_STICKY
             }
             ACTION_FORCE_LISTEN -> {
-                if (!isServiceMuted && !isTtsSpeaking) {
-                    currentMode = VoiceMode.ACTIVE_COMMAND_CAPTURE
-                    utteranceBuffer.clear()
-                    playActivationChime()
-                    serviceListener?.onWakeStateChanged("listening_cmd")
-                    startRecognizer()
-                }
+                triggerForceListen()
                 return START_STICKY
             }
             else -> {
                 acquireWakeLock(this)
                 startAsForeground()
-                if (!isServiceMuted && !isTtsSpeaking) {
-                    scheduleRestartListening(400L)
-                }
+                startContinuousAudioRecord()
                 return START_STICKY
             }
         }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // -----------------------------------------------------------------------
+    // Continuous AudioRecord + Smart RMS VAD
+    // -----------------------------------------------------------------------
+
+    private fun startContinuousAudioRecord() {
+        if (recordingJob?.isActive == true) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "RECORD_AUDIO permission not granted")
+            return
+        }
+
+        recordingJob = scope.launch(Dispatchers.IO) {
+            val minBufSize = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            val bufferSize = maxOf(minBufSize, CHUNK_SAMPLES * 2 * 4)
+
+            try {
+                @SuppressLint("MissingPermission")
+                val record = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSize
+                )
+
+                if (record.state != AudioRecord.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioRecord failed to initialize")
+                    return@launch
+                }
+
+                audioRecord = record
+                record.startRecording()
+                isRecordingLoopActive = true
+                Log.i(TAG, "Continuous AudioRecord session started smoothly (zero beeps, persistent mic)")
+
+                val readBuffer = ShortArray(CHUNK_SAMPLES)
+                val preRollSamples = (SAMPLE_RATE * PRE_ROLL_DURATION_MS) / 1000 // 6400 samples
+                val preRoll = ShortRingBuffer(preRollSamples)
+                val utteranceStream = ByteArrayOutputStream()
+
+                var ambientRms = 180.0
+                var lastSpeechTimestamp = 0L
+
+                withContext(Dispatchers.Main) {
+                    val st = if (isServiceMuted) "paused" else "listening_wake"
+                    serviceListener?.onWakeStateChanged(st)
+                    updateNotification()
+                }
+
+                while (isActive && isRecordingLoopActive) {
+                    if (isServiceMuted || isTtsSpeaking) {
+                        preRoll.clear()
+                        utteranceStream.reset()
+                        isUtteranceActive = false
+                        delay(80)
+                        continue
+                    }
+
+                    val readCount = record.read(readBuffer, 0, CHUNK_SAMPLES)
+                    if (readCount <= 0) {
+                        delay(15)
+                        continue
+                    }
+
+                    // Calculate RMS of this chunk
+                    var sum = 0.0
+                    for (i in 0 until readCount) {
+                        val s = readBuffer[i].toDouble()
+                        sum += s * s
+                    }
+                    val chunkRms = Math.sqrt(sum / readCount)
+                    val speechThreshold = maxOf(ambientRms * 2.3, MIN_SPEECH_RMS)
+
+                    val now = System.currentTimeMillis()
+
+                    if (chunkRms >= speechThreshold) {
+                        lastSpeechTimestamp = now
+                        if (!isUtteranceActive) {
+                            isUtteranceActive = true
+                            utteranceStream.reset()
+                            val preRollBytes = preRoll.toByteArray()
+                            utteranceStream.write(preRollBytes)
+                            withContext(Dispatchers.Main) {
+                                serviceListener?.onSpeechStarted()
+                                serviceListener?.onWakeStateChanged("listening_cmd")
+                                updateNotification("Listening...")
+                            }
+                        }
+
+                        // Write chunk PCM samples to stream
+                        val chunkBytes = shortsToBytes(readBuffer, readCount)
+                        utteranceStream.write(chunkBytes)
+                    } else {
+                        // Chunk is below speech threshold (silence or ambient)
+                        if (isUtteranceActive) {
+                            val chunkBytes = shortsToBytes(readBuffer, readCount)
+                            utteranceStream.write(chunkBytes)
+
+                            if (now - lastSpeechTimestamp >= VAD_SILENCE_WINDOW_MS) {
+                                // 2.8 continuous seconds of silence reached! Finalize utterance!
+                                isUtteranceActive = false
+                                val pcmData = utteranceStream.toByteArray()
+                                utteranceStream.reset()
+                                preRoll.clear()
+
+                                withContext(Dispatchers.Main) {
+                                    serviceListener?.onSpeechEnded()
+                                }
+
+                                // If duration is >= 400ms (16kHz mono 16-bit = 12800 bytes)
+                                if (pcmData.size >= 12800) {
+                                    val wavBytes = pcmToWav(pcmData, SAMPLE_RATE)
+                                    dispatchVadUtterance(wavBytes)
+                                } else {
+                                    withContext(Dispatchers.Main) {
+                                        serviceListener?.onWakeStateChanged("listening_wake")
+                                        updateNotification()
+                                    }
+                                }
+                            }
+                        } else {
+                            // Idle ambient: update rolling ambient noise floor
+                            ambientRms = ambientRms * 0.95 + chunkRms * 0.05
+                            preRoll.write(readBuffer, readCount)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "AudioRecord loop exception: ${e.message}", e)
+            } finally {
+                try {
+                    audioRecord?.stop()
+                    audioRecord?.release()
+                } catch (_: Exception) {}
+                audioRecord = null
+                isRecordingLoopActive = false
+            }
+        }
+    }
+
+    private fun triggerForceListen() {
+        if (isServiceMuted || isTtsSpeaking) return
+        playActivationChime()
+        isUtteranceActive = true
+        scope.launch(Dispatchers.Main) {
+            serviceListener?.onWakeStateChanged("listening_cmd")
+            serviceListener?.onSpeechStarted()
+            updateNotification("Listening for command...")
+        }
+    }
+
+    private fun pcmToWav(pcmData: ByteArray, sampleRate: Int = SAMPLE_RATE): ByteArray {
+        val totalDataLen = pcmData.size + 36
+        val byteRate = sampleRate * 1 * 16 / 8 // 32000
+        val blockAlign: Short = 2
+        val bitsPerSample: Short = 16
+        val channels: Short = 1
+
+        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+        header.put("RIFF".toByteArray(Charsets.US_ASCII))
+        header.putInt(totalDataLen)
+        header.put("WAVE".toByteArray(Charsets.US_ASCII))
+        header.put("fmt ".toByteArray(Charsets.US_ASCII))
+        header.putInt(16) // Subchunk1Size for PCM
+        header.putShort(1.toShort()) // AudioFormat 1 = PCM
+        header.putShort(channels)
+        header.putInt(sampleRate)
+        header.putInt(byteRate)
+        header.putShort(blockAlign)
+        header.putShort(bitsPerSample)
+        header.put("data".toByteArray(Charsets.US_ASCII))
+        header.putInt(pcmData.size)
+
+        val out = ByteArray(44 + pcmData.size)
+        System.arraycopy(header.array(), 0, out, 0, 44)
+        System.arraycopy(pcmData, 0, out, 44, pcmData.size)
+        return out
+    }
+
+    private fun shortsToBytes(shorts: ShortArray, count: Int): ByteArray {
+        val bytes = ByteArray(count * 2)
+        for (i in 0 until count) {
+            val s = shorts[i].toInt()
+            bytes[i * 2] = (s and 0xFF).toByte()
+            bytes[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+        }
+        return bytes
+    }
+
+    // -----------------------------------------------------------------------
+    // Utterance Dispatch to Backend & Execution
+    // -----------------------------------------------------------------------
+
+    private fun dispatchVadUtterance(wavBytes: ByteArray) {
+        scope.launch {
+            serviceListener?.onWakeStateChanged("processing")
+            updateNotification("Processing speech...")
+
+            val result = withContext(Dispatchers.IO) {
+                sendVadUtterance(wavBytes)
+            }
+
+            if (result != null) {
+                val transcript = result.optString("transcription", "")
+                val response = result.optString("response", "")
+                val clientActions = result.optJSONArray("client_actions")
+
+                if (transcript.isNotBlank()) {
+                    serviceListener?.onFinalSpeech(transcript)
+                }
+
+                // Process client actions (e.g. app launch, torch, volume)
+                if (clientActions != null) {
+                    for (i in 0 until clientActions.length()) {
+                        val act = clientActions.optJSONObject(i) ?: continue
+                        if (act.optString("type") == "launch_app") {
+                            val target = act.optString("target", "")
+                            if (target.isNotBlank()) {
+                                AppLauncher.launchApp(applicationContext, target)
+                            }
+                        }
+                    }
+                }
+
+                if (response.isNotBlank()) {
+                    serviceListener?.onAssistantResponse(response)
+                    speakBritish(response)
+                } else {
+                    serviceListener?.onWakeStateChanged("listening_wake")
+                    updateNotification()
+                }
+            } else {
+                serviceListener?.onWakeStateChanged("listening_wake")
+                updateNotification()
+            }
+        }
+    }
+
+    private fun sendVadUtterance(wavData: ByteArray): JSONObject? {
+        return try {
+            val url = URL("http://127.0.0.1:8765/api/voice/vad_utterance")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "audio/wav")
+            conn.setRequestProperty("Accept", "application/json")
+            conn.connectTimeout = 5000
+            conn.readTimeout = 15000
+            conn.doOutput = true
+            conn.outputStream.use { it.write(wavData) }
+            val code = conn.responseCode
+            if (code in 200..299) {
+                val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                JSONObject(respStr)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "sendVadUtterance error: ${e.message}")
+            null
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Authentic British Neural Voice Player (with UK Male TTS Fallback)
+    // -----------------------------------------------------------------------
+
+    fun speakBritish(text: String, onFinished: (() -> Unit)? = null) {
+        if (text.isBlank()) {
+            onFinished?.invoke()
+            return
+        }
+
+        scope.launch(Dispatchers.Main) {
+            isTtsSpeaking = true
+            serviceListener?.onTtsStarted()
+            updateNotification("Speaking...")
+
+            val hasPersian = text.any { it in '\u0600'..'\u06FF' }
+            val voiceParam = if (hasPersian) "fa-IR-FaridNeural" else "en-GB-RyanNeural"
+            val rateParam = if (hasPersian) "+0%" else "+6%"
+            val pitchParam = "-2Hz"
+
+            val audioSuccess = withContext(Dispatchers.IO) {
+                playViaMediaPlayer(text, voiceParam, rateParam, pitchParam)
+            }
+
+            if (!audioSuccess) {
+                // Fallback immediately to native Android TextToSpeech
+                speakViaNativeTTS(text, hasPersian, onFinished)
+            } else {
+                isTtsSpeaking = false
+                serviceListener?.onTtsFinished()
+                val st = if (isServiceMuted) "paused" else "listening_wake"
+                serviceListener?.onWakeStateChanged(st)
+                updateNotification()
+                onFinished?.invoke()
+            }
+        }
+    }
+
+    private suspend fun playViaMediaPlayer(
+        text: String,
+        voice: String,
+        rate: String,
+        pitch: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        var mediaPlayer: MediaPlayer? = null
+        var tempFile: File? = null
+        try {
+            val encodedText = URLEncoder.encode(text, "UTF-8")
+            val encodedVoice = URLEncoder.encode(voice, "UTF-8")
+            val encodedRate = URLEncoder.encode(rate, "UTF-8")
+            val encodedPitch = URLEncoder.encode(pitch, "UTF-8")
+            val url = URL("http://127.0.0.1:8765/api/tts/audio?text=$encodedText&voice=$encodedVoice&rate=$encodedRate&pitch=$encodedPitch")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 1500
+            conn.readTimeout = 5000
+            conn.requestMethod = "GET"
+            if (conn.responseCode !in 200..299) {
+                return@withContext false
+            }
+
+            tempFile = File.createTempFile("jarvis_tts_", ".mp3", cacheDir)
+            tempFile.outputStream().use { out ->
+                conn.inputStream.copyTo(out)
+            }
+
+            if (tempFile.length() < 100) {
+                tempFile.delete()
+                return@withContext false
+            }
+
+            val completed = CompletableDeferred<Boolean>()
+            withContext(Dispatchers.Main) {
+                try {
+                    mediaPlayer = MediaPlayer().apply {
+                        setDataSource(tempFile.absolutePath)
+                        setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                                .build()
+                        )
+                        setOnCompletionListener {
+                            completed.complete(true)
+                        }
+                        setOnErrorListener { _, _, _ ->
+                            completed.complete(false)
+                            true
+                        }
+                        prepare()
+                        start()
+                    }
+                } catch (e: Exception) {
+                    completed.complete(false)
+                }
+            }
+            completed.await()
+        } catch (e: Exception) {
+            Log.w(TAG, "playViaMediaPlayer error: ${e.message}")
+            false
+        } finally {
+            try { mediaPlayer?.release() } catch (_: Exception) {}
+            try { tempFile?.delete() } catch (_: Exception) {}
+        }
+    }
+
+    private fun speakViaNativeTTS(text: String, isPersian: Boolean, onFinished: (() -> Unit)?) {
+        if (textToSpeech == null || !isTtsReady) {
+            isTtsSpeaking = false
+            serviceListener?.onTtsFinished()
+            val st = if (isServiceMuted) "paused" else "listening_wake"
+            serviceListener?.onWakeStateChanged(st)
+            updateNotification()
+            onFinished?.invoke()
+            return
+        }
+
+        try {
+            if (isPersian) {
+                val res = textToSpeech?.setLanguage(Locale("fa", "IR"))
+                if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    textToSpeech?.language = Locale.UK
+                }
+            } else {
+                textToSpeech?.language = Locale.UK
+                textToSpeech?.setPitch(0.90f)
+                textToSpeech?.setSpeechRate(1.05f)
+            }
+
+            val utteranceId = "JARVIS_NATIVE_" + System.currentTimeMillis()
+            val params = Bundle().apply {
+                putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+            }
+
+            nativeTtsCallback = onFinished
+            textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+        } catch (e: Exception) {
+            Log.e(TAG, "speakViaNativeTTS error: ${e.message}")
+            isTtsSpeaking = false
+            serviceListener?.onTtsFinished()
+            val st = if (isServiceMuted) "paused" else "listening_wake"
+            serviceListener?.onWakeStateChanged(st)
+            updateNotification()
+            onFinished?.invoke()
+        }
+    }
+
+    private fun initTextToSpeech() {
+        try {
+            textToSpeech = TextToSpeech(applicationContext, this)
+        } catch (e: Exception) {
+            Log.w(TAG, "TextToSpeech init failed: ${e.message}")
+        }
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            try {
+                textToSpeech?.language = Locale.UK
+                textToSpeech?.setPitch(0.90f)
+                textToSpeech?.setSpeechRate(1.05f)
+
+                val voices = textToSpeech?.voices
+                if (voices != null) {
+                    val britishMale = voices.firstOrNull { v ->
+                        val name = v.name.lowercase(Locale.ROOT)
+                        (v.locale == Locale.UK || v.locale.language == "en") &&
+                        (name.contains("male") || name.contains("rjs") || name.contains("gbd") || name.contains("en-gb"))
+                    }
+                    if (britishMale != null) {
+                        textToSpeech?.voice = britishMale
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    isTtsSpeaking = true
+                    serviceListener?.onTtsStarted()
+                }
+
+                override fun onDone(utteranceId: String?) {
+                    isTtsSpeaking = false
+                    serviceListener?.onTtsFinished()
+                    val st = if (isServiceMuted) "paused" else "listening_wake"
+                    serviceListener?.onWakeStateChanged(st)
+                    updateNotification()
+                    nativeTtsCallback?.invoke()
+                    nativeTtsCallback = null
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    isTtsSpeaking = false
+                    serviceListener?.onTtsFinished()
+                    val st = if (isServiceMuted) "paused" else "listening_wake"
+                    serviceListener?.onWakeStateChanged(st)
+                    updateNotification()
+                    nativeTtsCallback?.invoke()
+                    nativeTtsCallback = null
+                }
+
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    isTtsSpeaking = false
+                    serviceListener?.onTtsFinished()
+                    val st = if (isServiceMuted) "paused" else "listening_wake"
+                    serviceListener?.onWakeStateChanged(st)
+                    updateNotification()
+                    nativeTtsCallback?.invoke()
+                    nativeTtsCallback = null
+                }
+            })
+            isTtsReady = true
+        }
+    }
+
+    private fun playActivationChime() {
+        try {
+            val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 85)
+            tg.startTone(ToneGenerator.TONE_PROP_BEEP2, 180)
+            scope.launch {
+                delay(300)
+                try { tg.release() } catch (_: Throwable) {}
+            }
+        } catch (_: Throwable) {}
+    }
 
     // -----------------------------------------------------------------------
     // Foreground Notification
@@ -217,7 +739,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(overrideText: String? = null): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -242,10 +764,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val contentText = when {
+        val contentText = overrideText ?: when {
             isServiceMuted -> getString(R.string.voice_service_paused)
-            currentMode == VoiceMode.PROCESSING -> getString(R.string.voice_service_processing)
-            currentMode == VoiceMode.ACTIVE_COMMAND_CAPTURE -> "Listening for command..."
+            isUtteranceActive -> "Listening for command..."
             else -> getString(R.string.voice_service_listening)
         }
 
@@ -263,426 +784,23 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             .build()
     }
 
-    private fun updateNotification() {
+    private fun updateNotification(overrideText: String? = null) {
         try {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, buildNotification())
+            manager.notify(NOTIFICATION_ID, buildNotification(overrideText))
         } catch (_: Exception) {}
-    }
-
-    // -----------------------------------------------------------------------
-    // Text-To-Speech (British Male Neural / UK System Voice)
-    // -----------------------------------------------------------------------
-
-    private fun initTextToSpeech() {
-        try {
-            textToSpeech = TextToSpeech(applicationContext, this)
-        } catch (e: Exception) {
-            Log.w(TAG, "TextToSpeech init failed: ${e.message}")
-        }
-    }
-
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            try {
-                textToSpeech?.language = Locale.UK
-                textToSpeech?.setPitch(0.92f)
-                textToSpeech?.setSpeechRate(1.03f)
-
-                val voices = textToSpeech?.voices
-                if (voices != null) {
-                    val britishMale = voices.firstOrNull { v ->
-                        val name = v.name.lowercase(Locale.ROOT)
-                        (v.locale == Locale.UK || v.locale.language == "en") &&
-                        (name.contains("male") || name.contains("rjs") || name.contains("gbd") || name.contains("en-gb"))
-                    }
-                    if (britishMale != null) {
-                        textToSpeech?.voice = britishMale
-                    }
-                }
-            } catch (_: Throwable) {}
-
-            textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    isTtsSpeaking = true
-                    stopRecognizer()
-                    serviceListener?.onTtsStarted()
-                }
-
-                override fun onDone(utteranceId: String?) {
-                    isTtsSpeaking = false
-                    serviceListener?.onTtsFinished()
-                    currentMode = VoiceMode.STANDBY_WAKE_WORD
-                    scheduleRestartListening(400L)
-                }
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    isTtsSpeaking = false
-                    serviceListener?.onTtsFinished()
-                    currentMode = VoiceMode.STANDBY_WAKE_WORD
-                    scheduleRestartListening(400L)
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    isTtsSpeaking = false
-                    serviceListener?.onTtsFinished()
-                    currentMode = VoiceMode.STANDBY_WAKE_WORD
-                    scheduleRestartListening(400L)
-                }
-            })
-            isTtsReady = true
-        }
-    }
-
-    fun speak(text: String) {
-        if (text.isBlank()) return
-        scope.launch(Dispatchers.Main) {
-            if (isTtsReady) {
-                isTtsSpeaking = true
-                stopRecognizer()
-
-                val hasPersian = text.any { it in '\u0600'..'\u06FF' }
-                if (hasPersian) {
-                    val persianLocale = Locale("fa", "IR")
-                    val result = textToSpeech?.setLanguage(persianLocale)
-                    if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                        textToSpeech?.language = Locale.UK
-                    }
-                } else {
-                    textToSpeech?.language = Locale.UK
-                    textToSpeech?.setPitch(0.92f)
-                    textToSpeech?.setSpeechRate(1.03f)
-                }
-
-                val params = Bundle().apply {
-                    putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "JARVIS_VOICE_" + System.currentTimeMillis())
-                }
-                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "JARVIS_VOICE")
-            }
-        }
-    }
-
-    private fun playActivationChime() {
-        try {
-            val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 85)
-            tg.startTone(ToneGenerator.TONE_PROP_BEEP2, 180)
-            scope.launch {
-                delay(300)
-                try { tg.release() } catch (_: Throwable) {}
-            }
-        } catch (_: Throwable) {}
-    }
-
-    // -----------------------------------------------------------------------
-    // Continuous Speech Recognizer & Patient Utterance Accumulator
-    // -----------------------------------------------------------------------
-
-    private fun scheduleRestartListening(delayMs: Long = 400L) {
-        if (isServiceMuted || isTtsSpeaking) return
-        restartListeningJob?.cancel()
-        restartListeningJob = scope.launch {
-            delay(delayMs)
-            if (isActive && !isServiceMuted && !isTtsSpeaking) {
-                startRecognizer()
-            }
-        }
-    }
-
-    private fun startRecognizer() {
-        if (isServiceMuted || isTtsSpeaking) return
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            Log.w(TAG, "Record audio permission not granted")
-            return
-        }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Log.w(TAG, "Speech recognition not available on device")
-            return
-        }
-
-        try {
-            speechRecognizer?.destroy()
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-                setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        val st = if (currentMode == VoiceMode.ACTIVE_COMMAND_CAPTURE) "listening_cmd" else "listening_wake"
-                        serviceListener?.onWakeStateChanged(st)
-                        updateNotification()
-                    }
-
-                    override fun onBeginningOfSpeech() {
-                        serviceListener?.onSpeechStarted()
-                    }
-
-                    override fun onRmsChanged(rmsdB: Float) {}
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-
-                    override fun onEndOfSpeech() {
-                        serviceListener?.onSpeechEnded()
-                        // If in active command mode and user paused, do not close command yet!
-                        // Immediately keep recognizer alive if debounce timer hasn't fired
-                        if (currentMode == VoiceMode.ACTIVE_COMMAND_CAPTURE) {
-                            scheduleRestartListening(250L)
-                        }
-                    }
-
-                    override fun onError(error: Int) {
-                        // In standby mode, silence timeouts are completely normal — silently restart after 400ms!
-                        if (currentMode == VoiceMode.STANDBY_WAKE_WORD) {
-                            scheduleRestartListening(400L)
-                            return
-                        }
-
-                        // In active command capture mode, if buffer has text, let the debounce timer finish!
-                        if (currentMode == VoiceMode.ACTIVE_COMMAND_CAPTURE && utteranceBuffer.isNotBlank()) {
-                            // Don't cancel debounce; keep waiting for 2.8s total silence or restart
-                            scheduleRestartListening(350L)
-                            return
-                        }
-
-                        // Empty command timed out: return to standby
-                        currentMode = VoiceMode.STANDBY_WAKE_WORD
-                        serviceListener?.onWakeStateChanged("listening_wake")
-                        updateNotification()
-                        scheduleRestartListening(400L)
-                    }
-
-                    override fun onPartialResults(partialResults: Bundle?) {
-                        val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val text = matches?.firstOrNull()?.trim() ?: return
-
-                        if (currentMode == VoiceMode.STANDBY_WAKE_WORD) {
-                            if (containsWakeWord(text)) {
-                                val remainder = stripWakeWord(text)
-                                playActivationChime()
-                                currentMode = VoiceMode.ACTIVE_COMMAND_CAPTURE
-                                utteranceBuffer.clear()
-                                if (remainder.length > 1) {
-                                    utteranceBuffer.append(remainder)
-                                }
-                                resetDebounceTimer()
-                                serviceListener?.onWakeStateChanged("listening_cmd")
-                                serviceListener?.onPartialSpeech(utteranceBuffer.toString())
-                                updateNotification()
-                            }
-                        } else if (currentMode == VoiceMode.ACTIVE_COMMAND_CAPTURE) {
-                            val clean = stripWakeWord(text)
-                            if (clean.isNotBlank()) {
-                                utteranceBuffer.clear()
-                                utteranceBuffer.append(clean)
-                                resetDebounceTimer()
-                                serviceListener?.onPartialSpeech(clean)
-                            }
-                        }
-                    }
-
-                    override fun onResults(results: Bundle?) {
-                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val text = matches?.firstOrNull()?.trim() ?: ""
-
-                        if (currentMode == VoiceMode.STANDBY_WAKE_WORD) {
-                            if (containsWakeWord(text)) {
-                                val remainder = stripWakeWord(text)
-                                playActivationChime()
-                                currentMode = VoiceMode.ACTIVE_COMMAND_CAPTURE
-                                utteranceBuffer.clear()
-                                if (remainder.isNotBlank()) {
-                                    utteranceBuffer.append(remainder)
-                                    resetDebounceTimer()
-                                    serviceListener?.onPartialSpeech(remainder)
-                                } else {
-                                    // Just "Jarvis" was spoken
-                                    speak("Yes, sir?")
-                                    resetDebounceTimer()
-                                }
-                                serviceListener?.onWakeStateChanged("listening_cmd")
-                                updateNotification()
-                            } else {
-                                scheduleRestartListening(400L)
-                            }
-                        } else if (currentMode == VoiceMode.ACTIVE_COMMAND_CAPTURE) {
-                            val clean = stripWakeWord(text)
-                            if (clean.isNotBlank()) {
-                                utteranceBuffer.clear()
-                                utteranceBuffer.append(clean)
-                                resetDebounceTimer()
-                                serviceListener?.onPartialSpeech(clean)
-                            }
-                            // Keep recognizer running until 2.8s timer fires
-                            scheduleRestartListening(250L)
-                        }
-                    }
-
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
-            }
-
-            // Configure Patient Silence Thresholds on RecognizerIntent
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-                putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "fa-IR"))
-                // Fix voice loop & cut-off: Patient silence thresholds
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 4000L)
-            }
-            speechRecognizer?.startListening(intent)
-        } catch (e: Exception) {
-            Log.e(TAG, "startListening error: ${e.message}")
-            scheduleRestartListening(1500L)
-        }
-    }
-
-    private fun stopRecognizer() {
-        try {
-            speechRecognizer?.stopListening()
-            speechRecognizer?.cancel()
-        } catch (_: Exception) {}
-    }
-
-    private fun resetDebounceTimer() {
-        debounceJob?.cancel()
-        debounceJob = scope.launch {
-            delay(DEBOUNCE_SILENCE_MS)
-            commitUtterance()
-        }
-    }
-
-    private fun commitUtterance() {
-        val finalCommand = utteranceBuffer.toString().trim()
-        utteranceBuffer.clear()
-
-        if (finalCommand.isBlank()) {
-            currentMode = VoiceMode.STANDBY_WAKE_WORD
-            serviceListener?.onWakeStateChanged("listening_wake")
-            updateNotification()
-            scheduleRestartListening(400L)
-            return
-        }
-
-        currentMode = VoiceMode.PROCESSING
-        stopRecognizer()
-        serviceListener?.onWakeStateChanged("processing")
-        serviceListener?.onFinalSpeech(finalCommand)
-        updateNotification()
-
-        dispatchVoiceCommand(finalCommand)
-    }
-
-    // -----------------------------------------------------------------------
-    // Execute Voice Commands & App Launches Directly from Service
-    // -----------------------------------------------------------------------
-
-    private fun dispatchVoiceCommand(command: String) {
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                executeChatRequest(command)
-            }
-
-            if (result != null) {
-                // 1. Process client_actions (e.g. app launching with FLAG_ACTIVITY_NEW_TASK)
-                val actions = result.optJSONArray("client_actions")
-                if (actions != null) {
-                    for (i in 0 until actions.length()) {
-                        val act = actions.optJSONObject(i) ?: continue
-                        if (act.optString("type") == "launch_app") {
-                            val target = act.optString("target", "")
-                            if (target.isNotBlank()) {
-                                AppLauncher.launchApp(applicationContext, target)
-                            }
-                        }
-                    }
-                }
-
-                // 2. Play British TTS response
-                val reply = result.optString("response", "").trim()
-                if (reply.isNotBlank()) {
-                    serviceListener?.onAssistantResponse(reply)
-                    speak(reply)
-                } else {
-                    currentMode = VoiceMode.STANDBY_WAKE_WORD
-                    serviceListener?.onWakeStateChanged("listening_wake")
-                    updateNotification()
-                    scheduleRestartListening(400L)
-                }
-            } else {
-                speak("I was unable to connect to the core system, sir.")
-                currentMode = VoiceMode.STANDBY_WAKE_WORD
-                serviceListener?.onWakeStateChanged("listening_wake")
-                updateNotification()
-                scheduleRestartListening(600L)
-            }
-        }
-    }
-
-    private fun executeChatRequest(message: String): JSONObject? {
-        return try {
-            val url = URL(API_CHAT_URL)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json; utf-8")
-            conn.setRequestProperty("Accept", "application/json")
-            conn.connectTimeout = 8000
-            conn.readTimeout = 25000
-            conn.doOutput = true
-
-            val jsonReq = JSONObject().apply {
-                put("message", message)
-                put("tts", false) // Service plays TTS directly
-            }
-
-            OutputStreamWriter(conn.outputStream, "UTF-8").use { writer ->
-                writer.write(jsonReq.toString())
-                writer.flush()
-            }
-
-            val code = conn.responseCode
-            if (code in 200..299) {
-                BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use { reader ->
-                    val sb = StringBuilder()
-                    var line: String?
-                    while (reader.readLine().also { line = it } != null) {
-                        sb.append(line)
-                    }
-                    JSONObject(sb.toString())
-                }
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "executeChatRequest error: ${e.message}")
-            null
-        }
-    }
-
-    private fun containsWakeWord(text: String): Boolean {
-        val lower = text.lowercase(Locale.ROOT)
-        return lower.contains("jarvis") || text.contains("جارویس")
-    }
-
-    private fun stripWakeWord(text: String): String {
-        var cleaned = text
-        val patterns = arrayOf(
-            "(?i)^\\s*(hey|hi|hello|ok|okay|dear)?\\s*jarvis[,.!?\\s]*",
-            "(?i)[,.!?\\s]*jarvis[,.!?\\s]*",
-            "^\\s*(سلام|هی|درود)?\\s*جارویس[,.!?\\s]*",
-            "[,.!?\\s]*جارویس[,.!?\\s]*"
-        )
-        for (pattern in patterns) {
-            cleaned = cleaned.replaceFirst(Regex(pattern), " ")
-        }
-        return cleaned.trim()
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         isServiceRunning = false
-        debounceJob?.cancel()
-        restartListeningJob?.cancel()
-        stopRecognizer()
-        speechRecognizer?.destroy()
+        isRecordingLoopActive = false
+        recordingJob?.cancel()
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (_: Exception) {}
+        audioRecord = null
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         releaseWakeLock()

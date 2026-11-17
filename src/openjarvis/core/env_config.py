@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 OPENJARVIS_DIR = Path.home() / ".openjarvis"
 CONFIG_JSON_PATH = OPENJARVIS_DIR / "config.json"
-DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+DEFAULT_OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 

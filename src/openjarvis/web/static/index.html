@@ -124,6 +124,17 @@
       background: var(--green);
       box-shadow: 0 0 8px var(--green);
       animation: pulse 2s infinite;
+      transition: background 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .pulse-dot.amber {
+      background: #f59e0b !important;
+      box-shadow: 0 0 8px #f59e0b !important;
+    }
+
+    .pulse-dot.red {
+      background: var(--red) !important;
+      box-shadow: 0 0 8px var(--red) !important;
     }
 
     @keyframes pulse {
@@ -938,6 +949,10 @@
     // Authentic British Neural Voice Player (with fallback to Native UK Male TTS)
     async function playBritishTTS(text) {
       const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
+      if (bridge && typeof bridge.speakBritish === 'function') {
+        bridge.speakBritish(text);
+        return;
+      }
       if (bridge && typeof bridge.onTtsStarted === 'function') {
         bridge.onTtsStarted();
       }
@@ -1176,6 +1191,7 @@
         });
 
         const data = await resp.json();
+        markServerOnline();
         removeTypingIndicator();
 
         if (data.response) {
@@ -1218,6 +1234,7 @@
           body: JSON.stringify(params)
         });
         const data = await resp.json();
+        markServerOnline();
         removeTypingIndicator();
 
         const success = data.success !== false;
@@ -1499,10 +1516,42 @@
       }
     }
 
+    // Lightweight Ping Health Monitor (<5ms ping check, no banner obstruction)
+    let consecutivePingFailures = 0;
+    function markServerOnline() {
+      consecutivePingFailures = 0;
+      const dot = document.querySelector('.pulse-dot');
+      if (dot) dot.classList.remove('amber', 'red');
+    }
+
+    async function checkServerPing() {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch('/api/ping', { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (res.ok) {
+          markServerOnline();
+          return true;
+        } else {
+          consecutivePingFailures++;
+        }
+      } catch (_) {
+        consecutivePingFailures++;
+      }
+      const dot = document.querySelector('.pulse-dot');
+      if (dot && consecutivePingFailures >= 3) {
+        dot.classList.add('amber');
+      }
+      return false;
+    }
+    setInterval(checkServerPing, 6000);
+
     // Initialize status check
     fetch('/api/status')
       .then(r => r.json())
       .then(s => {
+        markServerOnline();
         if (s.model) {
           const prov = (s.provider || s.platform || 'ANDROID').toUpperCase();
           document.getElementById('status-label').innerText = `${prov} // ${s.model}`;
