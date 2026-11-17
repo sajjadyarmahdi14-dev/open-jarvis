@@ -818,13 +818,13 @@
 
         <div class="form-group">
           <label>Active Model ID</label>
-          <input type="text" id="input-active-model" placeholder="e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free">
+          <input type="text" id="input-active-model" placeholder="e.g. meta-llama/llama-3.3-70b-instruct:free">
           <div class="model-presets">
-            <span class="preset-pill" onclick="selectModelPreset('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')">⚡ Nemotron Nano (Free Reasoning)</span>
-            <span class="preset-pill" onclick="selectModelPreset('google/gemma-4-31b-it:free')">⚡ Gemma 4 31B (Fast & Free)</span>
-            <span class="preset-pill" onclick="selectModelPreset('openrouter/free')">🆓 OpenRouter Free</span>
-            <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Free)</span>
-            <span class="preset-pill" onclick="selectModelPreset('gemini-2.5-flash')">⚡ Gemini 2.5 Flash</span>
+            <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Primary Default)</span>
+            <span class="preset-pill" onclick="selectModelPreset('google/gemma-3-27b-it:free')">⚡ Gemma 3 27B (Fast Fallback)</span>
+            <span class="preset-pill" onclick="selectModelPreset('qwen/qwen-2.5-72b-instruct:free')">🧠 Qwen 2.5 72B (Free)</span>
+            <span class="preset-pill" onclick="selectModelPreset('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')">⚡ Nemotron Nano (Reasoning)</span>
+            <span class="preset-pill" onclick="selectModelPreset('openrouter/free')">🆓 OpenRouter Free Router</span>
           </div>
         </div>
 
@@ -888,6 +888,14 @@
   </footer>
 
   <script>
+    // Disable ALL WebView mic capture when running in native Android app (exclusive to JarvisVoiceService!)
+    const isNativeAndroid = !!(window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis);
+    if (isNativeAndroid && navigator.mediaDevices) {
+      try {
+        navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Microphone is managed exclusively by JarvisVoiceService"));
+      } catch (_) {}
+    }
+
     let ttsEnabled = true;
     let wakeWordEnabled = true;
     let isRecording = false;
@@ -1282,15 +1290,9 @@
       const micBtn = document.getElementById('btn-mic');
       const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
 
-      // 1. Android Native App: Always use on-device SpeechRecognizer for free, zero-latency speech-to-text
-      if (bridge && typeof bridge.startVoiceRecognition === 'function') {
-        if (micBtn.classList.contains('recording')) {
-          if (typeof bridge.stopVoiceRecognition === 'function') {
-            bridge.stopVoiceRecognition();
-          }
-          micBtn.classList.remove('recording');
-        } else {
-          micBtn.classList.add('recording');
+      // 1. Android Native App: Strictly delegate to JarvisVoiceService (NEVER capture audio inside WebView!)
+      if (bridge) {
+        if (typeof bridge.startVoiceRecognition === 'function') {
           bridge.startVoiceRecognition();
         }
         return;
@@ -1469,7 +1471,7 @@
           document.getElementById('input-gemini-key').placeholder = 'AIzaSy...';
         }
 
-        document.getElementById('input-active-model').value = data.active_model || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+        document.getElementById('input-active-model').value = data.active_model || 'meta-llama/llama-3.3-70b-instruct:free';
 
         const serverInput = document.getElementById('input-server-url');
         if (serverInput) {

@@ -380,6 +380,14 @@ async def stream_full_gemini_rest(
 # OpenAI-Compatible & OpenRouter REST Helpers
 # ---------------------------------------------------------------------------
 
+FREE_MODEL_FALLBACK_POOL: List[str] = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/free",
+]
+
 
 def generate_openai_compat_rest(
     client: httpx.Client,
@@ -392,7 +400,7 @@ def generate_openai_compat_rest(
     extra_headers: Optional[Dict[str, str]] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Synchronous OpenAI-compatible completion with tool_calls support."""
+    """Synchronous OpenAI-compatible completion with multi-model fallback and tool_calls support."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -408,13 +416,6 @@ def generate_openai_compat_rest(
         "stream": False,
         **kwargs,
     }
-    # Optimize TTFT (time-to-first-token) and ensure sufficient tokens for reasoning models
-    model_lower = model.lower()
-    if "openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
-        if "reasoning" not in payload:
-            payload["reasoning"] = {"effort": "low", "exclude": True}
-        if payload.get("max_tokens", 1024) < 1500:
-            payload["max_tokens"] = 1500
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:
@@ -428,25 +429,85 @@ def generate_openai_compat_rest(
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     t0 = time.monotonic()
-    try:
-        resp = client.post(url, json=payload, headers=headers)
-        if resp.status_code == 429 and "openrouter" in base_url.lower() and payload.get("model") != "openrouter/free":
-            logger.info("OpenRouter model %s returned 429, instantly falling back to openrouter/free", payload.get("model"))
-            fallback_payload = dict(payload)
-            fallback_payload["model"] = "openrouter/free"
-            resp = client.post(url, json=fallback_payload, headers=headers)
-        if resp.status_code == 400 and "tools" in payload:
-            payload.pop("tools", None)
-            payload.pop("tool_choice", None)
-            resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        err_msg = exc.response.text
-        if looks_like_context_length_error(err_msg):
-            raise EngineContextLengthError(f"Context length overflow: {err_msg}") from exc
-        raise EngineConnectionError(f"API returned HTTP {exc.response.status_code}: {err_msg}") from exc
-    except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        raise EngineConnectionError(f"Connection failed to {url}") from exc
+
+    # Prioritized model pool with auto-rotation on 429, 502, 503, timeout, or blank reply
+    models_to_try = [model]
+    if "openrouter" in base_url.lower():
+        for pm in FREE_MODEL_FALLBACK_POOL:
+            if pm not in models_to_try:
+                models_to_try.append(pm)
+
+    data = None
+    selected_model = model
+    last_exc = None
+
+    for candidate in models_to_try:
+        cand_payload = dict(payload)
+        cand_payload["model"] = candidate
+        cand_lower = candidate.lower()
+        if "openrouter" in base_url.lower() or any(k in cand_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
+            if "reasoning" not in cand_payload:
+                cand_payload["reasoning"] = {"effort": "low", "exclude": True}
+            if cand_payload.get("max_tokens", 1024) < 1500:
+                cand_payload["max_tokens"] = 1500
+        else:
+            cand_payload.pop("reasoning", None)
+
+        try:
+            resp = client.post(url, json=cand_payload, headers=headers)
+            if resp.status_code in (429, 502, 503, 504) and candidate != models_to_try[-1]:
+                logger.warning("Model %s returned HTTP %d, rotating to next candidate...", candidate, resp.status_code)
+                continue
+            if resp.status_code == 400 and "tools" in cand_payload:
+                cand_payload.pop("tools", None)
+                cand_payload.pop("tool_choice", None)
+                resp = client.post(url, json=cand_payload, headers=headers)
+
+            resp.raise_for_status()
+            cand_data = resp.json()
+            cand_choices = cand_data.get("choices", [])
+            if not cand_choices and candidate != models_to_try[-1]:
+                logger.warning("Model %s returned empty choices, rotating...", candidate)
+                continue
+
+            msg_obj = cand_choices[0].get("message", {}) if cand_choices else {}
+            has_content = bool(msg_obj.get("content", "").strip())
+            has_tool_calls = bool(msg_obj.get("tool_calls"))
+            if not has_content and not has_tool_calls and candidate != models_to_try[-1]:
+                logger.warning("Model %s returned blank content and no tool calls, rotating...", candidate)
+                continue
+
+            data = cand_data
+            selected_model = candidate
+            break
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if exc.response.status_code in (429, 502, 503, 504) and candidate != models_to_try[-1]:
+                logger.warning("HTTP %d on model %s, rotating...", exc.response.status_code, candidate)
+                continue
+            err_msg = exc.response.text
+            if looks_like_context_length_error(err_msg):
+                raise EngineContextLengthError(f"Context length overflow: {err_msg}") from exc
+            if candidate == models_to_try[-1]:
+                raise EngineConnectionError(f"All models failed. Last error HTTP {exc.response.status_code}: {err_msg}") from exc
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            if candidate != models_to_try[-1]:
+                logger.warning("Timeout/ConnectError on model %s, rotating...", candidate)
+                continue
+            raise EngineConnectionError(f"Connection failed to {url}") from exc
+
+    if data is None:
+        if last_exc:
+            raise EngineConnectionError(f"All models in fallback pool failed: {last_exc}")
+        return {
+            "content": "",
+            "usage": {},
+            "model": selected_model,
+            "finish_reason": "error",
+            "cost_usd": 0.0,
+            "ttft": time.monotonic() - t0,
+        }
 
     elapsed = time.monotonic() - t0
     data = resp.json()
@@ -540,68 +601,98 @@ async def stream_full_openai_compat_rest(
     url = f"{base_url.rstrip('/')}/chat/completions"
     accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
 
-    try:
-        async with async_client.stream("POST", url, json=payload, headers=headers) as resp:
-            if not resp.is_success:
-                await resp.aread()
-                err_text = resp.text
-                if looks_like_context_length_error(err_text):
-                    raise EngineContextLengthError(f"Context length overflow: {err_text}")
-                raise EngineConnectionError(f"API returned HTTP {resp.status_code}: {err_text}")
+    models_to_try = [model]
+    if "openrouter" in base_url.lower():
+        for pm in FREE_MODEL_FALLBACK_POOL:
+            if pm not in models_to_try:
+                models_to_try.append(pm)
 
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[len("data:") :].strip()
-                if not data_str or data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
+    stream_started = False
+    last_exc = None
 
-                choices = chunk.get("choices", [])
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta", {})
-                finish = choice.get("finish_reason")
+    for candidate in models_to_try:
+        cand_payload = dict(payload)
+        cand_payload["model"] = candidate
+        cand_lower = candidate.lower()
+        if "openrouter" in base_url.lower() or any(k in cand_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
+            if "reasoning" not in cand_payload:
+                cand_payload["reasoning"] = {"effort": "low", "exclude": True}
+            if cand_payload.get("max_tokens", 1024) < 1500:
+                cand_payload["max_tokens"] = 1500
+        else:
+            cand_payload.pop("reasoning", None)
 
-                content = delta.get("content")
-                if content:
-                    yield StreamChunk(content=content)
+        try:
+            async with async_client.stream("POST", url, json=cand_payload, headers=headers) as resp:
+                if not resp.is_success:
+                    await resp.aread()
+                    err_text = resp.text
+                    if resp.status_code in (429, 502, 503, 504) and candidate != models_to_try[-1]:
+                        logger.warning("Stream model %s failed HTTP %d, rotating...", candidate, resp.status_code)
+                        continue
+                    if looks_like_context_length_error(err_text):
+                        raise EngineContextLengthError(f"Context length overflow: {err_text}")
+                    raise EngineConnectionError(f"API returned HTTP {resp.status_code}: {err_text}")
 
-                delta_tc = delta.get("tool_calls")
-                if delta_tc:
-                    calls_to_yield = []
-                    for tc in delta_tc:
-                        idx = tc.get("index", 0)
-                        if idx not in accumulated_tool_calls:
-                            accumulated_tool_calls[idx] = {
-                                "index": idx,
-                                "id": tc.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": tc.get("function", {}).get("name", ""),
-                                    "arguments": tc.get("function", {}).get("arguments", ""),
-                                },
-                            }
-                        else:
-                            curr = accumulated_tool_calls[idx]
-                            if tc.get("id"):
-                                curr["id"] = tc["id"]
-                            if tc.get("function", {}).get("name"):
-                                curr["function"]["name"] = tc["function"]["name"]
-                            if tc.get("function", {}).get("arguments"):
-                                curr["function"]["arguments"] += tc["function"]["arguments"]
-                        calls_to_yield.append(accumulated_tool_calls[idx])
-                    yield StreamChunk(tool_calls=calls_to_yield)
+                stream_started = True
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:") :].strip()
+                    if not data_str or data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
 
-                if finish:
-                    yield StreamChunk(finish_reason=finish)
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta", {})
+                    finish = choice.get("finish_reason")
 
-    except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        raise EngineConnectionError(f"Stream connection failed to {url}") from exc
+                    content = delta.get("content")
+                    if content:
+                        yield StreamChunk(content=content)
+
+                    delta_tc = delta.get("tool_calls")
+                    if delta_tc:
+                        calls_to_yield = []
+                        for tc in delta_tc:
+                            idx = tc.get("index", 0)
+                            if idx not in accumulated_tool_calls:
+                                accumulated_tool_calls[idx] = {
+                                    "index": idx,
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.get("function", {}).get("name", ""),
+                                        "arguments": tc.get("function", {}).get("arguments", ""),
+                                    },
+                                }
+                            else:
+                                curr = accumulated_tool_calls[idx]
+                                if tc.get("id"):
+                                    curr["id"] = tc["id"]
+                                if tc.get("function", {}).get("name"):
+                                    curr["function"]["name"] = tc["function"]["name"]
+                                if tc.get("function", {}).get("arguments"):
+                                    curr["function"]["arguments"] += tc["function"]["arguments"]
+                            calls_to_yield.append(accumulated_tool_calls[idx])
+                        yield StreamChunk(tool_calls=calls_to_yield)
+
+                    if finish:
+                        yield StreamChunk(finish_reason=finish)
+            if stream_started:
+                return
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as exc:
+            last_exc = exc
+            if not stream_started and candidate != models_to_try[-1]:
+                logger.warning("Stream error on model %s (%s), rotating...", candidate, exc)
+                continue
+            raise EngineConnectionError(f"Stream connection failed: {exc}") from exc
 
 
 __all__ = [

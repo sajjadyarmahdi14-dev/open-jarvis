@@ -4,8 +4,13 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.PixelFormat
+import android.os.Build
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
+import android.view.View
+import android.view.WindowManager
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -326,7 +331,7 @@ object AppLauncher {
                     val cameraIntent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     }
-                    context.startActivity(cameraIntent)
+                    launchWithOverlayFallback(context, cameraIntent)
                     return """{"success": true, "intent": "STILL_IMAGE_CAMERA", "label": "Camera"}"""
                 } catch (_: Exception) {}
             }
@@ -400,6 +405,75 @@ object AppLauncher {
         }
     }
 
+    fun launchWithOverlayFallback(context: Context, launchIntent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Settings.canDrawOverlays(context)) {
+            try {
+                val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+                if (wm != null) {
+                    val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+                    }
+                    val params = WindowManager.LayoutParams(
+                        1, 1,
+                        layoutType,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                        PixelFormat.TRANSLUCENT
+                    )
+                    val dummyView = View(context)
+                    try {
+                        wm.addView(dummyView, params)
+                    } catch (_: Throwable) {}
+
+                    try {
+                        context.startActivity(launchIntent)
+                    } catch (_: Throwable) {}
+
+                    try {
+                        val pi = PendingIntent.getActivity(
+                            context,
+                            0,
+                            launchIntent,
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                        )
+                        pi.send()
+                    } catch (_: Throwable) {}
+
+                    dummyView.postDelayed({
+                        try {
+                            wm.removeView(dummyView)
+                        } catch (_: Throwable) {}
+                    }, 500)
+                    return
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "launchWithOverlayFallback notice: ${t.message}")
+            }
+        }
+
+        // Standard direct launch path
+        try {
+            context.startActivity(launchIntent)
+        } catch (t: Throwable) {
+            Log.w(TAG, "startActivity direct notice: ${t.message}")
+        }
+        try {
+            val pi = PendingIntent.getActivity(
+                context,
+                0,
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            pi.send()
+        } catch (t: Throwable) {
+            Log.w(TAG, "PendingIntent launch notice: ${t.message}")
+        }
+    }
+
     private fun tryLaunchPackage(context: Context, packageName: String, label: String): String? {
         return try {
             val pm = context.packageManager
@@ -407,24 +481,7 @@ object AppLauncher {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             } ?: return null
 
-            // Background launching on Android 14+ / Xiaomi HyperOS
-            try {
-                context.startActivity(launchIntent)
-            } catch (t: Throwable) {
-                Log.w(TAG, "startActivity direct notice: ${t.message}")
-            }
-
-            try {
-                val pi = PendingIntent.getActivity(
-                    context,
-                    0,
-                    launchIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                pi.send()
-            } catch (t: Throwable) {
-                Log.w(TAG, "PendingIntent launch notice: ${t.message}")
-            }
+            launchWithOverlayFallback(context, launchIntent)
 
             """{"success": true, "package": "$packageName", "label": "$label"}"""
         } catch (e: Exception) {

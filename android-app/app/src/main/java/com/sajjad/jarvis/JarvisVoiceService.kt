@@ -2,6 +2,7 @@ package com.sajjad.jarvis
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -293,7 +294,57 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.i(TAG, "onTaskRemoved: App swiped away. Scheduling instant restart to remain always-on!")
+        try {
+            val restartIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
+                action = ACTION_START
+            }
+            val pi = PendingIntent.getService(
+                applicationContext,
+                9999,
+                restartIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val am = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                am?.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1000L, pi)
+            } else {
+                am?.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1000L, pi)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(restartIntent)
+            } else {
+                startService(restartIntent)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "onTaskRemoved restart error: ${t.message}")
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    fun setTorchState(turnOn: Boolean) {
+        try {
+            val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val flashCameraId = cm.cameraIdList.firstOrNull { id ->
+                try {
+                    val chars = cm.getCameraCharacteristics(id)
+                    chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                } catch (_: Exception) {
+                    false
+                }
+            } ?: cm.cameraIdList.firstOrNull()
+            if (flashCameraId != null) {
+                isTorchOn = turnOn
+                cm.setTorchMode(flashCameraId, isTorchOn)
+                Log.i(TAG, "Native torch set to $isTorchOn (camera: $flashCameraId)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "setTorchState error: ${e.message}")
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Configurable Server URL (Local Termux vs Remote VPS)
@@ -588,13 +639,50 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     serviceListener?.onFinalSpeech(transcript)
                 }
 
-                // Two-stage state update
-                if (status == "awake" || action == "wake_alone") {
+                // If server ignored the speech (ambient room noise in standby without wake word), discard silently!
+                if (status == "ignored" || status == "no_speech") {
+                    val st = "listening_wake"
+                    serviceListener?.onWakeStateChanged(st)
+                    updateNotification("J.A.R.V.I.S. Standby — Say 'Jarvis' anytime")
+                    return@launch
+                }
+
+                val cleanT = transcript.trim().lowercase(Locale.ROOT)
+                val sleepTriggers = listOf(
+                    "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
+                    "jarvis sleep", "sleep mode", "standby", "that's all jarvis", "mute yourself",
+                    "دیگه گوش نده", "گوش نده", "خداحافظ جارویس", "فعلا جارویس", "جارویس بخواب",
+                    "بخواب", "استندبای", "خداحافظ"
+                )
+                val isSleep = status == "sleep" || action == "sleep" || sleepTriggers.any { cleanT.contains(it) }
+
+                // Sleep / Standby Mode Transition
+                if (isSleep) {
+                    currentVadMode = VadMode.STANDBY_WAKE_WORD
+                    awakeUntilTimestamp = 0L
+                    updateNotification("J.A.R.V.I.S. Sleeping — Say 'Jarvis' to wake")
+                    serviceListener?.onWakeStateChanged("paused")
+                    val isFa = cleanT.any { it in '\u0600'..'\u06FF' }
+                    val sleepMsg = if (response.isNotBlank()) response
+                                  else if (isFa) "به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید."
+                                  else "Going into standby mode, sir. Just say Jarvis whenever you need me."
+                    serviceListener?.onAssistantResponse(sleepMsg)
+                    speakBritish(sleepMsg)
+                    return@launch
+                } else if (status == "awake" || action == "wake_alone") {
                     currentVadMode = VadMode.ACTIVE_COMMAND
                     awakeUntilTimestamp = System.currentTimeMillis() + 15000L
                 } else if (status == "executed") {
                     currentVadMode = VadMode.STANDBY_WAKE_WORD
                     awakeUntilTimestamp = 0L
+                }
+
+                // Native Kotlin Fast-Path for Flashlight / Torch
+                val torchTerms = listOf("flashlight", "torch", "چراغ قوه", "فلش")
+                if (torchTerms.any { cleanT.contains(it) }) {
+                    val offTerms = listOf("off", "خاموش", "ببند", "قطع", "disable", "stop")
+                    val shouldTurnOn = !offTerms.any { cleanT.contains(it) }
+                    setTorchState(shouldTurnOn)
                 }
 
                 // 100% Native execution of client actions (App, Torch, Alarm, Call, SMS, Volume)
@@ -659,23 +747,12 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 }
                 "torch" -> {
                     val state = act.optString("state", "toggle")
-                    val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                    val flashCameraId = cm.cameraIdList.firstOrNull { id ->
-                        try {
-                            val chars = cm.getCameraCharacteristics(id)
-                            chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-                        } catch (_: Exception) {
-                            false
-                        }
-                    } ?: cm.cameraIdList.firstOrNull()
-                    if (flashCameraId != null) {
-                        isTorchOn = when (state) {
-                            "on" -> true
-                            "off" -> false
-                            else -> !isTorchOn
-                        }
-                        cm.setTorchMode(flashCameraId, isTorchOn)
+                    val turnOn = when (state) {
+                        "on" -> true
+                        "off" -> false
+                        else -> !isTorchOn
                     }
+                    setTorchState(turnOn)
                 }
                 "alarm" -> {
                     val h = act.optInt("hour", 7)
@@ -745,7 +822,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 Pair("Right away, sir.", "action_ack.mp3"),
                 Pair("All systems are online, sir.", "online_ack.mp3"),
                 Pair("Yes, sir?", "yes_sir.mp3"),
-                Pair("در خدمت شما هستم قربان. گوش می‌دهم.", "wake_ack_fa.mp3")
+                Pair("در خدمت شما هستم قربان. گوش می‌دهم.", "wake_ack_fa.mp3"),
+                Pair("Going into standby mode, sir. Just say Jarvis whenever you need me.", "standby_ack.mp3"),
+                Pair("به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید.", "standby_ack_fa.mp3")
             )
             val cacheFolder = File(cacheDir, "jarvis_voice_cache").apply { mkdirs() }
             val server = getServerUrl()
@@ -801,12 +880,14 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 // Check local pre-cache first (<10ms instant playback)
                 val cacheFolder = File(cacheDir, "jarvis_voice_cache")
                 val trimmed = summaryText.trim().trimEnd('.', '!', '?')
-                val cachedFile = when (trimmed) {
-                    "At your service, sir. I'm listening", "At your service, sir" -> File(cacheFolder, "wake_ack.mp3")
-                    "Right away, sir" -> File(cacheFolder, "action_ack.mp3")
-                    "All systems are online, sir", "All systems are online" -> File(cacheFolder, "online_ack.mp3")
-                    "Yes, sir" -> File(cacheFolder, "yes_sir.mp3")
-                    "در خدمت شما هستم قربان. گوش می‌دهم", "در خدمت شما هستم قربان" -> File(cacheFolder, "wake_ack_fa.mp3")
+                val cachedFile = when {
+                    trimmed.startsWith("At your service") -> File(cacheFolder, "wake_ack.mp3")
+                    trimmed.startsWith("Right away") -> File(cacheFolder, "action_ack.mp3")
+                    trimmed.startsWith("All systems are online") -> File(cacheFolder, "online_ack.mp3")
+                    trimmed.startsWith("Yes, sir") -> File(cacheFolder, "yes_sir.mp3")
+                    trimmed.startsWith("در خدمت شما هستم") -> File(cacheFolder, "wake_ack_fa.mp3")
+                    trimmed.startsWith("Going into standby") -> File(cacheFolder, "standby_ack.mp3")
+                    trimmed.startsWith("به حالت استندبای") -> File(cacheFolder, "standby_ack_fa.mp3")
                     else -> null
                 }
 
@@ -1101,9 +1182,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         )
 
         val contentText = overrideText ?: when {
-            isServiceMuted -> getString(R.string.voice_service_paused)
-            currentVadMode == VadMode.ACTIVE_COMMAND -> "Listening for command..."
-            else -> getString(R.string.voice_service_listening)
+            isServiceMuted -> "J.A.R.V.I.S. Sleeping — Say 'Jarvis' to wake"
+            currentVadMode == VadMode.ACTIVE_COMMAND -> "🟢 Listening for command..."
+            else -> "J.A.R.V.I.S. Standby — Say 'Jarvis' anytime"
         }
 
         val muteLabel = if (isServiceMuted) getString(R.string.voice_action_unmute) else getString(R.string.voice_action_mute)

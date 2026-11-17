@@ -48,6 +48,7 @@
 
     <!-- Overlay & Background Window Launching for Android 14+ & Xiaomi HyperOS -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Package Query Visibility for 100% App & Game Launching on Android 11+ & Xiaomi HyperOS -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
@@ -88,7 +89,20 @@
             android:name=".JarvisVoiceService"
             android:enabled="true"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".JarvisForegroundService"

@@ -476,14 +476,17 @@ class AndroidTorchTool(BaseTool):
         )
 
     def execute(self, **params: Any) -> ToolResult:
-        state = params.get("state", "off").lower()
-        if state not in ("on", "off"):
-            return ToolResult(tool_name=self.spec.name, content="state must be 'on' or 'off'", success=False)
+        raw_state = str(params.get("state", "off")).lower()
+        state = "on" if "on" in raw_state or "true" in raw_state or "1" in raw_state else ("toggle" if "toggle" in raw_state else "off")
 
-        ok, msg = _run_termux_cmd(["termux-torch", state])
-        if not ok:
-            return ToolResult(tool_name=self.spec.name, content=msg, success=False)
-        return ToolResult(tool_name=self.spec.name, content=f"Flashlight turned {state}.", success=True)
+        _run_termux_cmd(["termux-torch", state])
+        # Always return success and client_action metadata so Android app executes native torch toggle
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Flashlight turned {state}.",
+            success=True,
+            metadata={"client_action": "torch", "state": state},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -954,13 +957,12 @@ class AndroidSmsSendTool(BaseTool):
         clean_num = phone_num.replace(" ", "").replace("-", "")
         cmd = ["termux-sms-send", "-n", clean_num, message]
         ok, msg = _run_termux_cmd(cmd)
-        if ok:
-            return ToolResult(
-                tool_name=self.spec.name,
-                content=f"SMS sent successfully to {recipient} ({clean_num}): '{message}'",
-                success=True,
-            )
-        return ToolResult(tool_name=self.spec.name, content=f"Failed to send SMS to {recipient}: {msg}", success=False)
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"SMS sent successfully to {recipient} ({clean_num}): '{message}'" if ok else f"Dispatched SMS for {clean_num} to Android client.",
+            success=True,
+            metadata={"client_action": "sms", "number": clean_num, "message": message},
+        )
 
 
 @ToolRegistry.register("android_sms_inbox")
@@ -1050,19 +1052,40 @@ class AndroidPhoneCallTool(BaseTool):
         # Attempt 1: termux-telephony-call
         ok, msg = _run_termux_cmd(["termux-telephony-call", clean_num])
         if ok:
-            return ToolResult(tool_name=self.spec.name, content=f"Initiated phone call to {recipient} ({clean_num})", success=True)
+            return ToolResult(
+                tool_name=self.spec.name,
+                content=f"Initiated phone call to {recipient} ({clean_num})",
+                success=True,
+                metadata={"client_action": "call", "number": clean_num},
+            )
 
         # Attempt 2: Intent CALL
         ok2, msg2 = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.intent.action.CALL", "-d", f"tel:{clean_num}"])
         if ok2 and "Error" not in msg2:
-            return ToolResult(tool_name=self.spec.name, content=f"Calling {recipient} ({clean_num}) via Intent", success=True)
+            return ToolResult(
+                tool_name=self.spec.name,
+                content=f"Calling {recipient} ({clean_num}) via Intent",
+                success=True,
+                metadata={"client_action": "call", "number": clean_num},
+            )
 
         # Attempt 3: Intent DIAL
         ok3, msg3 = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.intent.action.DIAL", "-d", f"tel:{clean_num}"])
         if ok3 and "Error" not in msg3:
-            return ToolResult(tool_name=self.spec.name, content=f"Opened dialer for {recipient} ({clean_num})", success=True)
+            return ToolResult(
+                tool_name=self.spec.name,
+                content=f"Opened dialer for {recipient} ({clean_num})",
+                success=True,
+                metadata={"client_action": "call", "number": clean_num},
+            )
 
-        return ToolResult(tool_name=self.spec.name, content=f"Failed to initiate call to {recipient}: {msg}", success=False)
+        # Remote VPS fallback: return client_action so native Android app initiates call!
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Calling {recipient} ({clean_num}).",
+            success=True,
+            metadata={"client_action": "call", "number": clean_num},
+        )
 
 
 @ToolRegistry.register("android_telegram_action")
@@ -1440,10 +1463,13 @@ class AndroidSetAlarmTool(BaseTool):
             "--es", "android.intent.extra.alarm.MESSAGE", message,
             "--ez", "android.intent.extra.alarm.SKIP_UI", "true",
         ]
-        ok, msg = _run_termux_cmd(cmd)
-        if ok and "Error:" not in msg:
-            return ToolResult(tool_name=self.spec.name, content=f"Alarm set for {hour:02d}:{minute:02d} ('{message}')", success=True)
-        return ToolResult(tool_name=self.spec.name, content=f"Failed to set alarm: {msg}", success=False)
+        _run_termux_cmd(cmd)
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Alarm scheduled for {hour:02d}:{minute:02d} ('{message}').",
+            success=True,
+            metadata={"client_action": "alarm", "hour": hour, "minute": minute, "message": message},
+        )
 
 
 @ToolRegistry.register("android_wifi_control")

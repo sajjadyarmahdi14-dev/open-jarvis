@@ -516,5 +516,72 @@ def test_torch_wake_word_stripping_and_clean_tts():
     assert "<think>" not in clean2
 
 
+def test_standby_sleep_mode_and_wake_isolation():
+    """Verify strict Standby/Sleep triggers and complete silence for non-wake room speech."""
+    from openjarvis.web.server import _voice_session
+
+    client = TestClient(app)
+
+    # 1. Sleep trigger via /api/chat
+    r1 = client.post("/api/chat", json={"message": "jarvis stop listening"})
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert d1.get("fast_path") is True
+    assert "standby" in d1.get("response", "").lower() or "استندبای" in d1.get("response", "")
+    assert any(a.get("type") == "sleep" for a in d1.get("client_actions", []))
+
+    # 2. Sleep trigger via /api/voice/vad_utterance
+    import struct
+    num_samples = 1600
+    wav_bytes = bytearray()
+    wav_bytes.extend(b"RIFF")
+    wav_bytes.extend(struct.pack("<I", 36 + num_samples * 2))
+    wav_bytes.extend(b"WAVEfmt ")
+    wav_bytes.extend(struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16))
+    wav_bytes.extend(b"data")
+    wav_bytes.extend(struct.pack("<I", num_samples * 2))
+    wav_bytes.extend(b"\x00" * (num_samples * 2))
+    dummy_wav = bytes(wav_bytes)
+
+    with patch("speech_recognition.Recognizer.recognize_google", return_value="stop listening"):
+        r2 = client.post("/api/voice/vad_utterance", content=dummy_wav, headers={"Content-Type": "audio/wav"})
+        assert r2.status_code == 200
+        d2 = r2.json()
+        assert d2.get("status") == "sleep"
+        assert _voice_session["state"] == "STANDBY"
+
+    # 3. While in STANDBY, random room conversation without wake word MUST be ignored
+    _voice_session["state"] = "STANDBY"
+    _voice_session["awake_until"] = 0.0
+    with patch("speech_recognition.Recognizer.recognize_google", return_value="the weather today is nice and warm"):
+        r3 = client.post("/api/voice/vad_utterance", content=dummy_wav, headers={"Content-Type": "audio/wav"})
+        assert r3.status_code == 200
+        d3 = r3.json()
+        assert d3.get("status") == "ignored"
+        assert d3.get("reason") == "no_wake_word"
+
+
+def test_torch_phrasings_and_no_termux_api_error():
+    """Verify 'turn on the flashlight' succeeds and outputs client_action without Termux:API error."""
+    client = TestClient(app)
+
+    phrasings = [
+        "turn on the flashlight",
+        "turn on flashlight",
+        "flashlight on",
+        "turn off the torch",
+        "چراغ قوه رو روشن کن",
+    ]
+    for p in phrasings:
+        resp = client.post("/api/chat", json={"message": p})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("fast_path") is True
+        assert "Termux:API" not in data.get("response", "")
+        actions = data.get("client_actions", [])
+        assert any(a.get("type") == "torch" for a in actions)
+
+
+
 
 

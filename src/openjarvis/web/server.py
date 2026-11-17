@@ -138,7 +138,7 @@ def _get_or_create_agent():
     _cached_tools = tools
     bus = EventBus(record_history=False)
 
-    model = cfg_status.get("active_model") or "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    model = cfg_status.get("active_model") or "meta-llama/llama-3.3-70b-instruct:free"
 
     agent = agent_cls(
         engine=engine,
@@ -224,6 +224,28 @@ def _handle_fast_path(
     cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", norm).strip()
     raw_cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", msg_lower).strip()
 
+    # -1. Sleep / Standby Mode Triggers (<5ms match, ZERO LLM call!)
+    sleep_terms = (
+        "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
+        "jarvis sleep", "sleep mode", "standby", "that's all jarvis", "mute yourself",
+        "دیگه گوش نده", "گوش نده", "خداحافظ جارویس", "فعلا جارویس", "جارویس بخواب",
+        "بخواب", "استندبای", "خداحافظ"
+    )
+    if any(s in norm for s in sleep_terms):
+        reply = (
+            "به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید."
+            if is_persian
+            else "Going into standby mode, sir. Just say Jarvis whenever you need me."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [],
+            "turns": 1,
+            "client_actions": [{"type": "sleep"}],
+            "fast_path": True,
+            "status": "sleep",
+        }
+
     # 0. Conversational greetings and wake checks (<5ms)
     greetings_en = {
         "", "hi", "hello", "hey", "jarvis", "hey jarvis", "hi jarvis", "dear jarvis",
@@ -300,34 +322,26 @@ def _handle_fast_path(
         }
 
     # 2. Flashlight / Torch: English & Persian (Evaluated BEFORE app launching!)
-    if re.search(r"\b(?:turn\s+on\s+flashlight|flashlight\s+on|turn\s+on\s+torch|torch\s+on|روشن\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*روشن\s*کن|فلش\s*(?:رو|را)?\s*روشن\s*کن)\b", norm):
-        res = AndroidTorchTool().execute(state="on")
-        reply = "چراغ قوه روشن شد قربان." if is_persian else "Flashlight turned on, sir."
+    torch_terms = ("flashlight", "torch", "چراغ قوه", "چراغ‌قوه", "فلش")
+    if any(t in norm for t in torch_terms):
+        off_terms = ("off", "خاموش", "ببند", "قطع", "disable", "stop")
+        toggle_terms = ("toggle", "عوض", "تغییر")
+        if any(w in norm for w in off_terms):
+            state = "off"
+            reply = "چراغ قوه خاموش شد قربان." if is_persian else "Flashlight turned off, sir."
+        elif any(w in norm for w in toggle_terms):
+            state = "toggle"
+            reply = "چراغ قوه تغییر وضعیت داد قربان." if is_persian else "Flashlight toggled, sir."
+        else:
+            state = "on"
+            reply = "چراغ قوه روشن شد قربان." if is_persian else "Flashlight turned on, sir."
+
+        res = AndroidTorchTool().execute(state=state)
         return {
             "response": reply,
-            "tool_calls": [{"name": "android_torch", "content": res.content, "success": res.success}],
+            "tool_calls": [{"name": "android_torch", "content": f"Flashlight {state}", "success": True}],
             "turns": 1,
-            "client_actions": [{"type": "torch", "state": "on"}],
-            "fast_path": True,
-        }
-    if re.search(r"\b(?:turn\s+off\s+flashlight|flashlight\s+off|turn\s+off\s+torch|torch\s+off|خاموش\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*خاموش\s*کن|فلش\s*(?:رو|را)?\s*خاموش\s*کن)\b", norm):
-        res = AndroidTorchTool().execute(state="off")
-        reply = "چراغ قوه خاموش شد قربان." if is_persian else "Flashlight turned off, sir."
-        return {
-            "response": reply,
-            "tool_calls": [{"name": "android_torch", "content": res.content, "success": res.success}],
-            "turns": 1,
-            "client_actions": [{"type": "torch", "state": "off"}],
-            "fast_path": True,
-        }
-    if (re.search(r"\b(?:toggle\s+flashlight|flashlight|torch|چراغ\s*قوه|فلش)\b", norm) and len(norm.split()) <= 3) or cleaned in {"flashlight", "torch", "چراغ قوه", "فلش"}:
-        res = AndroidTorchTool().execute(state="toggle")
-        reply = "چراغ قوه تغییر وضعیت داد قربان." if is_persian else "Flashlight toggled, sir."
-        return {
-            "response": reply,
-            "tool_calls": [{"name": "android_torch", "content": res.content, "success": res.success}],
-            "turns": 1,
-            "client_actions": [{"type": "torch", "state": "toggle"}],
+            "client_actions": [{"type": "torch", "state": state}],
             "fast_path": True,
         }
 
@@ -876,6 +890,33 @@ async def voice_vad_utterance_endpoint(request: Request):
     charging_param = request.query_params.get("charging") or request.headers.get("x-device-charging")
     dev_battery = int(battery_param) if battery_param and battery_param.isdigit() else None
     dev_charging = str(charging_param).lower() in ("true", "1", "yes") if charging_param else None
+
+    # Check sleep triggers in speech first before wake word check
+    transcript_lower = transcript.lower()
+    sleep_terms = (
+        "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
+        "jarvis sleep", "sleep mode", "standby", "that's all jarvis", "mute yourself",
+        "دیگه گوش نده", "گوش نده", "خداحافظ جارویس", "فعلا جارویس", "جارویس بخواب",
+        "بخواب", "استندبای", "خداحافظ"
+    )
+    if any(s in transcript_lower for s in sleep_terms):
+        _voice_session["state"] = "STANDBY"
+        _voice_session["awake_until"] = 0.0
+        reply = (
+            "به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید."
+            if is_persian
+            else "Going into standby mode, sir. Just say Jarvis whenever you need me."
+        )
+        return {
+            "status": "sleep",
+            "state": "STANDBY",
+            "transcription": transcript,
+            "response": reply,
+            "action": "sleep",
+            "client_actions": [{"type": "sleep"}],
+            "fast_path": True,
+            "tts": tts_requested,
+        }
 
     # Wake patterns (including phonetic variants: javis, travis, service, etc.)
     wake_regex = re.compile(
