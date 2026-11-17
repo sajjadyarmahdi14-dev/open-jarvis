@@ -109,6 +109,7 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
 
         requestRequiredPermissions()
         promptIgnoreBatteryOptimizations()
+        promptOverlayPermission()
         startVoiceService()
 
         initWebView()
@@ -243,6 +244,27 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
             }
         } catch (e: Exception) {
             Log.w("Jarvis", "Battery optimization prompt failed: ${e.message}")
+        }
+    }
+
+    private fun promptOverlayPermission() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (!Settings.canDrawOverlays(this)) {
+                    val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                    val prompted = prefs.getBoolean("overlay_permission_requested", false)
+                    if (!prompted) {
+                        prefs.edit().putBoolean("overlay_permission_requested", true).apply()
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:$packageName")
+                        )
+                        startActivity(intent)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("Jarvis", "Overlay permission prompt notice: ${e.message}")
         }
     }
 

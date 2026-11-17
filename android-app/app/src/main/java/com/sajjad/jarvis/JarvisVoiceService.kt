@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -221,6 +222,19 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     private var isTorchOn = false
 
+    private val packageReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action
+            if (action == Intent.ACTION_PACKAGE_ADDED ||
+                action == Intent.ACTION_PACKAGE_REPLACED ||
+                action == Intent.ACTION_PACKAGE_REMOVED) {
+                Log.i(TAG, "Package change detected: $action. Refreshing installed apps index...")
+                AppLauncher.refreshInstalledApps(applicationContext)
+                AppLauncher.syncAppsToServer(applicationContext, getServerUrl())
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -230,6 +244,19 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         acquireLocks(this)
         createNotificationChannel()
         initTextToSpeech()
+
+        // Dynamic Real-Time App Discovery Engine: initial index and sync
+        AppLauncher.refreshInstalledApps(applicationContext)
+        AppLauncher.syncAppsToServer(applicationContext, getServerUrl())
+
+        // Register dynamic receiver for real-time app installs/updates
+        val packageFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addDataScheme("package")
+        }
+        ContextCompat.registerReceiver(this, packageReceiver, packageFilter, ContextCompat.RECEIVER_EXPORTED)
 
         startAsForeground()
         startContinuousAudioRecord()
@@ -375,10 +402,12 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
                     while (isActive && isRecordingLoopActive) {
                         if (isServiceMuted || isTtsSpeaking) {
+                            // Drain hardware audio buffer to prevent room echo accumulation
+                            activeRecord.read(readBuffer, 0, CHUNK_SAMPLES)
                             preRoll.clear()
                             utteranceStream.reset()
                             isUtteranceActive = false
-                            delay(60)
+                            delay(20)
                             continue
                         }
 
@@ -631,14 +660,21 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 "torch" -> {
                     val state = act.optString("state", "toggle")
                     val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                    val cid = cm.cameraIdList.firstOrNull()
-                    if (cid != null) {
+                    val flashCameraId = cm.cameraIdList.firstOrNull { id ->
+                        try {
+                            val chars = cm.getCameraCharacteristics(id)
+                            chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                        } catch (_: Exception) {
+                            false
+                        }
+                    } ?: cm.cameraIdList.firstOrNull()
+                    if (flashCameraId != null) {
                         isTorchOn = when (state) {
                             "on" -> true
                             "off" -> false
                             else -> !isTorchOn
                         }
-                        cm.setTorchMode(cid, isTorchOn)
+                        cm.setTorchMode(flashCameraId, isTorchOn)
                     }
                 }
                 "alarm" -> {
@@ -801,7 +837,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun finishSpeaking(onFinished: (() -> Unit)?) {
+    private suspend fun finishSpeaking(onFinished: (() -> Unit)?) {
+        // Echo decay delay (600ms) before reopening mic
+        delay(600)
         isTtsSpeaking = false
         serviceListener?.onTtsFinished()
         val st = if (isServiceMuted) "paused" else if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
@@ -930,7 +968,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     private fun speakViaUkMaleTTS(text: String, isPersian: Boolean, onFinished: (() -> Unit)?) {
         if (textToSpeech == null || !isTtsReady) {
-            finishSpeaking(onFinished)
+            scope.launch { finishSpeaking(onFinished) }
             return
         }
 
@@ -955,7 +993,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             }
         } catch (e: Exception) {
             Log.e(TAG, "speakViaUkMaleTTS error: ${e.message}")
-            finishSpeaking(onFinished)
+            scope.launch { finishSpeaking(onFinished) }
         }
     }
 
@@ -1094,6 +1132,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         isServiceRunning = false
         isRecordingLoopActive = false
         recordingJob?.cancel()
+        try {
+            unregisterReceiver(packageReceiver)
+        } catch (_: Exception) {}
         try {
             audioRecord?.stop()
             audioRecord?.release()

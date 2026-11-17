@@ -624,6 +624,7 @@ COMMON_ANDROID_APPS: Dict[str, str] = {
     "دوربین": "com.android.camera",
     "تنظیمات": "com.android.settings",
     "گالری": "com.google.android.apps.photos",
+    "عکس": "com.google.android.apps.photos",
     "جیمیل": "com.google.android.gm",
     "کروم": "com.android.chrome",
     "ماشین حساب": "com.google.android.calculator",

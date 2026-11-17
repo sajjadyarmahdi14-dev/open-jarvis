@@ -86,6 +86,7 @@ class ConfigUpdateRequest(BaseModel):
 
 _cached_agent = None
 _cached_tools = None
+_device_apps: List[Dict[str, str]] = []
 
 
 def _get_or_create_agent():
@@ -154,9 +155,21 @@ def _get_or_create_agent():
 def _clean_tts_response(text: str) -> str:
     """Strip reasoning tokens <think>...</think> and markdown syntax for clean spoken voice."""
     import re
+    if not text:
+        return ""
+    # Strip closed think tags
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    # Strip unclosed think tag at the end if tokens were exhausted
+    cleaned = re.sub(r"<think>[\s\S]*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
     cleaned = re.sub(r"[*_#`]", "", cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned and "<think>" in text:
+        # If everything was inside <think>, extract the last complete sentence from the thinking block as a fallback
+        think_content = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
+        sentences = [s.strip() for s in re.split(r"[.!?؛؟\n]+", think_content) if s.strip()]
+        if sentences:
+            cleaned = sentences[-1]
     return cleaned.strip()
 
 
@@ -195,19 +208,51 @@ def _handle_fast_path(
     msg = message.strip()
     msg_lower = msg.lower()
     is_persian = any("\u0600" <= c <= "\u06FF" for c in msg)
-    cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", msg_lower).strip()
+
+    # Strip wake-words and politeness tokens from start, middle, and end
+    norm = msg_lower
+    wake_patterns = [
+        r"\b(?:hey|hi|hello|dear)?\s*jarvis\b",
+        r"\b(?:سلام|هی)?\s*جارویس\b",
+        r"\bplease\b",
+        r"\b(?:لطفاً|لطفا)\b",
+    ]
+    for wp in wake_patterns:
+        norm = re.sub(wp, " ", norm, flags=re.IGNORECASE)
+    norm = re.sub(r"\s+", " ", norm).strip()
+
+    cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", norm).strip()
+    raw_cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", msg_lower).strip()
 
     # 0. Conversational greetings and wake checks (<5ms)
     greetings_en = {
-        "hi", "hello", "hey", "jarvis", "hey jarvis", "hi jarvis", "dear jarvis",
+        "", "hi", "hello", "hey", "jarvis", "hey jarvis", "hi jarvis", "dear jarvis",
         "good morning", "good afternoon", "good evening", "how are you",
         "are you there", "who are you", "what's up", "whats up", "status", "ping"
     }
     greetings_fa = {
-        "سلام", "درود", "خوبی", "چطوری", "جارویس", "هی jarvis", "هی جارویس",
+        "", "سلام", "درود", "خوبی", "چطوری", "جارویس", "هی jarvis", "هی جارویس",
         "سلام جارویس", "هستی", "آنلاینی", "صبح بخیر", "عصر بخیر", "شب بخیر"
     }
-    if cleaned in greetings_en or msg_lower in greetings_en:
+    if raw_cleaned in {"jarvis", "hey jarvis", "hi jarvis", "dear jarvis", "جارویس", "سلام جارویس"} or not cleaned:
+        if is_persian:
+            return {
+                "response": "در خدمت شما هستم قربان. تمام سیستم‌ها آنلاین و آماده هستند. چطور می‌توانم کمکتان کنم؟",
+                "tool_calls": [],
+                "turns": 1,
+                "client_actions": [],
+                "fast_path": True,
+            }
+        else:
+            return {
+                "response": "At your service, sir. All systems are online. How may I help you?",
+                "tool_calls": [],
+                "turns": 1,
+                "client_actions": [],
+                "fast_path": True,
+            }
+
+    if cleaned in greetings_en or raw_cleaned in greetings_en or norm in greetings_en:
         return {
             "response": "At your service, sir. All systems are online. How may I help you?",
             "tool_calls": [],
@@ -215,7 +260,7 @@ def _handle_fast_path(
             "client_actions": [],
             "fast_path": True,
         }
-    if cleaned in greetings_fa or msg_lower in greetings_fa:
+    if cleaned in greetings_fa or raw_cleaned in greetings_fa or norm in greetings_fa:
         return {
             "response": "در خدمت شما هستم قربان. تمام سیستم‌ها آنلاین و آماده هستند. چطور می‌توانم کمکتان کنم؟",
             "tool_calls": [],
@@ -225,7 +270,7 @@ def _handle_fast_path(
         }
 
     # 1. Time and Date queries (<5ms)
-    if re.search(r"\b(?:what(?:\s+is|\s*'s)?\s+the\s+time|what\s+time\s+is\s+it|current\s+time|time\s+now|ساعت\s*چنده|ساعت\s*چند\s*است|ساعت\s*الان|زمان\s*الان)\b", msg_lower) or cleaned in {"time", "ساعت", "زمان"}:
+    if re.search(r"\b(?:what(?:\s+is|\s*'s)?\s+the\s+time|what\s+time\s+is\s+it|current\s+time|time\s+now|ساعت\s*چنده|ساعت\s*چند\s*است|ساعت\s*الان|زمان\s*الان)\b", norm) or cleaned in {"time", "ساعت", "زمان"}:
         now_dt = datetime.now()
         reply = (
             f"قربان، ساعت هم‌اکنون {now_dt.strftime('%H:%M')} است."
@@ -239,7 +284,7 @@ def _handle_fast_path(
             "client_actions": [],
             "fast_path": True,
         }
-    if re.search(r"\b(?:what(?:\s+is|\s*'s)?\s+the\s+date|what\s+date\s+is\s+today|today(?:\s*'s)?\s+date|current\s+date|تاریخ\s*امروز|امروز\s*چندمه|امروز\s*چه\s*روزیه)\b", msg_lower) or cleaned in {"date", "today", "امروز", "تاریخ"}:
+    if re.search(r"\b(?:what(?:\s+is|\s*'s)?\s+the\s+date|what\s+date\s+is\s+today|today(?:\s*'s)?\s+date|current\s+date|تاریخ\s*امروز|امروز\s*چندمه|امروز\s*چه\s*روزیه)\b", norm) or cleaned in {"date", "today", "امروز", "تاریخ"}:
         now_dt = datetime.now()
         reply = (
             f"قربان، امروز {now_dt.strftime('%A, %d %B %Y')} است."
@@ -254,39 +299,8 @@ def _handle_fast_path(
             "fast_path": True,
         }
 
-    # 2. Open / Launch App: English & Persian
-    m_en = re.match(r"^(?:please\s+)?(?:open|launch|start|run|play)\s+(?:the\s+)?([a-zA-Z0-9_\- ]+?)[.!?]*$", msg, re.IGNORECASE)
-    m_fa = re.match(r"^(?:لطفاً\s+|لطفا\s+)?(?:برنامه\s+|بازی\s+)?(.+?)\s*(?:رو|را)?\s*(?:باز\s*کن|اجرا\s*کن|بالا\s*بیار)[.!?]*$", msg)
-    m_fa_prefix = re.match(r"^(?:لطفاً\s+|لطفا\s+)?(?:باز\s*کن|اجرا\s*کن)\s+(?:برنامه\s+|بازی\s+)?(.+?)[.!?]*$", msg)
-
-    app_target = None
-    if m_en:
-        app_target = m_en.group(1).strip()
-    elif m_fa:
-        app_target = m_fa.group(1).strip()
-    elif m_fa_prefix:
-        app_target = m_fa_prefix.group(1).strip()
-
-    if app_target and len(app_target) <= 40:
-        if app_target.lower() in ("camera", "cam", "دوربین"):
-            app_target = "camera"
-        res = AndroidLaunchAppTool().execute(app=app_target)
-        reply = (
-            f"چشم قربان، در حال باز کردن {app_target}."
-            if is_persian
-            else f"Right away, sir. Opening {app_target}."
-        )
-        pkg = res.metadata.get("package", "") if hasattr(res, "metadata") and res.metadata else ""
-        return {
-            "response": reply,
-            "tool_calls": [{"name": "android_launch_app", "content": res.content, "success": res.success}],
-            "turns": 1,
-            "client_actions": [{"type": "launch_app", "target": app_target, "package": pkg}],
-            "fast_path": True,
-        }
-
-    # 3. Flashlight / Torch: English & Persian
-    if re.search(r"\b(?:turn\s+on\s+flashlight|flashlight\s+on|turn\s+on\s+torch|torch\s+on|روشن\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*روشن\s*کن|فلش\s*(?:رو|را)?\s*روشن\s*کن)\b", msg_lower):
+    # 2. Flashlight / Torch: English & Persian (Evaluated BEFORE app launching!)
+    if re.search(r"\b(?:turn\s+on\s+flashlight|flashlight\s+on|turn\s+on\s+torch|torch\s+on|روشن\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*روشن\s*کن|فلش\s*(?:رو|را)?\s*روشن\s*کن)\b", norm):
         res = AndroidTorchTool().execute(state="on")
         reply = "چراغ قوه روشن شد قربان." if is_persian else "Flashlight turned on, sir."
         return {
@@ -296,7 +310,7 @@ def _handle_fast_path(
             "client_actions": [{"type": "torch", "state": "on"}],
             "fast_path": True,
         }
-    if re.search(r"\b(?:turn\s+off\s+flashlight|flashlight\s+off|turn\s+off\s+torch|torch\s+off|خاموش\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*خاموش\s*کن|فلش\s*(?:رو|را)?\s*خاموش\s*کن)\b", msg_lower):
+    if re.search(r"\b(?:turn\s+off\s+flashlight|flashlight\s+off|turn\s+off\s+torch|torch\s+off|خاموش\s*کردن\s*چراغ\s*قوه|چراغ\s*قوه\s*(?:رو|را)?\s*خاموش\s*کن|فلش\s*(?:رو|را)?\s*خاموش\s*کن)\b", norm):
         res = AndroidTorchTool().execute(state="off")
         reply = "چراغ قوه خاموش شد قربان." if is_persian else "Flashlight turned off, sir."
         return {
@@ -306,7 +320,7 @@ def _handle_fast_path(
             "client_actions": [{"type": "torch", "state": "off"}],
             "fast_path": True,
         }
-    if re.search(r"\b(?:toggle\s+flashlight|flashlight|torch|چراغ\s*قوه)\b", msg_lower) and len(msg_lower.split()) <= 3:
+    if (re.search(r"\b(?:toggle\s+flashlight|flashlight|torch|چراغ\s*قوه|فلش)\b", norm) and len(norm.split()) <= 3) or cleaned in {"flashlight", "torch", "چراغ قوه", "فلش"}:
         res = AndroidTorchTool().execute(state="toggle")
         reply = "چراغ قوه تغییر وضعیت داد قربان." if is_persian else "Flashlight toggled, sir."
         return {
@@ -317,8 +331,58 @@ def _handle_fast_path(
             "fast_path": True,
         }
 
+    # 3. Open / Launch App: English & Persian with Dynamic Device Apps Matching
+    m_en = re.match(r"^(?:open|launch|start|run|play)\s+(?:the\s+)?([a-zA-Z0-9_\- ]+?)[.!?]*$", norm, re.IGNORECASE)
+    m_fa = re.match(r"^(?:برنامه\s+|بازی\s+)?(.+?)\s*(?:رو|را)?\s*(?:باز\s*کن|اجرا\s*کن|بالا\s*بیار)[.!?]*$", norm)
+    m_fa_prefix = re.match(r"^(?:باز\s*کن|اجرا\s*کن)\s+(?:برنامه\s+|بازی\s+)?(.+?)[.!?]*$", norm)
+
+    app_target = None
+    if m_en:
+        app_target = m_en.group(1).strip()
+    elif m_fa:
+        app_target = m_fa.group(1).strip()
+    elif m_fa_prefix:
+        app_target = m_fa_prefix.group(1).strip()
+
+    if not app_target and _device_apps and len(norm.split()) <= 2:
+        for d_app in _device_apps:
+            lbl = d_app.get("label", "").lower()
+            if lbl and (lbl == norm or lbl == cleaned):
+                app_target = d_app.get("label")
+                break
+
+    if app_target and len(app_target) <= 40:
+        if app_target.lower() in ("camera", "cam", "دوربین"):
+            app_target = "camera"
+
+        pkg = ""
+        target_lower = app_target.lower()
+        for d_app in _device_apps:
+            lbl = d_app.get("label", "").lower()
+            p_name = d_app.get("package", "")
+            if lbl == target_lower or target_lower in lbl or p_name.lower().endswith(f".{target_lower}"):
+                pkg = p_name
+                break
+
+        if not pkg:
+            res = AndroidLaunchAppTool().execute(app=app_target)
+            pkg = res.metadata.get("package", "") if hasattr(res, "metadata") and res.metadata else ""
+
+        reply = (
+            f"چشم قربان، در حال باز کردن {app_target}."
+            if is_persian
+            else f"Right away, sir. Opening {app_target}."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "android_launch_app", "content": f"Opening {app_target}", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "launch_app", "target": app_target, "package": pkg}],
+            "fast_path": True,
+        }
+
     # 4. Battery status: English & Persian (Works remotely on VPS via device telemetry!)
-    if re.search(r"\b(?:battery|battery\s+status|check\s+battery|how\s+much\s+battery|باتری|درصد\s*باتری|وضعیت\s*باتری|شارژ\s*باتری|شارژ\s*چقدره)\b", msg_lower) and len(msg_lower.split()) <= 5:
+    if re.search(r"\b(?:battery|battery\s+status|check\s+battery|how\s+much\s+battery|باتری|درصد\s*باتری|وضعیت\s*باتری|شارژ\s*باتری|شارژ\s*چقدره)\b", norm) and len(norm.split()) <= 5:
         if device_battery is not None and device_battery >= 0:
             chg_str = " (در حال شارژ)" if device_charging else ""
             chg_en = " (charging)" if device_charging else ""
@@ -349,7 +413,7 @@ def _handle_fast_path(
         }
 
     # 5. Volume adjustment
-    if re.search(r"\b(?:volume\s+up|increase\s+volume|louder|صدا\s*(?:رو|را)?\s*زیاد\s*کن|صدا\s*بیشتر)\b", msg_lower):
+    if re.search(r"\b(?:volume\s+up|increase\s+volume|louder|صدا\s*(?:رو|را)?\s*زیاد\s*کن|صدا\s*بیشتر)\b", norm):
         res = AndroidVolumeTool().execute(stream="music", volume=12)
         reply = "صدای رسانه افزایش یافت قربان." if is_persian else "Volume increased, sir."
         return {
@@ -359,7 +423,7 @@ def _handle_fast_path(
             "client_actions": [{"type": "volume", "action": "up"}],
             "fast_path": True,
         }
-    if re.search(r"\b(?:volume\s+down|decrease\s+volume|lower\s+volume|صدا\s*(?:رو|را)?\s*کم\s*کن|صدا\s*کمتر)\b", msg_lower):
+    if re.search(r"\b(?:volume\s+down|decrease\s+volume|lower\s+volume|صدا\s*(?:رو|را)?\s*کم\s*کن|صدا\s*کمتر)\b", norm):
         res = AndroidVolumeTool().execute(stream="music", volume=5)
         reply = "صدای رسانه کاهش یافت قربان." if is_persian else "Volume decreased, sir."
         return {
@@ -369,7 +433,7 @@ def _handle_fast_path(
             "client_actions": [{"type": "volume", "action": "down"}],
             "fast_path": True,
         }
-    if re.search(r"\b(?:mute|silent|بی\s*صدا|صدا\s*(?:رو|را)?\s*قطع\s*کن)\b", msg_lower):
+    if re.search(r"\b(?:mute|silent|بی\s*صدا|صدا\s*(?:رو|را)?\s*قطع\s*کن)\b", norm):
         res = AndroidVolumeTool().execute(stream="music", volume=0)
         reply = "صدا قطع شد قربان." if is_persian else "Audio muted, sir."
         return {
@@ -381,8 +445,8 @@ def _handle_fast_path(
         }
 
     # 6. Set Alarm
-    m_alarm_en = re.search(r"\b(?:set\s+(?:an?\s+)?alarm\s+(?:for|at)|alarm\s+at|wake\s+me\s+up\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", msg_lower)
-    m_alarm_fa = re.search(r"\b(?:ساعت\s*(\d{1,2})(?::(\d{2}))?\s*(?:زنگ\s*بذار|آلارم\s*بذار|بیدارم\s*کن))\b", msg_lower)
+    m_alarm_en = re.search(r"\b(?:set\s+(?:an?\s+)?alarm\s+(?:for|at)|alarm\s+at|wake\s+me\s+up\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", norm)
+    m_alarm_fa = re.search(r"\b(?:ساعت\s*(\d{1,2})(?::(\d{2}))?\s*(?:زنگ\s*بذار|آلارم\s*بذار|بیدارم\s*کن))\b", norm)
     if m_alarm_en or m_alarm_fa:
         h = 7
         m = 0
@@ -411,8 +475,8 @@ def _handle_fast_path(
         }
 
     # 7. Phone call
-    m_call_en = re.search(r"\b(?:call|phone|dial)\s+([0-9+]+)\b", msg_lower)
-    m_call_fa = re.search(r"\b(?:تماس\s+بگیر\s+با|زنگ\s+بزن\s+به)\s+([0-9+]+)\b", msg_lower)
+    m_call_en = re.search(r"\b(?:call|phone|dial)\s+([0-9+]+)\b", norm)
+    m_call_fa = re.search(r"\b(?:تماس\s+بگیر\s+با|زنگ\s+بزن\s+به)\s+([0-9+]+)\b", norm)
     if m_call_en or m_call_fa:
         num = (m_call_en.group(1) if m_call_en else m_call_fa.group(1)).strip()
         reply = f"در حال برقراری تماس با {num} قربان." if is_persian else f"Calling {num}, sir."
@@ -425,7 +489,7 @@ def _handle_fast_path(
         }
 
     # 8. Open URL / Website
-    m_url = re.search(r"\b(?:open\s+website|open\s+url|go\s+to)\s+(https?://[^\s]+|[a-zA-Z0-9.\-]+\.[a-z]{2,})\b", msg_lower)
+    m_url = re.search(r"\b(?:open\s+website|open\s+url|go\s+to)\s+(https?://[^\s]+|[a-zA-Z0-9.\-]+\.[a-z]{2,})\b", norm)
     if m_url:
         raw_url = m_url.group(1)
         full_url = raw_url if raw_url.startswith("http") else f"https://{raw_url}"
@@ -535,6 +599,27 @@ async def get_status():
         "battery": battery_info,
         "tools_count": len([k for k in ToolRegistry.keys() if k.startswith("android_")]),
     }
+
+
+@app.post("/api/device/apps")
+async def register_device_apps(request: Request):
+    """Store dynamically discovered apps synced in real-time from the Android device."""
+    global _device_apps
+    try:
+        data = await request.json()
+        if isinstance(data, list):
+            _device_apps = data
+            logger.info("Updated dynamic device apps index with %d packages", len(_device_apps))
+            return {"status": "ok", "count": len(_device_apps)}
+    except Exception as exc:
+        logger.warning("register_device_apps error: %s", exc)
+    return {"status": "error", "count": len(_device_apps)}
+
+
+@app.get("/api/device/apps")
+async def get_device_apps():
+    """Retrieve current dynamic device apps index."""
+    return {"status": "ok", "apps": _device_apps, "count": len(_device_apps)}
 
 
 @app.post("/api/chat")

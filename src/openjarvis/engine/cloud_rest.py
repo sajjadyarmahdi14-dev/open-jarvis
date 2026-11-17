@@ -408,13 +408,13 @@ def generate_openai_compat_rest(
         "stream": False,
         **kwargs,
     }
-    # Optimize TTFT (time-to-first-token) and eliminate hidden reasoning delay on OpenRouter
+    # Optimize TTFT (time-to-first-token) and ensure sufficient tokens for reasoning models
     model_lower = model.lower()
     if "openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
         if "reasoning" not in payload:
             payload["reasoning"] = {"effort": "low", "exclude": True}
-        if payload.get("max_tokens", 1024) > 350:
-            payload["max_tokens"] = 350
+        if payload.get("max_tokens", 1024) < 1500:
+            payload["max_tokens"] = 1500
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:
@@ -519,13 +519,13 @@ async def stream_full_openai_compat_rest(
         "stream": True,
         **kwargs,
     }
-    # Optimize TTFT (time-to-first-token) and eliminate hidden reasoning delay on OpenRouter
+    # Optimize TTFT (time-to-first-token) and ensure sufficient tokens for reasoning models
     model_lower = model.lower()
     if "openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
         if "reasoning" not in payload:
             payload["reasoning"] = {"effort": "low", "exclude": True}
-        if payload.get("max_tokens", 1024) > 350:
-            payload["max_tokens"] = 350
+        if payload.get("max_tokens", 1024) < 1500:
+            payload["max_tokens"] = 1500
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:

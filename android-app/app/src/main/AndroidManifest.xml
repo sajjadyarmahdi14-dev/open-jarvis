@@ -46,6 +46,9 @@
     <!-- Termux Daemon Automation -->
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
+    <!-- Overlay & Background Window Launching for Android 14+ & Xiaomi HyperOS -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- Package Query Visibility for 100% App & Game Launching on Android 11+ & Xiaomi HyperOS -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />

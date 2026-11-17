@@ -451,4 +451,70 @@ def test_alarm_and_phone_call_fast_paths():
     assert any(a.get("type") == "call" and a.get("number") == "09123456789" for a in d3["client_actions"])
 
 
+def test_device_apps_sync_and_dynamic_fast_path():
+    """Verify dynamic package indexing, sync to /api/device/apps, and fast-path matching."""
+    client = TestClient(app)
+
+    # 1. Sync dynamic apps from Android phone
+    apps_payload = [
+        {"label": "Photos", "package": "com.google.android.apps.photos"},
+        {"label": "Mi Video", "package": "com.miui.videoplayer"},
+        {"label": "Snapp", "package": "cab.snapp.passenger"},
+    ]
+    post_res = client.post("/api/device/apps", json=apps_payload)
+    assert post_res.status_code == 200
+    assert post_res.json()["count"] == 3
+
+    get_res = client.get("/api/device/apps")
+    assert get_res.status_code == 200
+    assert len(get_res.json()["apps"]) == 3
+
+    # 2. Dynamic app launch query matches against synced device apps
+    chat_res = client.post("/api/chat", json={"message": "open photos"})
+    assert chat_res.status_code == 200
+    d = chat_res.json()
+    assert d.get("fast_path") is True
+    assert any(a.get("type") == "launch_app" and a.get("package") == "com.google.android.apps.photos" for a in d.get("client_actions", []))
+
+    # 3. Dynamic app launch query with wake word and politeness: "Jarvis please open Snapp"
+    chat_res2 = client.post("/api/chat", json={"message": "Jarvis please open Snapp"})
+    assert chat_res2.status_code == 200
+    d2 = chat_res2.json()
+    assert d2.get("fast_path") is True
+    assert any(a.get("type") == "launch_app" and a.get("package") == "cab.snapp.passenger" for a in d2.get("client_actions", []))
+
+
+def test_torch_wake_word_stripping_and_clean_tts():
+    """Verify torch commands match even when embedded with wake words or politeness, and clean TTS handles think tags."""
+    from openjarvis.web.server import _clean_tts_response
+
+    client = TestClient(app)
+
+    # 1. Torch with wake words and politeness
+    queries = [
+        "Jarvis please turn on flashlight",
+        "turn on torch please jarvis",
+        "چراغ قوه رو روشن کن جارویس لطفاً",
+        "hey jarvis torch",
+    ]
+    for q in queries:
+        r = client.post("/api/chat", json={"message": q})
+        assert r.status_code == 200
+        d = r.json()
+        assert d.get("fast_path") is True
+        assert any(a.get("type") == "torch" for a in d.get("client_actions", []))
+
+    # 2. _clean_tts_response handles normal closed think tag
+    text1 = "<think>Let me reason about this.</think>The weather is sunny, sir."
+    assert _clean_tts_response(text1) == "The weather is sunny, sir."
+
+    # 3. _clean_tts_response handles unclosed think tag (token exhaustion)
+    text2 = "<think>I am continuing to think deeply about physics"
+    # Should fall back to the last sentence in think block
+    clean2 = _clean_tts_response(text2)
+    assert len(clean2) > 0
+    assert "<think>" not in clean2
+
+
+
 
