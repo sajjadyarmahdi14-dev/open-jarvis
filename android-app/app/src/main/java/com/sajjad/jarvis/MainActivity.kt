@@ -1330,7 +1330,7 @@ private fun JarvisSettingsDialog(
             title = {
                 Text(
                     text = testDialogTitle ?: "Connection Test",
-                    color = if (testDialogIsError) RedOffline else GreenActive,
+                    color = if (testDialogIsError) Color(0xFFEF4444) else Color(0xFF10B981),
                     fontWeight = FontWeight.Bold
                 )
             },
@@ -1350,5 +1350,4 @@ private fun JarvisSettingsDialog(
             tonalElevation = 6.dp
         )
     }
-}
 }
