@@ -794,8 +794,8 @@
       <div class="modal-body">
         <div class="form-group">
           <label>Backend Server URL <span class="badge" style="background:rgba(6,182,212,0.15); color:var(--cyan)">VPS / Termux</span></label>
-          <input type="text" id="input-server-url" placeholder="http://127.0.0.1:8765 or http://<VPS_IP>:8765" autocomplete="off">
-          <small>Default is <code>http://127.0.0.1:8765</code>. Set to your Linux VPS IP to host OpenJarvis 24/7 without Termux.</small>
+          <input type="text" id="input-server-url" placeholder="http://104.252.175.159:8765 or http://127.0.0.1:8765" autocomplete="off">
+          <small>Default is <code>http://104.252.175.159:8765</code> (24/7 VPS). Can be changed to <code>http://127.0.0.1:8765</code> for local Termux.</small>
         </div>
 
         <div class="form-group">
@@ -818,8 +818,9 @@
 
         <div class="form-group">
           <label>Active Model ID</label>
-          <input type="text" id="input-active-model" placeholder="e.g. google/gemma-4-31b-it:free">
+          <input type="text" id="input-active-model" placeholder="e.g. nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free">
           <div class="model-presets">
+            <span class="preset-pill" onclick="selectModelPreset('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')">⚡ Nemotron Nano (Free Reasoning)</span>
             <span class="preset-pill" onclick="selectModelPreset('google/gemma-4-31b-it:free')">⚡ Gemma 4 31B (Fast & Free)</span>
             <span class="preset-pill" onclick="selectModelPreset('openrouter/free')">🆓 OpenRouter Free</span>
             <span class="preset-pill" onclick="selectModelPreset('meta-llama/llama-3.3-70b-instruct:free')">🦙 Llama 3.3 70B (Free)</span>
@@ -1468,16 +1469,22 @@
           document.getElementById('input-gemini-key').placeholder = 'AIzaSy...';
         }
 
-        document.getElementById('input-active-model').value = data.active_model || '';
+        document.getElementById('input-active-model').value = data.active_model || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
 
         const serverInput = document.getElementById('input-server-url');
         if (serverInput) {
           const bridge = window.JarvisNative || window.JarvisAndroid || window.AndroidJarvis;
+          let sUrl = '';
           if (bridge && typeof bridge.getServerUrl === 'function') {
-            serverInput.value = bridge.getServerUrl() || 'http://127.0.0.1:8765';
+            sUrl = bridge.getServerUrl();
           } else {
-            serverInput.value = localStorage.getItem('server_url') || window.location.origin || 'http://127.0.0.1:8765';
+            sUrl = localStorage.getItem('server_url') || '';
           }
+          if (!sUrl || sUrl === 'http://127.0.0.1:8765' || sUrl === 'http://localhost:8765') {
+            sUrl = 'http://104.252.175.159:8765';
+            localStorage.setItem('server_url', sUrl);
+          }
+          serverInput.value = sUrl;
         }
       } catch (err) {
         console.error('Failed to load config:', err);

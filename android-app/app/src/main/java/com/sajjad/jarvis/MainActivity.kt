@@ -55,13 +55,18 @@ class MainActivity : AppCompatActivity(), JarvisVoiceService.VoiceEventListener 
     private var healthJob: Job? = null
     private var isUrlLoaded = false
 
-    private var targetUrl = "http://127.0.0.1:8765"
+    private var targetUrl = "http://104.252.175.159:8765"
     private val permissionsCode = 101
 
     fun getStoredServerUrl(): String {
         val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
-        val raw = prefs.getString("server_url", "http://127.0.0.1:8765")?.trim() ?: "http://127.0.0.1:8765"
-        return if (raw.isBlank()) "http://127.0.0.1:8765" else raw.removeSuffix("/")
+        val raw = prefs.getString("server_url", "http://104.252.175.159:8765")?.trim() ?: "http://104.252.175.159:8765"
+        // Auto-migrate legacy localhost default to 24/7 remote VPS
+        if (raw.isBlank() || raw == "http://127.0.0.1:8765" || raw == "http://localhost:8765") {
+            prefs.edit().putString("server_url", "http://104.252.175.159:8765").apply()
+            return "http://104.252.175.159:8765"
+        }
+        return raw.removeSuffix("/")
     }
 
     fun setStoredServerUrl(newUrl: String) {
