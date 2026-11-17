@@ -1,6 +1,7 @@
 <resources>
     <string name="app_name">Jarvis</string>
     <string name="connecting_core">در حال اتصال به هسته هوش مصنوعی جارویس...</string>
+    <string name="init_core_systems">Initializing J.A.R.V.I.S. Core Systems...</string>
     <string name="termux_offline_title">⚠️ سرور ترموکس خاموش است</string>
     <string name="termux_offline_subtitle">سرور هوش مصنوعی روی پورت 8765 در حال اجرا نیست.</string>
     <string name="start_server_auto">روشن کردن خودکار سرور</string>

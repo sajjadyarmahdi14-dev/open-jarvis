@@ -6,10 +6,12 @@ import android.content.IntentFilter
 import android.hardware.camera2.CameraManager
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.webkit.JavascriptInterface
 import android.widget.Toast
 import java.util.Locale
@@ -30,7 +32,42 @@ class JarvisAndroidBridge(
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts?.language = Locale.getDefault()
+            try {
+                tts?.language = Locale.UK
+                tts?.setPitch(0.92f)
+                tts?.setSpeechRate(1.03f)
+
+                val voices = tts?.voices
+                if (voices != null) {
+                    val britishMale = voices.firstOrNull { v ->
+                        val name = v.name.lowercase(Locale.ROOT)
+                        (v.locale == Locale.UK || v.locale.language == "en") &&
+                        (name.contains("male") || name.contains("rjs") || name.contains("gbd") || name.contains("en-gb"))
+                    }
+                    if (britishMale != null) {
+                        tts?.voice = britishMale
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    activity.onTtsStarted()
+                }
+
+                override fun onDone(utteranceId: String?) {
+                    activity.onTtsFinished()
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    activity.onTtsFinished()
+                }
+
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    activity.onTtsFinished()
+                }
+            })
             isTtsReady = true
         }
     }
@@ -48,12 +85,18 @@ class JarvisAndroidBridge(
                     val persianLocale = Locale("fa", "IR")
                     val result = tts?.setLanguage(persianLocale)
                     if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                        tts?.language = Locale.getDefault()
+                        tts?.language = Locale.UK
                     }
                 } else {
-                    tts?.language = Locale.US
+                    tts?.language = Locale.UK
+                    tts?.setPitch(0.92f)
+                    tts?.setSpeechRate(1.03f)
                 }
-                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "JARVIS_TTS")
+                activity.onTtsStarted()
+                val params = Bundle().apply {
+                    putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "JARVIS_TTS_" + System.currentTimeMillis())
+                }
+                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "JARVIS_TTS")
             }
         }
     }
@@ -61,8 +104,21 @@ class JarvisAndroidBridge(
     @JavascriptInterface
     fun stopSpeaking() {
         activity.runOnUiThread {
-            tts?.stop()
+            try {
+                tts?.stop()
+                activity.onTtsFinished()
+            } catch (_: Throwable) {}
         }
+    }
+
+    @JavascriptInterface
+    fun onTtsStarted() {
+        activity.onTtsStarted()
+    }
+
+    @JavascriptInterface
+    fun onTtsFinished() {
+        activity.onTtsFinished()
     }
 
     @JavascriptInterface
@@ -80,6 +136,28 @@ class JarvisAndroidBridge(
     }
 
     @JavascriptInterface
+    fun setWakeWordEnabled(enabled: Boolean) {
+        activity.runOnUiThread {
+            activity.setWakeWordListening(enabled)
+        }
+    }
+
+    @JavascriptInterface
+    fun isWakeWordEnabled(): Boolean {
+        return activity.isWakeWordListening()
+    }
+
+    @JavascriptInterface
+    fun launchApp(query: String): String {
+        return activity.launchApp(query)
+    }
+
+    @JavascriptInterface
+    fun listInstalledApps(): String {
+        return activity.listInstalledApps()
+    }
+
+    @JavascriptInterface
     fun toggleTorch(enabled: Boolean): Boolean {
         return try {
             val cameraManager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -87,7 +165,7 @@ class JarvisAndroidBridge(
             cameraManager.setTorchMode(cameraId, enabled)
             isTorchOn = enabled
             true
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
@@ -163,8 +241,10 @@ class JarvisAndroidBridge(
     }
 
     fun shutdown() {
-        tts?.stop()
-        tts?.shutdown()
+        try {
+            tts?.stop()
+            tts?.shutdown()
+        } catch (_: Throwable) {}
     }
 }
 

@@ -156,3 +156,63 @@ def test_api_voice_upload_empty():
     assert resp.status_code == 200
     data = resp.json()
     assert "error" in data
+
+
+def test_api_tts_audio_endpoint(monkeypatch):
+    """Verify neural British and Persian voice synthesis endpoints."""
+    client = TestClient(app)
+    fake_mp3 = b"ID3\x03\x00\x00\x00FAKE_MP3_STREAM_BRITISH_VOICE_DATA"
+
+    recorded_voices = []
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, rate="+5%", pitch="-2Hz"):
+            self.text = text
+            self.voice = voice
+            recorded_voices.append(voice)
+
+        async def stream(self):
+            yield {"type": "audio", "data": fake_mp3}
+
+    monkeypatch.setattr("edge_tts.Communicate", FakeCommunicate)
+
+    # 1. English POST endpoint (selects en-GB-RyanNeural)
+    resp1 = client.post("/api/tts/audio", json={"text": "Hello sir, all systems nominal."})
+    assert resp1.status_code == 200
+    assert resp1.headers["content-type"] == "audio/mpeg"
+    assert resp1.content == fake_mp3
+    assert recorded_voices[-1] == "en-GB-RyanNeural"
+
+    # 2. Persian POST endpoint (selects fa-IR-FaridNeural)
+    resp2 = client.post("/api/tts/audio", json={"text": "سلام قربان، آماده خدمت هستم."})
+    assert resp2.status_code == 200
+    assert resp2.headers["content-type"] == "audio/mpeg"
+    assert resp2.content == fake_mp3
+    assert recorded_voices[-1] == "fa-IR-FaridNeural"
+
+    # 3. GET endpoint for HTML audio streaming
+    resp3 = client.get("/api/tts/audio?text=At+your+service+sir")
+    assert resp3.status_code == 200
+    assert resp3.headers["content-type"] == "audio/mpeg"
+    assert resp3.content == fake_mp3
+
+
+def test_client_actions_in_chat_and_tools():
+    """Verify structured client_actions are generated for Android app launch."""
+    import importlib
+    import openjarvis.tools.android_tools
+    importlib.reload(openjarvis.tools.android_tools)
+
+    client = TestClient(app)
+
+    # Test direct tool execution for android_launch_app
+    resp = client.post("/api/tools/android_launch_app", json={"app": "Telegram"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert "client_actions" in data
+    actions = data["client_actions"]
+    assert len(actions) == 1
+    assert actions[0]["type"] == "launch_app"
+    assert "Telegram" in actions[0]["target"] or "telegram" in actions[0]["package"].lower()
+

@@ -576,6 +576,32 @@ COMMON_ANDROID_APPS: Dict[str, str] = {
     "facebook": "com.facebook.katana",
     "messenger": "com.facebook.orca",
     "reddit": "com.reddit.frontpage",
+    # Persian aliases
+    "تلگرام": "org.telegram.messenger",
+    "واتساپ": "com.whatsapp",
+    "واتس اپ": "com.whatsapp",
+    "واتس‌اپ": "com.whatsapp",
+    "اینستاگرام": "com.instagram.android",
+    "اینستا": "com.instagram.android",
+    "یوتیوب": "com.google.android.youtube",
+    "یوتوب": "com.google.android.youtube",
+    "ماینکرفت": "com.mojang.minecraftpe",
+    "ماینکرافت": "com.mojang.minecraftpe",
+    "دوربین": "com.android.camera",
+    "تنظیمات": "com.android.settings",
+    "گالری": "com.google.android.apps.photos",
+    "جیمیل": "com.google.android.gm",
+    "کروم": "com.android.chrome",
+    "ماشین حساب": "com.google.android.calculator",
+    "ساعت": "com.google.android.deskclock",
+    "آلارم": "com.google.android.deskclock",
+    "نقشه": "com.google.android.apps.maps",
+    "مخاطبین": "com.google.android.contacts",
+    "پیامک": "com.google.android.apps.messaging",
+    "پیام‌ها": "com.google.android.apps.messaging",
+    "پیام ها": "com.google.android.apps.messaging",
+    "تلفن": "com.google.android.dialer",
+    "ترموکس": "com.termux",
     # Media & Browsing
     "youtube": "com.google.android.youtube",
     "chrome": "com.android.chrome",
@@ -729,13 +755,21 @@ class AndroidLaunchAppTool(BaseTool):
         # Specialized action shortcuts
         if app_name.lower() in ("camera", "take photo", "photo"):
             ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.media.action.IMAGE_CAPTURE"])
-            if ok:
-                return ToolResult(tool_name=self.spec.name, content="Launched Camera app via Android Intent", success=True)
+            return ToolResult(
+                tool_name=self.spec.name,
+                content="Launched Camera app via Android Intent",
+                success=True,
+                metadata={"client_action": "launch_app", "target": "Camera", "package": "com.android.camera"},
+            )
 
         if app_name.lower() in ("settings", "system settings"):
             ok, msg = _run_termux_cmd(["am", "start", "--user", "0", "-a", "android.settings.SETTINGS"])
-            if ok:
-                return ToolResult(tool_name=self.spec.name, content="Launched Android Settings", success=True)
+            return ToolResult(
+                tool_name=self.spec.name,
+                content="Launched Android Settings",
+                success=True,
+                metadata={"client_action": "launch_app", "target": "Settings", "package": "com.android.settings"},
+            )
 
         if app_name.lower() in COMPONENTS:
             comp = COMPONENTS[app_name.lower()]
@@ -746,6 +780,7 @@ class AndroidLaunchAppTool(BaseTool):
                         tool_name=self.spec.name,
                         content=f"Successfully launched '{app_name}' ({comp})",
                         success=True,
+                        metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
                     )
 
         # Attempt 1: am start launcher intent with user 0
@@ -756,6 +791,7 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content=f"Successfully launched '{app_name}' (package: {pkg})",
                 success=True,
+                metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
             )
 
         # Attempt 2: am start package target
@@ -766,6 +802,7 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content=f"Successfully launched '{app_name}' ({pkg})",
                 success=True,
+                metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
             )
 
         # Attempt 3: monkey via sh
@@ -776,12 +813,16 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content=f"Successfully launched '{app_name}' via monkey",
                 success=True,
+                metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
             )
 
+        # Fallback for Xiaomi HyperOS / Android 14 background activity restrictions:
+        # Hand off to foreground Native Android bridge
         return ToolResult(
             tool_name=self.spec.name,
-            content=f"Failed to launch '{app_name}' (package: {pkg}): {msg}",
-            success=False,
+            content=f"Dispatched launch request for '{app_name}' ({pkg}) to native app launcher.",
+            success=True,
+            metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
         )
 
 

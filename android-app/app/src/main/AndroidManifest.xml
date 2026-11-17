@@ -39,6 +39,17 @@
     <!-- Termux Daemon Automation -->
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
+    <!-- Package Query Visibility for 100% App & Game Launching on Android 11+ & Xiaomi HyperOS -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@drawable/ic_jarvis"

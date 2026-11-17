@@ -47,8 +47,8 @@ def _rms(data: bytes) -> float:
 
 def _record_termux(
     destination_path: Optional[Union[str, Path, float, int]] = None,
-    duration: Optional[float] = None,
-    max_seconds: Optional[float] = None,
+    duration: Optional[Union[float, int]] = None,
+    max_seconds: Optional[Union[float, int]] = None,
     interactive: Optional[bool] = None,
     **kwargs: Any,
 ) -> bytes:
@@ -65,7 +65,10 @@ def _record_termux(
     if isinstance(destination_path, (int, float)):
         target_duration = float(destination_path)
     elif destination_path is not None:
-        target_path = Path(destination_path)
+        try:
+            target_path = Path(destination_path)
+        except Exception:
+            pass
 
     if duration is not None:
         target_duration = float(duration)

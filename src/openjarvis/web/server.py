@@ -11,9 +11,9 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
 from openjarvis.core.config import _is_android, load_config
@@ -29,6 +29,7 @@ from openjarvis.engine import get_engine
 from openjarvis.intelligence import register_builtin_models
 from openjarvis.tools._paths import file_tool_kwargs
 from openjarvis.tools._stubs import BaseTool
+import openjarvis.tools.android_tools  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,13 @@ class ChatRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
+
+
+class TTSAudioRequest(BaseModel):
+    text: str
+    voice: Optional[str] = None
+    rate: Optional[str] = "+5%"
+    pitch: Optional[str] = "-2Hz"
 
 
 class VoiceRequest(BaseModel):
@@ -266,6 +274,21 @@ async def chat_endpoint(req: ChatRequest):
             for tr in result.tool_results
         ]
 
+        client_actions = []
+        for tr in result.tool_results:
+            meta = getattr(tr, "metadata", {}) or {}
+            if "client_action" in meta:
+                client_actions.append({
+                    "type": meta["client_action"],
+                    "target": meta.get("target") or meta.get("package") or "",
+                    "package": meta.get("package", ""),
+                })
+            elif tr.tool_name == "android_launch_app":
+                client_actions.append({
+                    "type": "launch_app",
+                    "target": req.message,
+                })
+
         if req.tts and result.content:
             _speak_async(result.content)
 
@@ -273,6 +296,7 @@ async def chat_endpoint(req: ChatRequest):
             "response": result.content,
             "tool_calls": tool_calls,
             "turns": result.turns,
+            "client_actions": client_actions,
         }
     except Exception as exc:
         logger.exception("Agent run failed")
@@ -369,12 +393,70 @@ async def voice_upload_endpoint(
         return {"error": f"Voice upload error: {exc}"}
 
 
+async def _synthesize_edge_tts(
+    text: str,
+    voice: Optional[str] = None,
+    rate: Optional[str] = "+5%",
+    pitch: Optional[str] = "-2Hz",
+) -> Response:
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in text)
+    selected_voice = voice or ("fa-IR-FaridNeural" if is_persian else "en-GB-RyanNeural")
+
+    try:
+        import aiohttp
+        import edge_tts
+
+        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        comm = edge_tts.Communicate(
+            text=text,
+            voice=selected_voice,
+            rate=rate or "+5%",
+            pitch=pitch or "-2Hz",
+            connector=connector,
+        )
+        buffer = bytearray()
+        async for chunk in comm.stream():
+            if chunk.get("type") == "audio":
+                buffer.extend(chunk.get("data", b""))
+
+        if not buffer:
+            raise RuntimeError("No audio data synthesized")
+
+        return Response(content=bytes(buffer), media_type="audio/mpeg")
+    except Exception as exc:
+        logger.warning("edge-tts synthesis failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"TTS synthesis unavailable: {exc}")
+
+
 @app.post("/api/tts")
 async def tts_endpoint(req: TTSRequest):
     if not req.text:
         return {"success": False, "error": "Text is required"}
     _speak_async(req.text)
     return {"success": True}
+
+
+@app.post("/api/tts/audio")
+async def tts_audio_endpoint(req: TTSAudioRequest):
+    """Synthesize speech using edge-tts (British RyanNeural or Persian FaridNeural)."""
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    return await _synthesize_edge_tts(text, req.voice, req.rate, req.pitch)
+
+
+@app.get("/api/tts/audio")
+async def tts_audio_get_endpoint(
+    text: str = Query(...),
+    voice: Optional[str] = None,
+    rate: Optional[str] = "+5%",
+    pitch: Optional[str] = "-2Hz",
+):
+    """Stream speech audio directly for web audio playback."""
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    return await _synthesize_edge_tts(text, voice, rate, pitch)
 
 
 @app.get("/api/camera/latest")
@@ -390,6 +472,15 @@ async def get_latest_camera():
 async def direct_tool_endpoint(tool_name: str, params: Optional[Dict[str, Any]] = None):
     """Directly execute an Android tool (e.g. for quick action chips)."""
     import openjarvis.tools  # noqa: F401
+    import openjarvis.tools.android_tools  # noqa: F401
+    if not ToolRegistry.contains(tool_name):
+        try:
+            import importlib
+            import openjarvis.tools.android_tools
+            importlib.reload(openjarvis.tools.android_tools)
+        except Exception:
+            pass
+
     if not ToolRegistry.contains(tool_name):
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
 
@@ -400,16 +491,32 @@ async def direct_tool_endpoint(tool_name: str, params: Optional[Dict[str, Any]] 
 
     try:
         res = tool_instance.execute(**params)
+        client_actions = []
+        meta = getattr(res, "metadata", {}) or {}
+        if "client_action" in meta:
+            client_actions.append({
+                "type": meta["client_action"],
+                "target": meta.get("target") or meta.get("package") or "",
+                "package": meta.get("package", ""),
+            })
+        elif tool_name == "android_launch_app":
+            client_actions.append({
+                "type": "launch_app",
+                "target": params.get("app") or params.get("app_name") or "",
+            })
+
         return {
             "success": res.success,
             "content": res.content,
             "tool_name": tool_name,
+            "client_actions": client_actions,
         }
     except Exception as exc:
         return {
             "success": False,
             "content": f"Execution failed: {exc}",
             "tool_name": tool_name,
+            "client_actions": [],
         }
 
 
@@ -420,4 +527,10 @@ def run_server(host: str = "127.0.0.1", port: int = 8765):
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Open Jarvis Web Server")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    parser.add_argument("--port", type=int, default=8765, help="Port to bind")
+    args, _ = parser.parse_known_args()
+    run_server(host=args.host, port=args.port)
     run_server()

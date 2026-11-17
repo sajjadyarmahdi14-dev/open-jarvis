@@ -132,3 +132,6 @@ minion_logs/
 *.oj-debug.json
 oj-debug.*.json
 desktop/src-tauri/binaries/
+.gradle/
+**/build/
+android-app/.gradle/
