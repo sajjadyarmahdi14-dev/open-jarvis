@@ -9,6 +9,7 @@ import asyncio
 from collections import deque
 from datetime import datetime
 import io
+import json
 import logging
 import os
 import random
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from openjarvis.core.config import _is_android, load_config
@@ -1815,6 +1816,206 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
     except Exception as exc:
         logger.exception("Agent run failed")
         return {"error": str(exc), "response": f"Error processing request: {exc}"}
+
+
+@app.post("/api/chat/stream")
+async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
+    """End-to-End Streaming endpoint emitting live sentence chunks, client actions, and completion."""
+    global _last_device_battery, _last_device_charging
+    if req.device_battery is not None and req.device_battery >= 0:
+        _last_device_battery = req.device_battery
+        _last_device_charging = req.device_charging
+
+    if request is not None:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth[7:].strip()
+            if bearer and not os.environ.get("OPENROUTER_API_KEY"):
+                save_persistent_config(openrouter_api_key=bearer)
+
+    async def event_generator():
+        # 1. Creator Lore Engine
+        from openjarvis.core.creator_lore import is_creator_query
+        if is_creator_query(req.message):
+            is_fa = any("\u0600" <= c <= "\u06FF" for c in req.message)
+            lore_reply = await run_creator_lore_engine(req.message, is_persian=is_fa)
+            clean_reply = _clean_tts_response(lore_reply)
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?؛؟\n])\s+", clean_reply) if s.strip()]
+            if not sentences and clean_reply:
+                sentences = [clean_reply]
+            for s in sentences:
+                yield json.dumps({"type": "sentence", "text": s}) + "\n"
+            yield json.dumps({"type": "actions", "client_actions": []}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+            _conversation_history.append({"role": "user", "content": req.message})
+            _conversation_history.append({"role": "assistant", "content": clean_reply})
+            return
+
+        # 2. Instant Local Fast-Path (<100ms) with device telemetry
+        fast_res = _handle_fast_path(
+            req.message,
+            device_battery=req.device_battery,
+            device_charging=req.device_charging,
+        )
+        if fast_res is not None:
+            resp = fast_res.get("response", "")
+            if resp:
+                clean_resp = _clean_tts_response(resp)
+                sentences = [s.strip() for s in re.split(r"(?<=[.!?؛؟\n])\s+", clean_resp) if s.strip()]
+                if not sentences and clean_resp:
+                    sentences = [clean_resp]
+                for s in sentences:
+                    yield json.dumps({"type": "sentence", "text": s}) + "\n"
+            acts = fast_res.get("client_actions", [])
+            yield json.dumps({"type": "actions", "client_actions": acts}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+            _conversation_history.append({"role": "user", "content": req.message})
+            if resp:
+                _conversation_history.append({"role": "assistant", "content": resp})
+            return
+
+        # 3. Stream from Cloud Engine
+        try:
+            agent = _get_or_create_agent()
+            engine = agent.engine
+        except Exception as exc:
+            yield json.dumps({"type": "sentence", "text": f"Engine error: {exc}"}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+            return
+
+        cfg_status = get_config_status()
+        model = cfg_status.get("active_model") or DEFAULT_OPENROUTER_MODEL
+        if model == "openrouter/free":
+            model = DEFAULT_OPENROUTER_MODEL
+
+        input_text = req.message
+        if _active_language_override == "en":
+            input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
+        elif _active_language_override == "fa":
+            input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak Persian. Respond entirely in Persian.]\n\n{input_text}"
+        if req.screen_context:
+            input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{input_text}"
+
+        system_prompt = (
+            "You are J.A.R.V.I.S., a witty, razor-sharp, hyper-competent AI assistant with the personality of Tony Stark's iconic AI. "
+            "Keep spoken answers natural, concise, and helpful. "
+            "LANGUAGE RULE: You are fully multilingual. You MUST automatically detect the language of the user's input and respond in the EXACT same language. "
+            "If the user speaks Persian, reply entirely in Persian. If the user speaks English, reply entirely in English."
+        )
+
+        messages: List[Message] = [Message(role=Role.SYSTEM, content=system_prompt)]
+        hist = req.history if req.history else list(_conversation_history)
+        for item in hist:
+            role = Role.USER if item.get("role") == "user" else Role.ASSISTANT
+            messages.append(Message(role=role, content=item.get("content", "")))
+        messages.append(Message(role=Role.USER, content=input_text))
+
+        raw_token_buffer = ""
+        in_think = False
+        sentence_buffer = ""
+        emitted_sentences = []
+        accumulated_client_actions = []
+
+        try:
+            async for chunk in engine.stream_full(messages, model=model):
+                delta = chunk.content or ""
+                if chunk.tool_calls:
+                    for tc in chunk.tool_calls:
+                        tname = tc.get("name", "")
+                        if tname:
+                            accumulated_client_actions.append({"type": tname, "args": tc.get("arguments")})
+
+                if not delta:
+                    continue
+
+                raw_token_buffer += delta
+
+                # Stateful <think> tag filter
+                while raw_token_buffer:
+                    if not in_think:
+                        think_match = re.search(r"<think\b[^>]*>", raw_token_buffer, re.IGNORECASE)
+                        if think_match:
+                            pre_tag = raw_token_buffer[:think_match.start()]
+                            if pre_tag:
+                                sentence_buffer += pre_tag
+                            in_think = True
+                            raw_token_buffer = raw_token_buffer[think_match.end():]
+                            continue
+                        elif re.search(r"<t(?:h(?:i(?:n(?:k)?)?)?)?$", raw_token_buffer, re.IGNORECASE):
+                            break
+                        else:
+                            sentence_buffer += raw_token_buffer
+                            raw_token_buffer = ""
+                            break
+                    else:
+                        end_match = re.search(r"</think>", raw_token_buffer, re.IGNORECASE)
+                        if end_match:
+                            in_think = False
+                            raw_token_buffer = raw_token_buffer[end_match.end():]
+                            continue
+                        elif re.search(r"</(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?$", raw_token_buffer, re.IGNORECASE):
+                            break
+                        else:
+                            raw_token_buffer = ""
+                            break
+
+                # Sentence boundary chunker: [.!?؛؟\n] or len >= 20
+                while True:
+                    m = re.search(r"([.!?؛؟]|\n+)", sentence_buffer)
+                    if m:
+                        idx = m.end()
+                        sentence_candidate = sentence_buffer[:idx].strip()
+                        sentence_buffer = sentence_buffer[idx:].lstrip()
+                        clean_s = re.sub(r"[*_#`]", "", sentence_candidate).strip()
+                        if clean_s:
+                            emitted_sentences.append(clean_s)
+                            yield json.dumps({"type": "sentence", "text": clean_s}) + "\n"
+                    elif len(sentence_buffer) >= 80:
+                        sp_idx = sentence_buffer.rfind(" ")
+                        if sp_idx > 20:
+                            sentence_candidate = sentence_buffer[:sp_idx].strip()
+                            sentence_buffer = sentence_buffer[sp_idx:].lstrip()
+                            clean_s = re.sub(r"[*_#`]", "", sentence_candidate).strip()
+                            if clean_s:
+                                emitted_sentences.append(clean_s)
+                                yield json.dumps({"type": "sentence", "text": clean_s}) + "\n"
+                        else:
+                            break
+                    else:
+                        break
+
+            # Flush remaining buffer
+            if sentence_buffer.strip():
+                clean_s = re.sub(r"[*_#`]", "", sentence_buffer).strip()
+                if clean_s:
+                    emitted_sentences.append(clean_s)
+                    yield json.dumps({"type": "sentence", "text": clean_s}) + "\n"
+
+            if not emitted_sentences:
+                fallback_msg = "At your service, sir."
+                yield json.dumps({"type": "sentence", "text": fallback_msg}) + "\n"
+                emitted_sentences.append(fallback_msg)
+
+            for act in accumulated_client_actions:
+                if act.get("type") in ("type_text", "send_sms", "send_messenger", "type"):
+                    if "text" in act:
+                        act["text"] = sanitize_literal_text(act["text"])
+                    if "message" in act:
+                        act["message"] = sanitize_literal_text(act["message"])
+
+            yield json.dumps({"type": "actions", "client_actions": accumulated_client_actions}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+
+            full_reply = " ".join(emitted_sentences)
+            _conversation_history.append({"role": "user", "content": req.message})
+            _conversation_history.append({"role": "assistant", "content": full_reply})
+
+        except Exception as exc:
+            logger.exception("Streaming failed")
+            yield json.dumps({"type": "sentence", "text": f"I encountered an error: {exc}"}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 @app.post("/api/voice")

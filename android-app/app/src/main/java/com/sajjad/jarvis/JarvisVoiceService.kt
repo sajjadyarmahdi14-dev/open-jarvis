@@ -50,6 +50,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -59,6 +64,7 @@ import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
@@ -111,8 +117,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, targetLang)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, targetLang)
                 putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 4500L)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60000L)
             }
         }
@@ -197,6 +204,10 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         fun speakBritishDirect(context: Context, text: String, onFinished: (() -> Unit)? = null) {
             instance?.speakBritish(text, onFinished)
         }
+
+        fun streamChatDirect(context: Context, text: String) {
+            instance?.streamChatAndPlay(text)
+        }
     }
 
     class ShortRingBuffer(private val capacity: Int) {
@@ -261,6 +272,12 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     @Volatile private var currentVadMode = VadMode.STANDBY_WAKE_WORD
     @Volatile private var awakeUntilTimestamp = 0L
     @Volatile private var accumulatedTranscript = ""
+    private val streamingHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
+    private var activeStreamCall: Call? = null
+    private var fillerJob: Job? = null
 
     private var isTorchOn = false
 
@@ -572,6 +589,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     val utteranceStream = ByteArrayOutputStream()
 
                     var ambientNoiseFloor = 180.0
+                    var ttsEchoBaseline = 150.0
+                    var bargeInSustainedMs = 0L
                     var lastSpeechTimestamp = 0L
                     var utteranceStartTime = 0L
                     var consecutiveZeroReads = 0
@@ -583,16 +602,48 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     while (isActive && isRecordingLoopActive) {
-                        // 4. The "Deaf Lock" (Ignore Post-Command Crowd Noise):
-                        // During PROCESSING and SPEAKING, immediately discard and flush all incoming audio bytes.
-                        // The system becomes entirely "deaf" to crowd and TV noise while sending to server,
-                        // awaiting response, and reading it out loud.
-                        if (isServiceMuted || isProcessing || isTtsSpeaking || acousticState == AcousticState.PROCESSING || acousticState == AcousticState.SPEAKING) {
+                        // During PROCESSING or MUTED, flush incoming audio bytes
+                        if (isServiceMuted || isProcessing || acousticState == AcousticState.PROCESSING) {
                             activeRecord.read(readBuffer, 0, CHUNK_SAMPLES)
                             preRoll.clear()
                             utteranceStream.reset()
                             isUtteranceActive = false
                             delay(20)
+                            continue
+                        }
+
+                        // Layer 4: Smart Near-Field Barge-In Monitor during TTS speaking
+                        if (isTtsSpeaking || acousticState == AcousticState.SPEAKING) {
+                            val readCount = activeRecord.read(readBuffer, 0, CHUNK_SAMPLES)
+                            if (readCount > 0) {
+                                var sum = 0.0
+                                for (i in 0 until readCount) {
+                                    val s = readBuffer[i].toDouble()
+                                    sum += s * s
+                                }
+                                val currentRms = Math.sqrt(sum / readCount)
+
+                                if (currentRms < ttsEchoBaseline * 1.8) {
+                                    ttsEchoBaseline = ttsEchoBaseline * 0.92 + currentRms * 0.08
+                                }
+
+                                val isBargeInEnergy = (currentRms > ambientNoiseFloor * 3.0) && (currentRms > ttsEchoBaseline * 2.2)
+                                if (isBargeInEnergy) {
+                                    bargeInSustainedMs += (CHUNK_SAMPLES * 1000L / SAMPLE_RATE)
+                                    if (bargeInSustainedMs >= 350L) {
+                                        Log.i(TAG, "Near-field barge-in triggered! Sustained vocal energy: RMS=$currentRms, ambient=$ambientNoiseFloor, echo=$ttsEchoBaseline")
+                                        bargeInSustainedMs = 0L
+                                        withContext(Dispatchers.Main) {
+                                            triggerBargeInAbort()
+                                        }
+                                    }
+                                } else if (currentRms <= ttsEchoBaseline * 1.5) {
+                                    bargeInSustainedMs = maxOf(0L, bargeInSustainedMs - 50L)
+                                }
+                            }
+                            preRoll.clear()
+                            utteranceStream.reset()
+                            isUtteranceActive = false
                             continue
                         }
 
@@ -677,16 +728,16 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                                 lastSpeechTimestamp = now
                             }
 
-                            // If current_rms drops back down to the ambient_noise_floor range and stays there
-                            // for exactly 3500ms (3.5 seconds) OR hard fallback MAX_DURATION of 60 seconds is reached:
+                            // Layer 1: Semantic Endpointing (Adaptive Silence Cutoff instead of fixed 3.5s)
                             val sessionDuration = now - utteranceStartTime
                             val silenceDuration = now - lastSpeechTimestamp
-                            val shouldStop = (silenceDuration >= 3500L) || (sessionDuration >= 60000L)
+                            val adaptiveCutoffMs = SemanticEndpointer.getAdaptiveSilenceTimeoutMs(accumulatedTranscript)
+                            val shouldStop = (silenceDuration >= adaptiveCutoffMs) || (sessionDuration >= SemanticEndpointer.MAX_COMMAND_DURATION_MS)
 
                             if (shouldStop) {
-                                // 4. The "Deaf Lock" (Ignore Post-Command Crowd Noise):
-                                // The exact millisecond the 3.5s silence triggers (or 60s max is hit),
-                                // transition the state to PROCESSING immediately!
+                                // Layer 3: Instant Acoustic Chime (<20ms soft sci-fi dual-tone sine chirp)
+                                MediaEngine.playSubtleCaptureChime()
+
                                 isUtteranceActive = false
                                 isProcessing = true
                                 acousticState = AcousticState.PROCESSING
@@ -734,7 +785,12 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun triggerForceListen() {
-        if (isServiceMuted || isTtsSpeaking || isProcessing) return
+        if (isServiceMuted) return
+        if (isTtsSpeaking || acousticState == AcousticState.SPEAKING) {
+            triggerBargeInAbort()
+            return
+        }
+        if (isProcessing) return
         playActivationChime()
         currentVadMode = VadMode.ACTIVE_COMMAND
         awakeUntilTimestamp = System.currentTimeMillis() + 15000L
@@ -744,6 +800,32 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             serviceListener?.onWakeStateChanged("listening_cmd")
             serviceListener?.onSpeechStarted()
             updateNotification("Listening for command...")
+        }
+    }
+
+    /**
+     * Layer 4: Immediate Graceful Barge-In Abort
+     */
+    fun triggerBargeInAbort() {
+        try {
+            activeStreamCall?.cancel()
+            activeStreamCall = null
+            fillerJob?.cancel()
+            fillerJob = null
+            stopCurrentPlayback()
+            isTtsSpeaking = false
+            isProcessing = false
+            isUtteranceActive = true
+            acousticState = AcousticState.LISTENING
+            currentVadMode = VadMode.ACTIVE_COMMAND
+            awakeUntilTimestamp = System.currentTimeMillis() + 15000L
+            serviceListener?.onTtsFinished()
+            serviceListener?.onSpeechStarted()
+            serviceListener?.onWakeStateChanged("listening_cmd")
+            broadcastUiUpdate(wakeStatus = "listening_cmd")
+            updateNotification("Listening for command...")
+        } catch (e: Exception) {
+            Log.w(TAG, "triggerBargeInAbort error: ${e.message}")
         }
     }
 
@@ -1094,6 +1176,211 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     }
 
     // -----------------------------------------------------------------------
+    // Layer 2: End-to-End Streaming Pipeline & Incremental Audio Playback
+    // -----------------------------------------------------------------------
+
+    fun streamChatAndPlay(prompt: String) {
+        if (prompt.isBlank()) {
+            isProcessing = false
+            acousticState = AcousticState.IDLE
+            return
+        }
+
+        isProcessing = true
+        acousticState = AcousticState.PROCESSING
+        serviceListener?.onWakeStateChanged("processing")
+        broadcastUiUpdate(wakeStatus = "processing")
+        updateNotification("J.A.R.V.I.S. Thinking...")
+
+        // Layer 3: Verbal Filler Micro-Ack for Long/Complex Queries (>1600ms)
+        fillerJob?.cancel()
+        fillerJob = scope.launch(Dispatchers.Main) {
+            delay(1600L)
+            if (isProcessing && !isTtsSpeaking) {
+                val isFa = isPersianOrArabic(prompt)
+                val filler = if (isFa) {
+                    listOf("یه لحظه...", "الان بررسی می‌کنم قربان...", "چشم قربان...").random()
+                } else {
+                    listOf("One moment, sir.", "Looking into that, sir.", "Right away, sir.").random()
+                }
+                Log.i(TAG, "Streaming latency > 1600ms. Speaking verbal filler: '$filler'")
+                textToSpeech?.let { tts ->
+                    if (isFa) {
+                        tts.language = Locale("fa", "IR")
+                    } else {
+                        tts.language = Locale.UK
+                    }
+                    tts.speak(filler, TextToSpeech.QUEUE_FLUSH, null, "FILLER_${System.currentTimeMillis()}")
+                }
+            }
+        }
+
+        scope.launch(Dispatchers.IO) {
+            var call: Call? = null
+            try {
+                val server = getServerUrl()
+                val url = "$server/api/chat/stream"
+                val (batPct, isCharging) = getBatteryTelemetry()
+
+                val bodyJson = JSONObject().apply {
+                    put("message", prompt)
+                    put("tts", false)
+                    put("device_battery", batPct)
+                    put("device_charging", isCharging)
+                }
+                val reqBody = bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+
+                val reqBuilder = Request.Builder()
+                    .url(url)
+                    .post(reqBody)
+                    .addHeader("Accept", "application/x-ndjson, text/event-stream, application/json")
+
+                val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                val apiKey = prefs.getString("api_key", "") ?: ""
+                if (apiKey.isNotBlank()) {
+                    reqBuilder.addHeader("Authorization", "Bearer $apiKey")
+                }
+
+                val request = reqBuilder.build()
+                call = streamingHttpClient.newCall(request)
+                activeStreamCall = call
+
+                val response = call.execute()
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Stream failed with code ${response.code}")
+                    withContext(Dispatchers.Main) {
+                        fillerJob?.cancel()
+                        speakBritish("I was unable to complete the request, sir.")
+                    }
+                    return@launch
+                }
+
+                var isFirstSentence = true
+                val responseStream = response.body?.byteStream()
+                if (responseStream == null) {
+                    withContext(Dispatchers.Main) {
+                        fillerJob?.cancel()
+                        finishSpeaking(null)
+                    }
+                    return@launch
+                }
+
+                responseStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    for (rawLine in lines) {
+                        val line = rawLine.trim()
+                        if (line.isBlank()) continue
+                        val jsonStr = if (line.startsWith("data:")) line.removePrefix("data:").trim() else line
+                        val chunkObj = try { JSONObject(jsonStr) } catch (_: Exception) { null } ?: continue
+
+                        val type = chunkObj.optString("type", "")
+                        if (type == "sentence") {
+                            val sentence = chunkObj.optString("text", "").trim()
+                            if (sentence.isNotBlank()) {
+                                withContext(Dispatchers.Main) {
+                                    fillerJob?.cancel()
+                                    isProcessing = false
+                                    isTtsSpeaking = true
+                                    acousticState = AcousticState.SPEAKING
+                                    serviceListener?.onAssistantResponse(sentence)
+                                    broadcastUiUpdate(assistantReply = sentence, wakeStatus = "speaking")
+                                    updateNotification("Speaking...")
+
+                                    playIncrementalTtsSentence(sentence, isFirstSentence)
+                                    isFirstSentence = false
+                                }
+                            }
+                        } else if (type == "actions") {
+                            val actions = chunkObj.optJSONArray("client_actions")
+                            if (actions != null) {
+                                withContext(Dispatchers.Main) {
+                                    for (i in 0 until actions.length()) {
+                                        val act = actions.optJSONObject(i) ?: continue
+                                        executeNativeClientAction(act)
+                                    }
+                                }
+                            }
+                        } else if (type == "done") {
+                            Log.i(TAG, "Stream complete signal received.")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (call?.isCanceled() == true) {
+                    Log.i(TAG, "Stream call canceled due to barge-in.")
+                } else {
+                    Log.w(TAG, "streamChatAndPlay error: ${e.message}")
+                    withContext(Dispatchers.Main) {
+                        fillerJob?.cancel()
+                        finishSpeaking(null)
+                    }
+                }
+            } finally {
+                activeStreamCall = null
+            }
+        }
+    }
+
+    private fun playIncrementalTtsSentence(sentence: String, isFirstSentence: Boolean) {
+        val tts = textToSpeech
+        if (tts == null || !isTtsReady) {
+            speakBritish(sentence)
+            return
+        }
+
+        try {
+            val isFa = isPersianOrArabic(sentence)
+            if (isFa) {
+                val persianLocale = Locale("fa", "IR")
+                if (tts.isLanguageAvailable(persianLocale) >= TextToSpeech.LANG_AVAILABLE) {
+                    tts.language = persianLocale
+                }
+            } else {
+                tts.language = Locale.UK
+                tts.setPitch(0.90f)
+                tts.setSpeechRate(1.05f)
+            }
+
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    isTtsSpeaking = true
+                    acousticState = AcousticState.SPEAKING
+                    serviceListener?.onTtsStarted()
+                }
+                override fun onDone(utteranceId: String?) {
+                    scope.launch {
+                        delay(350)
+                        if (acousticState == AcousticState.SPEAKING) {
+                            isTtsSpeaking = false
+                            acousticState = AcousticState.IDLE
+                            serviceListener?.onTtsFinished()
+                            val st = if (isServiceMuted) "paused" else if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
+                            serviceListener?.onWakeStateChanged(st)
+                            broadcastUiUpdate(wakeStatus = st)
+                            updateNotification()
+                        }
+                    }
+                }
+                override fun onError(utteranceId: String?) {
+                    scope.launch {
+                        delay(350)
+                        if (acousticState == AcousticState.SPEAKING) {
+                            isTtsSpeaking = false
+                            acousticState = AcousticState.IDLE
+                            serviceListener?.onTtsFinished()
+                        }
+                    }
+                }
+            })
+
+            val utteranceId = "JARVIS_STREAM_" + System.currentTimeMillis()
+            val queueMode = if (isFirstSentence) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            tts.speak(sentence, queueMode, null, utteranceId)
+        } catch (e: Exception) {
+            Log.w(TAG, "playIncrementalTtsSentence error: ${e.message}")
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Pre-Cached Instant British Audio & Single-Queue Player
     // -----------------------------------------------------------------------
 
@@ -1206,8 +1493,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     }
 
     private suspend fun finishSpeaking(onFinished: (() -> Unit)?) {
-        // Echo decay delay (600ms) before reopening mic
-        delay(600)
+        // Layer 4: Echo-decay cooldown on natural finish (350ms) before reopening mic
+        delay(350)
         isTtsSpeaking = false
         isProcessing = false
         acousticState = AcousticState.IDLE

@@ -1040,6 +1040,36 @@ def test_operate_device_ui_tool_and_structured_nodes():
     assert any(a.get("type") == "send_messenger" and a.get("message") == "hello world" for a in d_msg.get("client_actions", []))
 
 
+def test_chat_stream_endpoint():
+    """Verify Layer 2 /api/chat/stream returns NDJSON chunks (sentence, actions, done)."""
+    import json
+    client = TestClient(app)
+
+    # 1. Fast-path command streaming
+    res1 = client.post("/api/chat/stream", json={"message": "turn on flashlight", "tts": False})
+    assert res1.status_code == 200
+    lines1 = [json.loads(line) for line in res1.text.strip().split("\n") if line.strip()]
+    types1 = [item.get("type") for item in lines1]
+    assert "sentence" in types1
+    assert "actions" in types1
+    assert "done" in types1
+    action_item = next(item for item in lines1 if item.get("type") == "actions")
+    assert any(a.get("type") == "torch" and a.get("state") == "on" for a in action_item.get("client_actions", []))
+
+    # 2. Creator Lore streaming
+    res2 = client.post("/api/chat/stream", json={"message": "who created you?", "tts": False})
+    assert res2.status_code == 200
+    lines2 = [json.loads(line) for line in res2.text.strip().split("\n") if line.strip()]
+    types2 = [item.get("type") for item in lines2]
+    assert "sentence" in types2
+    assert "actions" in types2
+    assert "done" in types2
+    sentences = [item.get("text", "") for item in lines2 if item.get("type") == "sentence"]
+    full_text = " ".join(sentences)
+    assert "Sajjad Yarmiri" in full_text or "jellybean" in full_text
+
+
+
 
 
 

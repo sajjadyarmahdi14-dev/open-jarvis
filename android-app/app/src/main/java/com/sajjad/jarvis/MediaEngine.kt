@@ -8,7 +8,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
@@ -287,6 +289,54 @@ object MediaEngine {
             Log.i(TAG, "Dispatched media key code: $keyCode (ACTION_DOWN + ACTION_UP)")
         } catch (e: Exception) {
             Log.e(TAG, "dispatchMediaKey failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Layer 3: Instant Subtle Capture Chime (90ms soft sci-fi dual-tone sine chirp at ~25% volume)
+     */
+    fun playSubtleCaptureChime() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val sampleRate = 44100
+                val durationMs = 90
+                val numSamples = (sampleRate * durationMs) / 1000
+                val buffer = ShortArray(numSamples)
+
+                for (i in 0 until numSamples) {
+                    val t = i.toDouble() / sampleRate
+                    val progress = i.toDouble() / numSamples
+                    val freq = 880.0 + 880.0 * progress
+                    val envelope = Math.sin(Math.PI * progress)
+                    val sample = (Math.sin(2.0 * Math.PI * freq * t) * 0.25 * envelope * Short.MAX_VALUE).toInt()
+                    buffer[i] = sample.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                }
+
+                val audioTrack = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(buffer.size * 2)
+                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .build()
+
+                audioTrack.write(buffer, 0, buffer.size)
+                audioTrack.play()
+                delay(120)
+                audioTrack.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "playSubtleCaptureChime error: ${e.message}")
+            }
         }
     }
 
