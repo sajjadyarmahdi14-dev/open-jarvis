@@ -538,7 +538,7 @@ object AppLauncher {
         }
     }
 
-    private fun tryLaunchPackage(context: Context, packageName: String, label: String): String? {
+    fun tryLaunchPackage(context: Context, packageName: String, label: String): String? {
         return try {
             val pm = context.packageManager
             val launchIntent = pm.getLaunchIntentForPackage(packageName)?.apply {
