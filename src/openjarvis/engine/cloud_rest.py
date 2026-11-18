@@ -833,7 +833,126 @@ async def stream_full_openai_compat_rest(
             raise EngineConnectionError(f"Stream connection failed: {exc}") from exc
 
 
+VISION_MODEL_FALLBACK_POOL = [
+    "google/gemma-3-27b-it:free",
+    "qwen/qwen2.5-vl-72b-instruct:free",
+    "meta-llama/llama-3.2-11b-vision-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+]
+
+
+async def analyze_vision_multimodal(
+    image_base64: str,
+    prompt: str = "Describe what you see in detail and answer any visible questions.",
+    api_key: Optional[str] = None,
+    active_model: Optional[str] = None,
+    gemini_key: Optional[str] = None,
+) -> str:
+    """Analyze an image using the dedicated multimodal vision pool with auto-fallback."""
+    clean_b64 = image_base64.strip()
+    if clean_b64.startswith("data:image"):
+        clean_b64 = clean_b64.split(",", 1)[-1].strip()
+
+    models_to_try: List[str] = []
+    # 1. Current model ONLY if known multimodal
+    if active_model:
+        m_lower = active_model.lower()
+        if any(k in m_lower for k in ("vision", "vl", "gemma-3", "gemini", "gpt-4o", "omni")):
+            models_to_try.append(active_model)
+
+    # 2-5. Dedicated multimodal vision fallback pool
+    for m in VISION_MODEL_FALLBACK_POOL:
+        if m not in models_to_try:
+            models_to_try.append(m)
+
+    headers = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/sajjadyarmahdi14-dev/open-jarvis",
+        "X-Title": "Open Jarvis Vision",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # Auto-fallback across vision candidates on 400, 404, 429, 5xx, or network timeout
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        for candidate in models_to_try:
+            actual_model = candidate.removeprefix("openrouter/")
+            # Direct Gemini handling if gemini key is provided and candidate is gemini
+            if "gemini" in candidate.lower() and gemini_key:
+                try:
+                    url = f"{GEMINI_API_BASE}/{actual_model}:generateContent?key={gemini_key}"
+                    payload = {
+                        "contents": [
+                            {
+                                "parts": [
+                                    {"text": prompt},
+                                    {
+                                        "inline_data": {
+                                            "mime_type": "image/jpeg",
+                                            "data": clean_b64,
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                    resp = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        cands = data.get("candidates", [])
+                        if cands:
+                            parts = cands[0].get("content", {}).get("parts", [])
+                            text = "".join(p.get("text", "") for p in parts).strip()
+                            if text:
+                                return text
+                except Exception as ex:
+                    logger.warning("Gemini vision candidate %s failed: %s", candidate, ex)
+
+            # OpenRouter multimodal endpoint
+            payload = {
+                "model": actual_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{clean_b64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 1500,
+                "temperature": 0.3,
+            }
+            try:
+                resp = await client.post(
+                    f"{OPENROUTER_API_BASE}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        msg = choices[0].get("message", {})
+                        content = (msg.get("content") or "").strip()
+                        if content:
+                            return content
+                else:
+                    logger.warning("Vision model %s failed with HTTP %d: %s", actual_model, resp.status_code, resp.text[:200])
+            except Exception as ex:
+                logger.warning("Vision request exception for %s: %s", actual_model, ex)
+
+    return "I was unable to analyze the image through the visual models, sir."
+
+
 __all__ = [
+    "VISION_MODEL_FALLBACK_POOL",
+    "analyze_vision_multimodal",
     "build_gemini_contents",
     "build_gemini_payload",
     "convert_tools_to_gemini",

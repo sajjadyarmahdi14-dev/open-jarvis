@@ -6,12 +6,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.CoroutineScope
@@ -347,6 +349,70 @@ class JarvisAccessibilityService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
         } else {
             false
+        }
+    }
+
+    /**
+     * Part B: Zero-Popup Screen Vision (Android 11+ / API 30+)
+     *
+     * Captures screenshot silently using AccessibilityService.takeScreenshot with ZERO popups,
+     * hides the floating HUD for 100ms beforehand, converts HardwareBuffer to software Bitmap,
+     * downscales to 1024px, compresses to JPEG 75%, and encodes to Base64.
+     */
+    fun captureScreenBase64(onResult: (String?) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.w(TAG, "captureScreenBase64 requires Android 11+ (API 30+)")
+            onResult(null)
+            return
+        }
+
+        serviceScope.launch(Dispatchers.Main) {
+            // Temporarily hide Floating HUD for 100ms before taking screenshot
+            JarvisOverlayManager.instance?.setTemporarilyHidden(true)
+            delay(100)
+
+            try {
+                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshotResult: ScreenshotResult) {
+                        JarvisOverlayManager.instance?.setTemporarilyHidden(false)
+                        val hardwareBuffer = screenshotResult.hardwareBuffer
+                        val colorSpace = screenshotResult.colorSpace
+
+                        serviceScope.launch(Dispatchers.Default) {
+                            val base64 = try {
+                                val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
+                                    ?.copy(Bitmap.Config.ARGB_8888, false)
+                                if (bitmap != null) {
+                                    VisionEngine.processAndEncodeBitmap(bitmap).also {
+                                        bitmap.recycle()
+                                    }
+                                } else {
+                                    null
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "HardwareBuffer conversion error: ${e.message}")
+                                null
+                            } finally {
+                                try { hardwareBuffer.close() } catch (_: Exception) {}
+                            }
+
+                            withContext(Dispatchers.Main) {
+                                onResult(base64)
+                            }
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        JarvisOverlayManager.instance?.setTemporarilyHidden(false)
+                        Log.w(TAG, "takeScreenshot failed with error code: $errorCode")
+                        onResult(null)
+                    }
+                })
+            } catch (e: Exception) {
+                JarvisOverlayManager.instance?.setTemporarilyHidden(false)
+                Log.e(TAG, "captureScreenBase64 exception: ${e.message}", e)
+                onResult(null)
+            }
         }
     }
 

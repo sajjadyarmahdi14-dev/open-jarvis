@@ -208,6 +208,10 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         fun streamChatDirect(context: Context, text: String) {
             instance?.streamChatAndPlay(text)
         }
+
+        fun handleVisionActionDirect(mode: String, prompt: String) {
+            instance?.handleVisionAction(mode, prompt)
+        }
     }
 
     class ShortRingBuffer(private val capacity: Int) {
@@ -303,6 +307,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         acquireLocks(this)
         createNotificationChannel()
         initTextToSpeech()
+        JarvisOverlayManager.init(applicationContext)
 
         // Acquire persistent non-reference-counted PARTIAL_WAKE_LOCK so CPU and AudioRecord stay alive indefinitely
         try {
@@ -887,6 +892,14 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             }
             sendBroadcast(intent)
         } catch (_: Throwable) {}
+
+        // Part A: Update Floating Sci-Fi HUD Overlay
+        try {
+            userText?.let { JarvisOverlayManager.instance?.updateText(it) }
+            assistantReply?.let { JarvisOverlayManager.instance?.updateText(it) }
+            wakeStatus?.let { JarvisOverlayManager.instance?.updateState(it) }
+            amplitude?.let { JarvisOverlayManager.instance?.updateAmplitude(it) }
+        } catch (_: Throwable) {}
     }
 
     private fun dispatchVadUtterance(wavBytes: ByteArray) {
@@ -1124,9 +1137,86 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun executeNativeClientAction(act: JSONObject) {
+        val type = act.optString("type", "")
+        if (type == "vision_camera") {
+            val prompt = act.optString("prompt", "What do you see?")
+            handleVisionAction("camera", prompt)
+            return
+        } else if (type == "vision_screen") {
+            val prompt = act.optString("prompt", "What is on the screen?")
+            handleVisionAction("screen", prompt)
+            return
+        }
+
         DeviceController.executeClientAction(applicationContext, act) { screenText ->
             scope.launch {
                 sendScreenSummaryRequest(screenText)
+            }
+        }
+    }
+
+    /**
+     * Part B: Handle Live Vision Action (Silent Camera Frame or Zero-Popup Screen)
+     */
+    fun handleVisionAction(mode: String, prompt: String) {
+        scope.launch {
+            try {
+                acousticState = AcousticState.PROCESSING
+                isProcessing = true
+                serviceListener?.onWakeStateChanged("vision")
+                broadcastUiUpdate(
+                    userText = prompt,
+                    wakeStatus = "vision"
+                )
+                JarvisOverlayManager.instance?.updateState("vision")
+                JarvisOverlayManager.instance?.updateText(
+                    if (mode == "camera") "Analyzing camera visual scene..." else "Analyzing screen graphics..."
+                )
+                updateNotification("J.A.R.V.I.S. Vision Active...")
+
+                val base64Image: String? = if (mode == "camera") {
+                    withContext(Dispatchers.IO) {
+                        VisionEngine.captureCameraFrameBase64(applicationContext, useFrontCamera = false)
+                    }
+                } else {
+                    val deferredScreen = CompletableDeferred<String?>()
+                    JarvisAccessibilityService.instance?.captureScreenBase64 { b64 ->
+                        deferredScreen.complete(b64)
+                    } ?: deferredScreen.complete(null)
+                    deferredScreen.await()
+                }
+
+                if (base64Image.isNullOrBlank()) {
+                    Log.w(TAG, "Vision capture returned empty image for mode: $mode")
+                    val isFa = isPersianOrArabic(prompt)
+                    val errMsg = if (isFa) "متاسفانه امکان دریافت تصویر وجود نداشت قربان." else "Visual capture could not be acquired, sir."
+                    speakBritish(errMsg)
+                    return@launch
+                }
+
+                val serverUrl = getServerUrl()
+                val answer = withContext(Dispatchers.IO) {
+                    VisionEngine.analyzeVision(applicationContext, serverUrl, base64Image, prompt, mode)
+                }
+
+                val finalAnswer = if (!answer.isNullOrBlank()) {
+                    answer
+                } else {
+                    val isFa = isPersianOrArabic(prompt)
+                    if (isFa) "تحلیل تصویر با خطا مواجه شد قربان." else "I was unable to analyze the visual scene, sir."
+                }
+
+                serviceListener?.onAssistantResponse(finalAnswer)
+                broadcastUiUpdate(
+                    assistantReply = finalAnswer,
+                    wakeStatus = "speaking"
+                )
+                JarvisOverlayManager.instance?.updateText(finalAnswer)
+                speakBritish(finalAnswer)
+
+            } catch (e: Exception) {
+                Log.e(TAG, "handleVisionAction error: ${e.message}", e)
+                speakBritish("Vision processing encountered an error, sir.")
             }
         }
     }
@@ -1817,6 +1907,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         releaseLocks()
+        JarvisOverlayManager.instance?.destroy()
         super.onDestroy()
     }
 }

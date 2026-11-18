@@ -1069,6 +1069,56 @@ def test_chat_stream_endpoint():
     assert "Sajjad Yarmiri" in full_text or "jellybean" in full_text
 
 
+def test_vision_fast_paths_and_endpoint(monkeypatch):
+    """Verify camera and screen vision triggers and /api/vision endpoint."""
+    client = TestClient(app)
+
+    # 1. Camera Vision trigger (English)
+    r_cam_en = client.post("/api/chat", json={"message": "look at this"})
+    assert r_cam_en.status_code == 200
+    d_cam_en = r_cam_en.json()
+    assert d_cam_en.get("fast_path") is True
+    assert any(a.get("type") == "vision_camera" for a in d_cam_en.get("client_actions", []))
+
+    # 2. Camera Vision trigger (Persian)
+    r_cam_fa = client.post("/api/chat", json={"message": "نگاه کن این چیه"})
+    assert r_cam_fa.status_code == 200
+    d_cam_fa = r_cam_fa.json()
+    assert d_cam_fa.get("fast_path") is True
+    assert any(a.get("type") == "vision_camera" for a in d_cam_fa.get("client_actions", []))
+
+    # 3. Screen Vision trigger (English)
+    r_scr_en = client.post("/api/chat", json={"message": "what is on my screen"})
+    assert r_scr_en.status_code == 200
+    d_scr_en = r_scr_en.json()
+    assert d_scr_en.get("fast_path") is True
+    assert any(a.get("type") == "vision_screen" for a in d_scr_en.get("client_actions", []))
+
+    # 4. Screen Vision trigger (Persian)
+    r_scr_fa = client.post("/api/chat", json={"message": "صفحه رو ببین"})
+    assert r_scr_fa.status_code == 200
+    d_scr_fa = r_scr_fa.json()
+    assert d_scr_fa.get("fast_path") is True
+    assert any(a.get("type") == "vision_screen" for a in d_scr_fa.get("client_actions", []))
+
+    # 5. POST /api/vision with mocked backend
+    async def mock_vision(*args, **kwargs):
+        return "I see a blue coffee mug on a wooden desk."
+
+    monkeypatch.setattr("openjarvis.engine.cloud_rest.analyze_vision_multimodal", mock_vision)
+
+    r_vis = client.post("/api/vision", json={
+        "image_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        "prompt": "What is this?",
+        "mode": "camera",
+    })
+    assert r_vis.status_code == 200
+    d_vis = r_vis.json()
+    assert d_vis.get("status") == "success"
+    assert "coffee mug" in d_vis.get("response", "")
+
+
+
 
 
 

@@ -724,6 +724,41 @@ def _handle_fast_path(
             }
 
     # 2.6 Deep In-App Automation & Accessibility Actions
+    # 2.6.0 Multimodal Live Vision Triggers (Silent Camera & Zero-Popup Screen)
+    camera_vision_patterns = (
+        r"\b(?:نگاه\s*کن|این\s*چیه|جلوم\s*چیه|از\s*دوربین\s*ببین|این\s*صفحه\s*رو\s*ترجمه\s*کن|عکس\s*رو\s*تحلیل\s*کن|چی\s*جلومه)\b|"
+        r"\b(?:look\s+at\s+this|what\s+am\s+i\s+holding|check\s+with\s+camera|what\s+is\s+in\s+front\s+of\s+me|take\s+a\s+look|look\s+through\s+camera)\b"
+    )
+    if re.search(camera_vision_patterns, norm, re.IGNORECASE):
+        reply = "چشم قربان، از طریق دوربین نگاه می‌کنم." if is_persian else "Looking through the camera now, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "vision_camera", "content": "Camera visual inspection triggered", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "vision_camera", "prompt": raw_cleaned}],
+            "fast_path": True,
+        }
+
+    screen_vision_patterns = (
+        r"\b(?:صفحه\s*(?:رو)?\s*ببین|تو\s*صفحه\s*چیه|این\s*عکس\s*چیه|تصویر\s*صفحه\s*رو\s*ببین|تصویر\s*رو\s*توضیح\s*بده)\b|"
+        r"\b(?:look\s+at\s+my\s+screen|what(?:'s|\s+is)\s+on\s+my\s+screen|explain\s+this\s+image|screen\s+vision|analyze\s+screen|describe\s+what(?:'s|\s+is)\s+on\s+my\s+screen)\b"
+    )
+    if re.search(screen_vision_patterns, norm, re.IGNORECASE):
+        reply = "چشم قربان، محتوای صفحه را بررسی می‌کنم." if is_persian else "Analyzing your screen content now, sir."
+        return {
+            "response": reply,
+            "tool_calls": [
+                {"name": "read_screen", "content": "Extracting visible screen text", "success": True},
+                {"name": "vision_screen", "content": "Screen visual inspection triggered", "success": True}
+            ],
+            "turns": 1,
+            "client_actions": [
+                {"type": "read_screen"},
+                {"type": "vision_screen", "prompt": raw_cleaned}
+            ],
+            "fast_path": True,
+        }
+
     # Take Photo with Automated Shutter
     if re.search(r"\b(?:take\s+(?:a\s+)?photo|take\s+(?:a\s+)?picture|capture\s+(?:a\s+)?photo|عکس\s*بگیر|یه\s*عکس\s*بگیر|عکسبرداری\s*کن)\b", norm):
         reply = "چشم قربان، در حال ثبت عکس با دوربین." if is_persian else "Taking photo now, sir."
@@ -2016,6 +2051,62 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             yield json.dumps({"type": "done"}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+
+class VisionRequest(BaseModel):
+    image_base64: str
+    prompt: Optional[str] = None
+    mode: Optional[str] = "camera"
+
+
+@app.post("/api/vision")
+async def vision_endpoint(req: VisionRequest, request: Request = None):
+    """Analyze a single camera frame or screen capture using multimodal vision models with auto-fallback."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if request is not None:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth[7:].strip()
+            if bearer:
+                api_key = bearer
+
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+
+    cfg_status = get_config_status()
+    if not api_key:
+        api_key = cfg_status.get("openrouter_key")
+    if not gemini_key:
+        gemini_key = cfg_status.get("gemini_key")
+
+    active_model = cfg_status.get("active_model")
+
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in (req.prompt or ""))
+    default_prompt = (
+        ("تصویر را با دقت توصیف کن و اگر متنی یا سوالی در آن است پاسخ بده." if is_persian else "Describe what you see in detail and answer any visible questions.")
+        if req.mode == "camera"
+        else ("محتوای روی صفحه را به دقت بررسی کن، متون و عناصر را بخوان و توضیح بده." if is_persian else "Analyze what is on the screen, read visible text, and explain clearly.")
+    )
+    user_prompt = (req.prompt or "").strip() or default_prompt
+
+    from openjarvis.engine.cloud_rest import analyze_vision_multimodal
+    raw_result = await analyze_vision_multimodal(
+        image_base64=req.image_base64,
+        prompt=user_prompt,
+        api_key=api_key,
+        active_model=active_model,
+        gemini_key=gemini_key,
+    )
+    clean_result = _clean_tts_response(raw_result)
+
+    _conversation_history.append({"role": "user", "content": f"[Vision: {req.mode}] {user_prompt}"})
+    _conversation_history.append({"role": "assistant", "content": clean_result})
+
+    return {
+        "response": clean_result,
+        "mode": req.mode,
+        "prompt": user_prompt,
+        "status": "success",
+    }
 
 
 @app.post("/api/voice")

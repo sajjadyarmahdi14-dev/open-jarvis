@@ -410,6 +410,14 @@ object DeviceController {
                     val target = act.optString("target_text") ?: act.optString("target") ?: ""
                     JarvisAccessibilityService.instance?.clickElement(target)
                 }
+                "vision_camera" -> {
+                    val prompt = act.optString("prompt", "What do you see?")
+                    JarvisVoiceService.instance?.handleVisionAction("camera", prompt)
+                }
+                "vision_screen" -> {
+                    val prompt = act.optString("prompt", "What is on the screen?")
+                    JarvisVoiceService.instance?.handleVisionAction("screen", prompt)
+                }
                 "open_camera", "camera" -> {
                     openCamera(context)
                 }
