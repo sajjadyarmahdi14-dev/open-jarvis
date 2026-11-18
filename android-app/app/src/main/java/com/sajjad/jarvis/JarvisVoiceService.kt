@@ -965,44 +965,47 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private suspend fun sendScreenSummaryRequest(screenText: String) = withContext(Dispatchers.IO) {
-        try {
-            val server = getServerUrl()
-            val url = URL("$server/api/chat")
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            conn.setRequestProperty("Accept", "application/json")
-            val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
-            val apiKey = prefs.getString("api_key", "") ?: ""
-            if (apiKey.isNotBlank()) {
-                conn.setRequestProperty("Authorization", "Bearer $apiKey")
-            }
-            conn.connectTimeout = 8000
-            conn.readTimeout = 20000
-            conn.doOutput = true
+    private suspend fun sendScreenSummaryRequest(screenText: String) {
+        withContext(Dispatchers.IO) {
+            try {
+                val server = getServerUrl()
+                val url = URL("$server/api/chat")
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                conn.setRequestProperty("Accept", "application/json")
+                val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                val apiKey = prefs.getString("api_key", "") ?: ""
+                if (apiKey.isNotBlank()) {
+                    conn.setRequestProperty("Authorization", "Bearer $apiKey")
+                }
+                conn.connectTimeout = 8000
+                conn.readTimeout = 20000
+                conn.doOutput = true
 
-            val body = JSONObject().apply {
-                put("message", "Screen Content Analysis:\n$screenText\nPlease summarize what is currently on the screen or answer based on it.")
-                put("tts", true)
-            }
-            java.io.OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(body.toString()) }
+                val body = JSONObject().apply {
+                    put("message", "Screen Content Analysis:\n$screenText\nPlease summarize what is currently on the screen or answer based on it.")
+                    put("tts", true)
+                }
+                java.io.OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(body.toString()) }
 
-            val code = conn.responseCode
-            if (code in 200..299) {
-                val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val json = JSONObject(respStr)
-                val reply = json.optString("response", "")
-                if (reply.isNotBlank()) {
-                    withContext(Dispatchers.Main) {
-                        serviceListener?.onAssistantResponse(reply)
-                        broadcastUiUpdate(assistantReply = reply)
-                        speakBritish(reply)
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val json = JSONObject(respStr)
+                    val reply = json.optString("response", "")
+                    if (reply.isNotBlank()) {
+                        withContext(Dispatchers.Main) {
+                            serviceListener?.onAssistantResponse(reply)
+                            broadcastUiUpdate(assistantReply = reply)
+                            speakBritish(reply)
+                        }
                     }
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "sendScreenSummaryRequest failed: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "sendScreenSummaryRequest failed: ${e.message}")
+            Unit
         }
     }
 
