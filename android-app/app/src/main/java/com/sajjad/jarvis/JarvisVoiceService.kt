@@ -959,13 +959,13 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     private fun executeNativeClientAction(act: JSONObject) {
         DeviceController.executeClientAction(applicationContext, act) { screenText ->
-            scope.launch(Dispatchers.IO) {
+            scope.launch {
                 sendScreenSummaryRequest(screenText)
             }
         }
     }
 
-    private fun sendScreenSummaryRequest(screenText: String) {
+    private suspend fun sendScreenSummaryRequest(screenText: String) = withContext(Dispatchers.IO) {
         try {
             val server = getServerUrl()
             val url = URL("$server/api/chat")
