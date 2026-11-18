@@ -69,13 +69,13 @@ class ChatRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-
-
-class TTSAudioRequest(BaseModel):
-    text: str
     voice: Optional[str] = None
     rate: Optional[str] = "+5%"
     pitch: Optional[str] = "-2Hz"
+
+
+class TTSAudioRequest(TTSRequest):
+    pass
 
 
 class VoiceRequest(BaseModel):
@@ -2396,7 +2396,12 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
                     else:
                         break
 
-            # Flush remaining buffer
+            # Flush remaining buffer (handling unclosed think tags at EOF)
+            if in_think and not sentence_buffer.strip():
+                clean_think = _clean_tts_response(raw_token_buffer)
+                if clean_think:
+                    sentence_buffer = clean_think
+
             if sentence_buffer.strip():
                 clean_s = re.sub(r"[*_#`]", "", sentence_buffer).strip()
                 if clean_s:
@@ -2404,7 +2409,8 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
                     yield json.dumps({"type": "sentence", "text": clean_s}) + "\n"
 
             if not emitted_sentences:
-                fallback_msg = "At your service, sir."
+                is_fa = any("\u0600" <= c <= "\u06FF" for c in req.message)
+                fallback_msg = "در خدمت شما هستم قربان." if is_fa else "At your service, sir."
                 yield json.dumps({"type": "sentence", "text": fallback_msg}) + "\n"
                 emitted_sentences.append(fallback_msg)
 
@@ -2425,6 +2431,7 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
         except Exception as exc:
             logger.exception("Streaming failed")
             yield json.dumps({"type": "sentence", "text": f"I encountered an error: {exc}"}) + "\n"
+            yield json.dumps({"type": "actions", "client_actions": []}) + "\n"
             yield json.dumps({"type": "done"}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
@@ -2727,6 +2734,81 @@ _voice_session: Dict[str, Any] = {
 }
 
 
+def _do_transcribe(data: bytes) -> str:
+    """Transcribe audio WAV/PCM bytes with English first and Persian fallback."""
+    try:
+        import io
+        import speech_recognition as sr
+        r = sr.Recognizer()
+        with sr.AudioFile(io.BytesIO(data)) as source:
+            audio = r.record(source)
+        # Try English first
+        try:
+            txt = r.recognize_google(audio, language="en-US")
+            if txt and txt.strip():
+                return txt.strip()
+        except sr.UnknownValueError:
+            pass
+        except Exception as e:
+            logger.debug("Google STT en-US error: %s", e)
+        # Try Persian fallback
+        try:
+            txt = r.recognize_google(audio, language="fa-IR")
+            if txt and txt.strip():
+                return txt.strip()
+        except sr.UnknownValueError:
+            pass
+        except Exception as e:
+            logger.debug("Google STT fa-IR error: %s", e)
+        # Fallback to Whisper backend transcription if Google STT fails to capture language shift
+        try:
+            txt = r.recognize_whisper(audio)
+            if txt and txt.strip():
+                return txt.strip()
+        except Exception as e:
+            logger.debug("Whisper fallback transcription error: %s", e)
+        try:
+            from openjarvis.core.config import load_config
+            from openjarvis.speech._discovery import discover_speech_backend
+            cfg = load_config()
+            backend = discover_speech_backend(cfg)
+            if backend:
+                res = backend.transcribe(data)
+                if res and res.strip():
+                    return res.strip()
+        except Exception as e:
+            logger.debug("SpeechBackend fallback error: %s", e)
+    except Exception as exc:
+        logger.warning("VAD transcription exception: %s", exc)
+    return ""
+
+
+@app.post("/api/stt")
+async def stt_endpoint(request: Request):
+    """Transcribe raw audio WAV or multipart form data to text with bilingual support."""
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        audio_file = form.get("audio") or form.get("file")
+        if audio_file and hasattr(audio_file, "read"):
+            audio_bytes = await audio_file.read()
+        else:
+            audio_bytes = b""
+    else:
+        audio_bytes = await request.body()
+
+    if not audio_bytes or len(audio_bytes) < 44:
+        return {"success": False, "transcript": "", "text": "", "error": "Received empty or invalid WAV audio data"}
+
+    transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
+    transcript = (transcript or "").strip()
+    return {
+        "success": bool(transcript),
+        "transcript": transcript,
+        "text": transcript,
+    }
+
+
 @app.post("/api/voice/vad_utterance")
 async def voice_vad_utterance_endpoint(request: Request):
     """Process a PCM WAV utterance from client continuous AudioRecord VAD.
@@ -2754,53 +2836,6 @@ async def voice_vad_utterance_endpoint(request: Request):
 
     if not audio_bytes or len(audio_bytes) < 44:
         return {"error": "Received empty or invalid WAV audio data", "status": "ignored"}
-
-    def _do_transcribe(data: bytes) -> str:
-        try:
-            import io
-            import speech_recognition as sr
-            r = sr.Recognizer()
-            with sr.AudioFile(io.BytesIO(data)) as source:
-                audio = r.record(source)
-            # Try English first
-            try:
-                txt = r.recognize_google(audio, language="en-US")
-                if txt and txt.strip():
-                    return txt.strip()
-            except sr.UnknownValueError:
-                pass
-            except Exception as e:
-                logger.debug("Google STT en-US error: %s", e)
-            # Try Persian fallback
-            try:
-                txt = r.recognize_google(audio, language="fa-IR")
-                if txt and txt.strip():
-                    return txt.strip()
-            except sr.UnknownValueError:
-                pass
-            except Exception as e:
-                logger.debug("Google STT fa-IR error: %s", e)
-            # Fallback to Whisper backend transcription if Google STT fails to capture language shift
-            try:
-                txt = r.recognize_whisper(audio)
-                if txt and txt.strip():
-                    return txt.strip()
-            except Exception as e:
-                logger.debug("Whisper fallback transcription error: %s", e)
-            try:
-                from openjarvis.core.config import load_config
-                from openjarvis.speech._discovery import discover_speech_backend
-                cfg = load_config()
-                backend = discover_speech_backend(cfg)
-                if backend:
-                    res = backend.transcribe(data)
-                    if res and res.strip():
-                        return res.strip()
-            except Exception as e:
-                logger.debug("SpeechBackend fallback error: %s", e)
-        except Exception as exc:
-            logger.warning("VAD transcription exception: %s", exc)
-        return ""
 
     transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
     transcript = transcript.strip()
@@ -2968,10 +3003,11 @@ async def _synthesize_edge_tts(
 
 @app.post("/api/tts")
 async def tts_endpoint(req: TTSRequest):
-    if not req.text:
-        return {"success": False, "error": "Text is required"}
-    _speak_async(req.text)
-    return {"success": True}
+    """Synthesize speech using edge-tts (British RyanNeural or Persian FaridNeural)."""
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    return await _synthesize_edge_tts(text, req.voice, req.rate, req.pitch)
 
 
 @app.post("/api/tts/audio")

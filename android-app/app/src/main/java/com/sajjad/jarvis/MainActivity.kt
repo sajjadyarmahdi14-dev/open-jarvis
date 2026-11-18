@@ -139,6 +139,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
     private var apiKeyState = mutableStateOf("")
     private var isConnectedState = mutableStateOf(false)
     private var isServiceActiveState = mutableStateOf(true)
+    private var isTtsMutedState = mutableStateOf(false)
     private var voiceStateText = mutableStateOf("STANDBY: Say \"Jarvis\"")
     private var audioAmplitudeState = mutableFloatStateOf(0.0f)
     private var messagesState = mutableStateListOf<ChatMessage>()
@@ -190,10 +191,12 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                                 activeModel = activeModelState.value,
                                 isConnected = isConnectedState.value,
                                 isServiceActive = isServiceActiveState.value,
+                                isTtsMuted = isTtsMutedState.value,
                                 onToggleService = { enable ->
                                     isServiceActiveState.value = enable
                                     if (enable) startVoiceService() else stopVoiceService()
                                 },
+                                onToggleTtsMute = { toggleTtsMute() },
                                 onOpenSettings = { showSettings = true }
                             )
 
@@ -318,6 +321,17 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
         val rawApiKey = prefs.getString("api_key", "")?.trim() ?: ""
         apiKeyState.value = rawApiKey
+
+        isTtsMutedState.value = prefs.getBoolean("is_tts_muted", false)
+    }
+
+    private fun toggleTtsMute() {
+        val newMuted = !isTtsMutedState.value
+        isTtsMutedState.value = newMuted
+        val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("is_tts_muted", newMuted).apply()
+        val msg = if (newMuted) "Speech output muted" else "Speech output enabled"
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
     private fun savePreferences(newUrl: String, newModel: String, newApiKey: String) {
@@ -462,7 +476,12 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
     }
 
     fun triggerVoiceListen() {
-        JarvisVoiceService.forceStartListening(this)
+        val service = JarvisVoiceService.instance
+        if (service?.isTtsSpeaking == true || service?.acousticState == JarvisVoiceService.AcousticState.SPEAKING) {
+            service.triggerBargeInAbort()
+        } else {
+            JarvisVoiceService.forceStartListening(this)
+        }
         voiceStateText.value = "LISTENING..."
     }
 
@@ -546,8 +565,17 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                         }
                     }
 
-                    // Read out reply via British TTS
-                    JarvisVoiceService.instance?.speakBritish(reply)
+                    // Read out reply via TTS (guaranteed loud voice on both voice and typed chat)
+                    if (!isTtsMutedState.value) {
+                        try {
+                            val speakIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
+                                action = JarvisVoiceService.ACTION_SPEAK_TEXT
+                                putExtra(JarvisVoiceService.EXTRA_SPEAK_TEXT, reply)
+                            }
+                            ContextCompat.startForegroundService(applicationContext, speakIntent)
+                        } catch (_: Exception) {}
+                        JarvisVoiceService.instance?.speakBritish(reply)
+                    }
                 } else {
                     withContext(Dispatchers.Main) {
                         messagesState.add(ChatMessage(isUser = false, text = "Server returned HTTP ${conn.responseCode}"))
@@ -728,7 +756,9 @@ private fun JarvisTopBar(
     activeModel: String,
     isConnected: Boolean,
     isServiceActive: Boolean,
+    isTtsMuted: Boolean,
     onToggleService: (Boolean) -> Unit,
+    onToggleTtsMute: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     Surface(
@@ -772,7 +802,7 @@ private fun JarvisTopBar(
                 )
             }
 
-            // Model Badge, 24/7 Switch, and Settings Button
+            // Model Badge, 24/7 Switch, Speaker Mute Toggle, and Settings Button
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val modelShort = if (activeModel.contains("nemotron")) "Nemotron" else activeModel.take(10)
                 Surface(
@@ -812,7 +842,18 @@ private fun JarvisTopBar(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // Speaker Mute/Unmute Toggle
+                IconButton(onClick = onToggleTtsMute) {
+                    Icon(
+                        imageVector = if (isTtsMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                        contentDescription = if (isTtsMuted) "Unmute Speech" else "Mute Speech",
+                        tint = if (isTtsMuted) RedOffline else CyanNeon
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(2.dp))
 
                 IconButton(onClick = onOpenSettings) {
                     Icon(

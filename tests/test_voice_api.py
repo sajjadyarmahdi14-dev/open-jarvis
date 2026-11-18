@@ -183,6 +183,13 @@ def test_api_tts_audio_endpoint(monkeypatch):
     assert resp1.content == fake_mp3
     assert recorded_voices[-1] == "en-GB-RyanNeural"
 
+    # 1b. Direct POST /api/tts endpoint (selects en-GB-RyanNeural)
+    resp1b = client.post("/api/tts", json={"text": "All systems operational, sir."})
+    assert resp1b.status_code == 200
+    assert resp1b.headers["content-type"] == "audio/mpeg"
+    assert resp1b.content == fake_mp3
+    assert recorded_voices[-1] == "en-GB-RyanNeural"
+
     # 2. Persian POST endpoint (selects fa-IR-FaridNeural)
     resp2 = client.post("/api/tts/audio", json={"text": "سلام قربان، آماده خدمت هستم."})
     assert resp2.status_code == 200
@@ -190,11 +197,37 @@ def test_api_tts_audio_endpoint(monkeypatch):
     assert resp2.content == fake_mp3
     assert recorded_voices[-1] == "fa-IR-FaridNeural"
 
+    # 2b. Direct POST /api/tts Persian endpoint (selects fa-IR-FaridNeural)
+    resp2b = client.post("/api/tts", json={"text": "در خدمت شما هستم قربان."})
+    assert resp2b.status_code == 200
+    assert resp2b.headers["content-type"] == "audio/mpeg"
+    assert resp2b.content == fake_mp3
+    assert recorded_voices[-1] == "fa-IR-FaridNeural"
+
     # 3. GET endpoint for HTML audio streaming
     resp3 = client.get("/api/tts/audio?text=At+your+service+sir")
     assert resp3.status_code == 200
     assert resp3.headers["content-type"] == "audio/mpeg"
     assert resp3.content == fake_mp3
+
+
+def test_api_stt_endpoint(monkeypatch):
+    """Verify POST /api/stt audio transcription endpoint."""
+    client = TestClient(app)
+
+    # 1. Empty audio data
+    resp_empty = client.post("/api/stt", content=b"")
+    assert resp_empty.status_code == 200
+    assert resp_empty.json()["success"] is False
+
+    # 2. Mock _do_transcribe
+    monkeypatch.setattr("openjarvis.web.server._do_transcribe", lambda data: "hello jarvis turn on torch")
+    dummy_wav = b"RIFF" + b"\x00" * 40
+    resp_valid = client.post("/api/stt", content=dummy_wav)
+    assert resp_valid.status_code == 200
+    data = resp_valid.json()
+    assert data["success"] is True
+    assert data["transcript"] == "hello jarvis turn on torch"
 
 
 def test_client_actions_in_chat_and_tools():
