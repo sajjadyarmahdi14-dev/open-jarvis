@@ -1238,9 +1238,137 @@ async def agent_step_endpoint(req: AgentStepRequest):
 
     goal_lower = goal.lower()
 
-    # 1. Camera / Photo Goals
-    cam_terms = ("photo", "picture", "camera", "عکس", "تصویر", "شاتر")
+    # Try LLM UI Planner if engine is active
+    try:
+        agent = _cached_agent
+        if agent is not None and getattr(agent, "engine", None) is not None:
+            compact_ui = []
+            for n in parsed_nodes[:40]:
+                lbl = n.get("text", "") or n.get("desc", "")
+                nid = n.get("node_id", f"node_{n.get('id', 0)}")
+                cls_name = n.get("class", "View")
+                props = []
+                if n.get("clickable"): props.append("clickable")
+                if n.get("editable"): props.append("editable")
+                if n.get("scrollable"): props.append("scrollable")
+                compact_ui.append(f"[{nid}] {cls_name} \"{lbl}\" ({', '.join(props) if props else 'static'})")
+
+            ui_repr = "\n".join(compact_ui)
+            prompt = (
+                "You are J.A.R.V.I.S. Autonomous UI Agent. You complete tasks in Android apps by picking the next action.\n"
+                "Return ONLY a JSON object:\n"
+                "{\"action\": \"click\", \"target\": \"<text_or_id>\"}\n"
+                "{\"action\": \"type\", \"target\": \"<text_or_id>\", \"text\": \"<text>\"}\n"
+                "{\"action\": \"swipe\", \"direction\": \"left\"|\"right\"|\"up\"|\"down\"}\n"
+                "{\"action\": \"pinch\", \"scale\": \"in\"|\"out\"}\n"
+                "{\"action\": \"done\", \"reply\": \"<confirmation>\"}\n\n"
+                f"Goal: {goal}\nPackage: {pkg}\nStep: {step}\nUI Nodes:\n{ui_repr}"
+            )
+            llm_res = await asyncio.to_thread(
+                agent.engine.generate,
+                [Message(role=Role.USER, content=prompt)],
+                model=agent.model,
+                temperature=0.1,
+                max_tokens=150,
+            )
+            raw_c = llm_res.get("content", "").strip()
+            raw_c = re.sub(r"<think>[\s\S]*?</think>", "", raw_c, flags=re.IGNORECASE)
+            raw_c = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", raw_c).strip()
+            match = re.search(r"\{[\s\S]*\}", raw_c)
+            if match:
+                parsed_json = json.loads(match.group(0))
+                if parsed_json.get("action") in ("click", "tap", "type", "input_text", "swipe", "pinch", "scroll", "done", "wait_and_tap"):
+                    return parsed_json
+    except Exception as exc:
+        logger.debug("LLM UI step generation fallback: %s", exc)
+
+    # 1. Camera / Photo / Video / Zoom Goals
+    cam_terms = ("photo", "picture", "camera", "video", "portrait", "zoom", "timer", "عکس", "تصویر", "شاتر", "ویدیو", "فیلم", "پرتره", "زوم", "تایمر")
     if any(t in goal_lower for t in cam_terms):
+        # 1.1 Video Recording Mode
+        if any(v in goal_lower for v in ("video", "record", "فیلم", "ویدیو", "ضبط")):
+            video_node = next(
+                (n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in ("video", "ویدیو", "فیلم"))),
+                None
+            )
+            shutter_node = next(
+                (n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in ("shutter", "record", "capture", "شاتر", "ضبط"))),
+                None
+            )
+            if step == 0 and video_node:
+                return {
+                    "action": "click",
+                    "target": video_node["text"] or video_node.get("desc") or "Video",
+                    "node_id": video_node["id"],
+                    "reply": "در حال رفتن به حالت فیلم‌برداری قربان." if is_persian else "Switching to video mode, sir.",
+                }
+            elif step == 0 and not video_node:
+                return {
+                    "action": "swipe",
+                    "direction": "left",
+                    "reply": "در حال رفتن به حالت فیلم‌برداری قربان." if is_persian else "Switching to video mode, sir.",
+                }
+            elif step >= 1:
+                target_id = shutter_node["id"] if shutter_node else 1
+                reply = "ضبط ویدیو آغاز شد قربان." if is_persian else "Video recording started, sir."
+                return {
+                    "action": "click",
+                    "target": "Shutter",
+                    "node_id": target_id,
+                    "reply": reply,
+                }
+
+        # 1.2 Portrait Mode
+        if any(p in goal_lower for p in ("portrait", "پرتره")):
+            portrait_node = next(
+                (n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in ("portrait", "پرتره"))),
+                None
+            )
+            if step == 0 and portrait_node:
+                return {
+                    "action": "click",
+                    "target": portrait_node["text"] or "Portrait",
+                    "node_id": portrait_node["id"],
+                }
+            elif step == 0:
+                return {"action": "swipe", "direction": "right"}
+            elif step >= 1:
+                reply = "حالت پرتره فعال شد قربان." if is_persian else "Portrait mode activated, sir."
+                return {"action": "done", "reply": reply}
+
+        # 1.3 Zoom Controls (2x, 5x, 0.6x, zoom in, zoom out)
+        if any(z in goal_lower for z in ("zoom", "2x", "5x", "0.6x", "زوم")):
+            zoom_node = next(
+                (n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in ("2x", "5x", "0.6x", "zoom", "1x"))),
+                None
+            )
+            if step == 0 and zoom_node:
+                return {
+                    "action": "click",
+                    "target": zoom_node["text"] or "2x",
+                    "node_id": zoom_node["id"],
+                }
+            elif step == 0:
+                scale_dir = "in" if ("out" in goal_lower or "کم" in goal_lower) else "out"
+                return {"action": "pinch", "scale": scale_dir}
+            else:
+                reply = "بزرگنمایی دوربین تنظیم شد قربان." if is_persian else "Camera zoom adjusted, sir."
+                return {"action": "done", "reply": reply}
+
+        # 1.4 Timer Controls (e.g. 3-second timer)
+        if any(t in goal_lower for t in ("timer", "3s", "3-second", "5s", "تایمر")):
+            timer_node = next(
+                (n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in ("3s", "timer", "تایمر", "sec"))),
+                None
+            )
+            if step == 0 and timer_node:
+                return {
+                    "action": "click",
+                    "target": timer_node["text"] or "Timer",
+                    "node_id": timer_node["id"],
+                }
+
+        # 1.5 General Photography / Shutter Click
         shutter_keywords = ("shutter", "capture", "take", "عکس", "شاتر", "camera")
         shutter_node = next(
             (n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in shutter_keywords)),
@@ -1252,6 +1380,7 @@ async def agent_step_endpoint(req: AgentStepRequest):
         if shutter_node and step == 0:
             return {
                 "action": "wait_and_tap",
+                "target": shutter_node.get("text") or "Shutter",
                 "node_id": shutter_node["id"],
                 "delay_ms": 1500,
                 "countdown_speech": True,

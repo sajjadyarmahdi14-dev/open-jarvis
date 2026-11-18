@@ -896,6 +896,12 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         setTorchState(shouldTurnOn)
                     }
 
+                    // Native Kotlin Fast-Path for Camera (Always launch native camera app fully!)
+                    val camTerms = listOf("open camera", "launch camera", "take photo", "take a picture", "take picture", "دوربین رو باز کن", "دوربین باز کن", "عکس بگیر", "یه عکس بگیر")
+                    if (camTerms.any { cleanT.contains(it) }) {
+                        DeviceController.openCamera(applicationContext)
+                    }
+
                     // 100% Native execution of client actions (App, Torch, Alarm, Call, SMS, Volume)
                     if (clientActions != null) {
                         for (i in 0 until clientActions.length()) {

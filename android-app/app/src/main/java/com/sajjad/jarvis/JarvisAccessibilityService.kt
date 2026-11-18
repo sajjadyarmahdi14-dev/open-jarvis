@@ -2,8 +2,10 @@ package com.sajjad.jarvis
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
@@ -27,6 +29,32 @@ import java.util.Locale
 class JarvisAccessibilityService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main)
+    private var isReceiverRegistered = false
+
+    private val uiActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent == null) return
+            try {
+                val actionPayload = intent.getStringExtra("action_payload")
+                    ?: intent.getStringExtra("action_json")
+                if (!actionPayload.isNullOrBlank()) {
+                    executeUiAction(JSONObject(actionPayload))
+                } else {
+                    val act = intent.getStringExtra("action") ?: return
+                    val json = JSONObject().apply {
+                        put("action", act)
+                        intent.getStringExtra("target")?.let { put("target", it) }
+                        intent.getStringExtra("text")?.let { put("text", it) }
+                        intent.getStringExtra("direction")?.let { put("direction", it) }
+                        intent.getStringExtra("scale")?.let { put("scale", it) }
+                    }
+                    executeUiAction(json)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "uiActionReceiver error: ${e.message}", e)
+            }
+        }
+    }
 
     companion object {
         private const val TAG = "JarvisAccessibility"
@@ -42,6 +70,17 @@ class JarvisAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         Log.i(TAG, "JarvisAccessibilityService connected and ready for deep automation.")
+        try {
+            val filter = IntentFilter("com.sajjad.jarvis.EXECUTE_UI_ACTION")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(uiActionReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(uiActionReceiver, filter)
+            }
+            isReceiverRegistered = true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed registering uiActionReceiver: ${e.message}")
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -53,6 +92,12 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        if (isReceiverRegistered) {
+            try {
+                unregisterReceiver(uiActionReceiver)
+            } catch (_: Exception) {}
+            isReceiverRegistered = false
+        }
         if (instance == this) {
             instance = null
         }
@@ -172,10 +217,8 @@ class JarvisAccessibilityService : AccessibilityService() {
     // -------------------------------------------------------------------------
 
     fun takePhoto(context: Context): Boolean {
-        val cameraIntent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        AppLauncher.launchWithOverlayFallback(context, cameraIntent)
+        // ALWAYS launch native camera app fully via DeviceController (OEM app with auto-save to gallery)
+        DeviceController.openCamera(context)
 
         serviceScope.launch {
             // Wait 1500ms for camera app to launch and autofocus
@@ -428,8 +471,16 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
-    fun dumpUiTree(): Pair<JSONArray, Map<String, AccessibilityNodeInfo>> {
-        val root = rootInActiveWindow ?: return Pair(JSONArray(), emptyMap())
+    @Volatile
+    var lastDumpedNodeMap: Map<String, AccessibilityNodeInfo> = emptyMap()
+        private set
+
+    // -------------------------------------------------------------------------
+    // 6. The "Eyes": Universal UI Dumper (JSON Tree)
+    // -------------------------------------------------------------------------
+
+    fun dumpUiTree(): String {
+        val root = rootInActiveWindow ?: return "[]"
         val nodeMap = mutableMapOf<String, AccessibilityNodeInfo>()
         val array = JSONArray()
         var counter = 0
@@ -437,35 +488,64 @@ class JarvisAccessibilityService : AccessibilityService() {
         fun traverse(node: AccessibilityNodeInfo?) {
             if (node == null || !node.isVisibleToUser) return
 
-            val text = node.text?.toString()?.replace("\n", " ")?.trim() ?: ""
-            val desc = node.contentDescription?.toString()?.replace("\n", " ")?.trim() ?: ""
+            val rawText = node.text?.toString()?.replace("\n", " ")?.trim() ?: ""
+            val rawDesc = node.contentDescription?.toString()?.replace("\n", " ")?.trim() ?: ""
+            val text = if (rawText.isNotBlank()) rawText else rawDesc
             val isClickable = node.isClickable
             val isEditable = node.isEditable || (node.className?.toString()?.contains("EditText", ignoreCase = true) == true)
-            val isCheckable = node.isCheckable
-            val isChecked = node.isChecked
-            val className = node.className?.toString()?.substringAfterLast(".") ?: "View"
+            val isScrollable = node.isScrollable
+            val className = node.className?.toString() ?: "android.view.View"
 
-            val isInformative = text.isNotEmpty() || desc.isNotEmpty() || isClickable || isEditable || isCheckable
-            if (isInformative) {
-                val nodeId = "node_$counter"
-                nodeMap[nodeId] = node
-                nodeMap["$counter"] = node
-                val rect = Rect()
-                node.getBoundsInScreen(rect)
-                val obj = JSONObject().apply {
-                    put("node_id", nodeId)
-                    put("class", className)
-                    put("text", text)
-                    put("desc", desc)
-                    put("clickable", isClickable)
-                    put("editable", isEditable)
-                    put("checked", isChecked)
-                    put("x", rect.left)
-                    put("y", rect.top)
-                }
-                array.put(obj)
-                counter++
+            val viewId = node.viewIdResourceName?.trim()
+            val nodeId = if (!viewId.isNullOrBlank()) viewId else "node_$counter"
+
+            nodeMap[nodeId] = node
+            nodeMap["node_$counter"] = node
+            nodeMap["$counter"] = node
+            if (!viewId.isNullOrBlank()) {
+                val simpleId = viewId.substringAfterLast("/")
+                nodeMap[simpleId] = node
             }
+            if (rawText.isNotBlank()) {
+                nodeMap[rawText.lowercase(Locale.ROOT)] = node
+            }
+            if (rawDesc.isNotBlank() && rawDesc != rawText) {
+                nodeMap[rawDesc.lowercase(Locale.ROOT)] = node
+            }
+
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+
+            val boundsObj = JSONObject().apply {
+                put("left", rect.left)
+                put("top", rect.top)
+                put("right", rect.right)
+                put("bottom", rect.bottom)
+                put("x", rect.left)
+                put("y", rect.top)
+                put("width", rect.width())
+                put("height", rect.height())
+            }
+
+            val obj = JSONObject().apply {
+                put("node_id", nodeId)
+                put("text", text)
+                put("contentDescription", rawDesc)
+                put("className", className)
+                put("isClickable", isClickable)
+                put("isEditable", isEditable)
+                put("isScrollable", isScrollable)
+                put("boundsInScreen", boundsObj)
+                // Backwards-compatible fields
+                put("class", className.substringAfterLast("."))
+                put("clickable", isClickable)
+                put("editable", isEditable)
+                put("checked", node.isChecked)
+                put("x", rect.left)
+                put("y", rect.top)
+            }
+            array.put(obj)
+            counter++
 
             for (i in 0 until node.childCount) {
                 traverse(node.getChild(i))
@@ -473,7 +553,193 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
 
         traverse(root)
-        return Pair(array, nodeMap)
+        lastDumpedNodeMap = nodeMap
+        return array.toString()
+    }
+
+    fun dumpUiTreeArray(): Pair<JSONArray, Map<String, AccessibilityNodeInfo>> {
+        val jsonStr = dumpUiTree()
+        return Pair(JSONArray(jsonStr), lastDumpedNodeMap)
+    }
+
+    // -------------------------------------------------------------------------
+    // 7. The "Hands": Generic Gesture & Action Executor
+    // -------------------------------------------------------------------------
+
+    fun swipe(direction: String): Boolean {
+        val displayMetrics = resources.displayMetrics
+        val width = displayMetrics.widthPixels.toFloat()
+        val height = displayMetrics.heightPixels.toFloat()
+
+        val startX: Float
+        val startY: Float
+        val endX: Float
+        val endY: Float
+
+        when (direction.lowercase(Locale.ROOT)) {
+            "left" -> {
+                // Swipe right-to-left across viewfinder / tabs
+                startX = width * 0.85f
+                startY = height * 0.50f
+                endX = width * 0.15f
+                endY = height * 0.50f
+            }
+            "right" -> {
+                // Swipe left-to-right
+                startX = width * 0.15f
+                startY = height * 0.50f
+                endX = width * 0.85f
+                endY = height * 0.50f
+            }
+            "up" -> {
+                // Swipe bottom-to-top (scroll down)
+                startX = width * 0.50f
+                startY = height * 0.75f
+                endX = width * 0.50f
+                endY = height * 0.25f
+            }
+            "down" -> {
+                // Swipe top-to-bottom (scroll up)
+                startX = width * 0.50f
+                startY = height * 0.25f
+                endX = width * 0.50f
+                endY = height * 0.75f
+            }
+            else -> {
+                startX = width * 0.50f
+                startY = height * 0.75f
+                endX = width * 0.50f
+                endY = height * 0.25f
+            }
+        }
+
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 350)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val dispatched = dispatchGesture(gesture, null, null)
+        Log.i(TAG, "Dispatched swipe '$direction': $dispatched")
+        return dispatched
+    }
+
+    fun pinch(scale: String): Boolean {
+        val displayMetrics = resources.displayMetrics
+        val width = displayMetrics.widthPixels.toFloat()
+        val height = displayMetrics.heightPixels.toFloat()
+        val centerX = width * 0.5f
+        val centerY = height * 0.5f
+
+        val path1 = Path()
+        val path2 = Path()
+
+        val isZoomIn = scale.lowercase(Locale.ROOT) in listOf("out", "zoom_in", "in_to_out", "expand")
+        if (isZoomIn) {
+            // Pinch outward (zoom in)
+            path1.moveTo(centerX - 80f, centerY - 80f)
+            path1.lineTo(centerX - 350f, centerY - 350f)
+
+            path2.moveTo(centerX + 80f, centerY + 80f)
+            path2.lineTo(centerX + 350f, centerY + 350f)
+        } else {
+            // Pinch inward (zoom out)
+            path1.moveTo(centerX - 350f, centerY - 350f)
+            path1.lineTo(centerX - 80f, centerY - 80f)
+
+            path2.moveTo(centerX + 350f, centerY + 350f)
+            path2.lineTo(centerX + 80f, centerY + 80f)
+        }
+
+        val stroke1 = GestureDescription.StrokeDescription(path1, 0, 400)
+        val stroke2 = GestureDescription.StrokeDescription(path2, 0, 400)
+        val gesture = GestureDescription.Builder().addStroke(stroke1).addStroke(stroke2).build()
+        val dispatched = dispatchGesture(gesture, null, null)
+        Log.i(TAG, "Dispatched pinch '$scale': $dispatched")
+        return dispatched
+    }
+
+    fun clickTarget(target: String): Boolean {
+        val cleanTarget = target.trim()
+        if (cleanTarget.isBlank()) return false
+
+        // 1. Try finding in last dumped node map
+        var node = lastDumpedNodeMap[cleanTarget]
+            ?: lastDumpedNodeMap["node_$cleanTarget"]
+            ?: lastDumpedNodeMap[cleanTarget.lowercase(Locale.ROOT)]
+
+        // 2. If not found in map, find by viewIdResourceName or text in current window
+        if (node == null) {
+            val root = rootInActiveWindow
+            if (root != null) {
+                node = findNodeByPredicate(root) { n ->
+                    val id = n.viewIdResourceName ?: ""
+                    val t = n.text?.toString() ?: ""
+                    val d = n.contentDescription?.toString() ?: ""
+                    id.equals(cleanTarget, ignoreCase = true) ||
+                    id.endsWith("/$cleanTarget", ignoreCase = true) ||
+                    t.equals(cleanTarget, ignoreCase = true) ||
+                    d.equals(cleanTarget, ignoreCase = true) ||
+                    t.contains(cleanTarget, ignoreCase = true) ||
+                    d.contains(cleanTarget, ignoreCase = true)
+                }
+            }
+        }
+
+        if (node != null) {
+            return clickNodeOrParent(node)
+        }
+
+        // 3. Fallback to generic clickElement
+        return clickElement(cleanTarget)
+    }
+
+    fun typeTarget(target: String, text: String, autoSend: Boolean = false): Boolean {
+        val cleanText = UtteranceStitcher.sanitizeLiteralText(text)
+        val cleanTarget = target.trim()
+        var node: AccessibilityNodeInfo? = null
+
+        if (cleanTarget.isNotBlank()) {
+            node = lastDumpedNodeMap[cleanTarget]
+                ?: lastDumpedNodeMap["node_$cleanTarget"]
+                ?: lastDumpedNodeMap[cleanTarget.lowercase(Locale.ROOT)]
+
+            if (node == null) {
+                val root = rootInActiveWindow
+                if (root != null) {
+                    node = findNodeByPredicate(root) { n ->
+                        val id = n.viewIdResourceName ?: ""
+                        val t = n.text?.toString() ?: ""
+                        val d = n.contentDescription?.toString() ?: ""
+                        id.equals(cleanTarget, ignoreCase = true) ||
+                        id.endsWith("/$cleanTarget", ignoreCase = true) ||
+                        t.contains(cleanTarget, ignoreCase = true) ||
+                        d.contains(cleanTarget, ignoreCase = true)
+                    }
+                }
+            }
+        }
+
+        if (node == null) {
+            node = findEditableNode(rootInActiveWindow)
+        }
+
+        if (node != null) {
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cleanText)
+            }
+            val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            Log.i(TAG, "typeTarget into node $node: success=$success, text='$cleanText'")
+            if (autoSend) {
+                serviceScope.launch {
+                    delay(350)
+                    clickSendButton()
+                }
+            }
+            return success
+        }
+
+        return typeText(cleanText, autoSend)
     }
 
     fun executeUiAction(
@@ -484,46 +750,25 @@ class JarvisAccessibilityService : AccessibilityService() {
         Log.i(TAG, "executeUiAction: action='$action', payload=$actionPayload")
         return when (action) {
             "click", "tap" -> {
-                val nodeIdStr = actionPayload.optString("node_id", "")
-                val nodeIdInt = actionPayload.optInt("node_id", -1)
-                val targetKey = if (nodeIdStr.isNotBlank()) nodeIdStr else if (nodeIdInt >= 0) "node_$nodeIdInt" else ""
-                val targetNode = if (targetKey.isNotBlank()) {
-                    nodeMap[targetKey] ?: (if (nodeIdInt >= 0) nodeMap["$nodeIdInt"] else null)
-                } else null
-
-                if (targetNode != null) {
-                    clickNodeOrParent(targetNode)
-                } else {
-                    val targetText = actionPayload.optString("target_text", actionPayload.optString("keyword", actionPayload.optString("target", "")))
-                    if (targetText.isNotBlank()) clickElement(targetText) else false
-                }
+                val target = actionPayload.optString(
+                    "target",
+                    actionPayload.optString("target_text", actionPayload.optString("keyword", actionPayload.optString("node_id", "")))
+                )
+                clickTarget(target)
             }
             "type", "input_text" -> {
+                val target = actionPayload.optString("target", actionPayload.optString("node_id", ""))
                 val rawText = actionPayload.optString("text", actionPayload.optString("message", ""))
-                val cleanText = UtteranceStitcher.sanitizeLiteralText(rawText)
-                val submit = actionPayload.optBoolean("submit", actionPayload.optBoolean("auto_send", true))
-                val nodeIdStr = actionPayload.optString("node_id", "")
-                val nodeIdInt = actionPayload.optInt("node_id", -1)
-                val targetKey = if (nodeIdStr.isNotBlank()) nodeIdStr else if (nodeIdInt >= 0) "node_$nodeIdInt" else ""
-                val targetNode = if (targetKey.isNotBlank()) {
-                    nodeMap[targetKey] ?: (if (nodeIdInt >= 0) nodeMap["$nodeIdInt"] else null)
-                } else findEditableNode(rootInActiveWindow)
-
-                if (targetNode != null) {
-                    val args = Bundle().apply {
-                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cleanText)
-                    }
-                    val ok = targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-                    if (submit) {
-                        serviceScope.launch {
-                            delay(400)
-                            clickSendButton()
-                        }
-                    }
-                    ok
-                } else {
-                    typeText(cleanText, submit)
-                }
+                val submit = actionPayload.optBoolean("submit", actionPayload.optBoolean("auto_send", false))
+                typeTarget(target, rawText, submit)
+            }
+            "swipe" -> {
+                val dir = actionPayload.optString("direction", "left")
+                swipe(dir)
+            }
+            "pinch" -> {
+                val scale = actionPayload.optString("scale", "out")
+                pinch(scale)
             }
             "scroll" -> {
                 val dir = actionPayload.optString("direction", "down").lowercase(Locale.ROOT)
@@ -545,16 +790,11 @@ class JarvisAccessibilityService : AccessibilityService() {
             "notifications" -> openNotifications()
             "wait_and_tap" -> {
                 val delayMs = actionPayload.optLong("delay_ms", 1500L)
-                val nodeIdInt = actionPayload.optInt("node_id", -1)
-                val nodeIdStr = actionPayload.optString("node_id", "")
-                val targetKey = if (nodeIdStr.isNotBlank()) nodeIdStr else if (nodeIdInt >= 0) "node_$nodeIdInt" else ""
+                val target = actionPayload.optString("target", actionPayload.optString("node_id", ""))
                 serviceScope.launch {
                     delay(delayMs)
-                    val target = if (targetKey.isNotBlank()) {
-                        nodeMap[targetKey] ?: (if (nodeIdInt >= 0) nodeMap["$nodeIdInt"] else null)
-                    } else null
-                    if (target != null) {
-                        clickNodeOrParent(target)
+                    if (target.isNotBlank()) {
+                        clickTarget(target)
                     } else {
                         clickSendButton()
                     }
@@ -563,8 +803,9 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
             "done" -> true
             else -> {
+                val map = if (nodeMap.isNotEmpty()) nodeMap else lastDumpedNodeMap
                 val intMap = mutableMapOf<Int, AccessibilityNodeInfo>()
-                nodeMap.forEach { (k, v) ->
+                map.forEach { (k, v) ->
                     val cleanK = k.removePrefix("node_").toIntOrNull()
                     if (cleanK != null) intMap[cleanK] = v
                 }
@@ -583,14 +824,27 @@ class JarvisAccessibilityService : AccessibilityService() {
             var currentStep = 0
             var lastReply = ""
 
+            // If goal implies camera, ensure native OEM camera app is opened fully
+            val goalLower = goal.lowercase(Locale.ROOT)
+            val isCameraGoal = listOf("camera", "photo", "picture", "video", "فیلم", "عکس", "شاتر", "zoom", "portrait").any { goalLower.contains(it) }
+            if (isCameraGoal) {
+                withContext(Dispatchers.Main) {
+                    val currentPkg = rootInActiveWindow?.packageName?.toString() ?: ""
+                    if (!currentPkg.contains("camera", ignoreCase = true)) {
+                        DeviceController.openCamera(this@JarvisAccessibilityService)
+                    }
+                }
+                delay(1500)
+            }
+
             while (currentStep < maxSteps) {
-                if (currentStep == 0) delay(1000)
+                if (currentStep == 0 && !isCameraGoal) delay(1000)
 
                 val (serializedNodes, _) = withContext(Dispatchers.Main) {
                     serializeCurrentWindow()
                 }
 
-                val (dumpNodesArray, strNodeMap) = withContext(Dispatchers.Main) {
+                val uiTreeJsonStr = withContext(Dispatchers.Main) {
                     dumpUiTree()
                 }
 
@@ -606,7 +860,8 @@ class JarvisAccessibilityService : AccessibilityService() {
                     put("package", currentPkg)
                     put("step", currentStep)
                     put("ui_tree", jsonArray)
-                    put("ui_nodes", dumpNodesArray)
+                    put("ui_nodes", JSONArray(uiTreeJsonStr))
+                    put("ui_tree_json", uiTreeJsonStr)
                 }
 
                 val stepResponse = postAgentStep(serverUrl, payload)
@@ -624,7 +879,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 }
 
                 withContext(Dispatchers.Main) {
-                    executeUiAction(stepResponse, strNodeMap)
+                    executeUiAction(stepResponse, lastDumpedNodeMap)
                 }
 
                 currentStep++

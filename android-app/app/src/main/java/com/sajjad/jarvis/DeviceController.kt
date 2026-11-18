@@ -270,7 +270,33 @@ object DeviceController {
     }
 
     // -------------------------------------------------------------------------
-    // 4. System Hardware Controls (Torch, Brightness, Volume, Clipboard)
+    // 4. Camera & Photography (Native Full Launch)
+    // -------------------------------------------------------------------------
+
+    fun openCamera(context: Context) {
+        // ALWAYS launch native camera app fully using MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA or com.android.camera with FLAG_ACTIVITY_NEW_TASK
+        val camPackages = listOf(
+            "com.android.camera",
+            "com.google.android.GoogleCamera",
+            "org.codeaurora.snapcam",
+            "com.sec.android.app.camera"
+        )
+        for (pkg in camPackages) {
+            val res = AppLauncher.tryLaunchPackage(context, pkg, "Camera")
+            if (res != null) {
+                Log.i(TAG, "Launched native camera package: $pkg")
+                return
+            }
+        }
+        val cameraIntent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        AppLauncher.launchWithOverlayFallback(context, cameraIntent)
+        Log.i(TAG, "Launched camera via MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA")
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. System Hardware Controls (Torch, Brightness, Volume, Clipboard)
     // -------------------------------------------------------------------------
 
     fun setTorchState(context: Context, turnOn: Boolean) {
@@ -398,7 +424,11 @@ object DeviceController {
                     val target = act.optString("target_text") ?: act.optString("target") ?: ""
                     JarvisAccessibilityService.instance?.clickElement(target)
                 }
+                "open_camera", "camera" -> {
+                    openCamera(context)
+                }
                 "take_photo" -> {
+                    openCamera(context)
                     JarvisAccessibilityService.instance?.takePhoto(context)
                 }
                 "read_screen" -> {
