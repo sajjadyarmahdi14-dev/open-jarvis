@@ -30,9 +30,67 @@ from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
+import re
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = float(os.environ.get("TERMUX_API_TIMEOUT", 10.0))
+
+
+def sanitize_literal_text(text: str) -> str:
+    """Sanitize typed text to ensure zero instruction leakage into apps."""
+    if not text:
+        return ""
+    s = str(text).strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        if len(s) >= 2:
+            s = s[1:-1].strip()
+
+    for prefix in (
+        "And type ", "and type ", "Type ", "type ", "Say ", "say ",
+        "Please type ", "please type ", "Send message ", "send message ",
+        "Send a message saying ", "send a message saying ", "Send ", "send ",
+    ):
+        if s.startswith(prefix):
+            s = s[len(prefix):].strip()
+    for suffix in (" and send it", " and send", " send it", " and submit it", " and submit"):
+        if s.endswith(suffix):
+            s = s[:-len(suffix)].strip()
+
+    for fa_p in ("لطفاً بنویس ", "لطفا بنویس ", "بنویس ", "بگو ", "تایپ کن ", "ارسال کن ", "بفرست "):
+        if s.startswith(fa_p):
+            s = s[len(fa_p):].strip()
+    for fa_s in (" و بفرست", " و ارسال کن", " بفرست", " ارسال کن"):
+        if s.endswith(fa_s):
+            s = s[:-len(fa_s)].strip()
+
+    en_prefix = re.compile(
+        r"^(?:please\s+)?(?:and\s+)?(?:type|write|say|enter|input|message|send)\s+(?:a\s+)?(?:that\s+|it\s+|text\s+|message\s+)?(?:saying\s+|quoting\s+|:\s*)?",
+        re.IGNORECASE,
+    )
+    en_suffix = re.compile(
+        r"(?:\s+(?:and\s+)?(?:send(?:\s+it)?|submit(?:\s+it)?|press\s+enter))$",
+        re.IGNORECASE,
+    )
+    s = en_prefix.sub("", s)
+    s = en_suffix.sub("", s).strip()
+
+    fa_prefix = re.compile(
+        r"^(?:لطفاً\s+|لطفا\s+)?(?:و\s+)?(?:بنویس|بگو|تایپ\s*کن|ارسال\s*کن|بفرست)\s*(?:که\s+|:\s*)?",
+        re.IGNORECASE,
+    )
+    fa_suffix = re.compile(
+        r"(?:\s*(?:و\s+)?(?:بفرست|ارسال\s*کن))$",
+        re.IGNORECASE,
+    )
+    s = fa_prefix.sub("", s)
+    s = fa_suffix.sub("", s).strip()
+
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        if len(s) >= 2:
+            s = s[1:-1].strip()
+
+    return s
 
 
 def _run_termux_cmd(
@@ -929,7 +987,7 @@ class AndroidSmsSendTool(BaseTool):
                     },
                     "message": {
                         "type": "string",
-                        "description": "Text message content",
+                        "description": "CRITICAL: ONLY output the literal final text the recipient will see. Do NOT include phrases like 'type' or 'send'.",
                     },
                 },
                 "required": ["recipient", "message"],
@@ -939,7 +997,7 @@ class AndroidSmsSendTool(BaseTool):
 
     def execute(self, **params: Any) -> ToolResult:
         recipient = str(params.get("recipient", "")).strip()
-        message = str(params.get("message", "")).strip()
+        message = sanitize_literal_text(str(params.get("message", "")).strip())
 
         if not recipient or not message:
             return ToolResult(tool_name=self.spec.name, content="Recipient and message are required", success=False)
@@ -1110,7 +1168,7 @@ class AndroidTelegramActionTool(BaseTool):
                     },
                     "message": {
                         "type": "string",
-                        "description": "Optional message to pre-fill or send",
+                        "description": "CRITICAL: ONLY output the literal final text the recipient will see. Do NOT include phrases like 'type' or 'send'.",
                     },
                 },
                 "required": ["target"],
@@ -1121,7 +1179,7 @@ class AndroidTelegramActionTool(BaseTool):
     def execute(self, **params: Any) -> ToolResult:
         from urllib.parse import quote
         target = str(params.get("target", "")).strip()
-        message = str(params.get("message", "")).strip()
+        message = sanitize_literal_text(str(params.get("message", "")).strip())
 
         if not target:
             return ToolResult(tool_name=self.spec.name, content="Target is required", success=False)
@@ -1182,7 +1240,7 @@ class AndroidSendEmailTool(BaseTool):
                     },
                     "body": {
                         "type": "string",
-                        "description": "Email body content",
+                        "description": "CRITICAL: ONLY output the literal final text the recipient will see. Do NOT include phrases like 'type' or 'send'.",
                     },
                     "background": {
                         "type": "boolean",
@@ -1198,7 +1256,7 @@ class AndroidSendEmailTool(BaseTool):
         from urllib.parse import quote
         to = str(params.get("to", "")).strip()
         subject = str(params.get("subject", "")).strip()
-        body = str(params.get("body", "")).strip()
+        body = sanitize_literal_text(str(params.get("body", "")).strip())
         background = bool(params.get("background", False))
 
         if not to:
@@ -1587,6 +1645,99 @@ class AndroidWebSearchTool(BaseTool):
         return ToolResult(tool_name=self.spec.name, content=f"Failed to open search: {msg}", success=False)
 
 
+@ToolRegistry.register("operate_device_ui")
+@ToolRegistry.register("android_operate_ui")
+class AndroidOperateDeviceUiTool(BaseTool):
+    """Universal autonomous UI operator for ANY Android application."""
+
+    tool_id = "operate_device_ui"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="operate_device_ui",
+            description="Autonomous closed-loop UI perception-action tool capable of operating any installed or newly downloaded Android application. Takes a high-level objective and drives the UI step-by-step.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "The exact goal or task to achieve inside the target application (e.g. 'search and play bohemian rhapsody', 'send message to Ali saying hello', 'book a ride to airport')",
+                    },
+                    "target_app": {
+                        "type": "string",
+                        "description": "Optional name or package of the app to launch and control",
+                    },
+                },
+                "required": ["objective"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        objective = str(params.get("objective", "")).strip()
+        target_app = str(params.get("target_app", "")).strip()
+        if not objective:
+            return ToolResult(tool_name=self.spec.name, content="Objective is required", success=False)
+        clean_obj = sanitize_literal_text(objective)
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Operating UI for objective: '{clean_obj}' in app '{target_app or 'active app'}'",
+            success=True,
+            metadata={
+                "client_action": "autonomous_agent",
+                "goal": clean_obj,
+                "objective": clean_obj,
+                "target_app": target_app,
+            },
+        )
+
+
+@ToolRegistry.register("type_text")
+@ToolRegistry.register("android_type_text")
+class AndroidTypeTextTool(BaseTool):
+    """Type literal text into an active input field or chat."""
+
+    tool_id = "type_text"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="type_text",
+            description="Type literal text into the currently active input field or chat on screen.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "CRITICAL: ONLY output the literal final text the recipient will see. Do NOT include phrases like 'type' or 'send'.",
+                    },
+                    "auto_send": {
+                        "type": "boolean",
+                        "description": "Whether to automatically tap Send/Submit after typing",
+                    },
+                },
+                "required": ["text"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        raw_text = str(params.get("text", "")).strip()
+        auto_send = bool(params.get("auto_send", True))
+        clean_text = sanitize_literal_text(raw_text)
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Typing text: '{clean_text}' (auto_send={auto_send})",
+            success=True,
+            metadata={
+                "client_action": "type_text",
+                "text": clean_text,
+                "auto_send": auto_send,
+            },
+        )
+
+
 __all__ = [
     "AndroidBatteryTool",
     "AndroidCameraCaptureTool",
@@ -1598,6 +1749,7 @@ __all__ = [
     "AndroidLaunchAppTool",
     "AndroidMediaPlayerTool",
     "AndroidNotificationTool",
+    "AndroidOperateDeviceUiTool",
     "AndroidPhoneCallTool",
     "AndroidSendEmailTool",
     "AndroidSetAlarmTool",
@@ -1606,6 +1758,7 @@ __all__ = [
     "AndroidTelegramActionTool",
     "AndroidToastTool",
     "AndroidTorchTool",
+    "AndroidTypeTextTool",
     "AndroidVibrateTool",
     "AndroidVolumeTool",
     "AndroidWebSearchTool",

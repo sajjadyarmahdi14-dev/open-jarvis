@@ -88,9 +88,10 @@ class JarvisAccessibilityService : AccessibilityService() {
         return success
     }
 
-    private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+    fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         if (node == null) return null
-        if (node.isEditable) return node
+        val cls = node.className?.toString() ?: ""
+        if (node.isEditable || cls.contains("EditText", ignoreCase = true)) return node
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findEditableNode(child)
@@ -427,6 +428,151 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
+    fun dumpUiTree(): Pair<JSONArray, Map<String, AccessibilityNodeInfo>> {
+        val root = rootInActiveWindow ?: return Pair(JSONArray(), emptyMap())
+        val nodeMap = mutableMapOf<String, AccessibilityNodeInfo>()
+        val array = JSONArray()
+        var counter = 0
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            if (node == null || !node.isVisibleToUser) return
+
+            val text = node.text?.toString()?.replace("\n", " ")?.trim() ?: ""
+            val desc = node.contentDescription?.toString()?.replace("\n", " ")?.trim() ?: ""
+            val isClickable = node.isClickable
+            val isEditable = node.isEditable || (node.className?.toString()?.contains("EditText", ignoreCase = true) == true)
+            val isCheckable = node.isCheckable
+            val isChecked = node.isChecked
+            val className = node.className?.toString()?.substringAfterLast(".") ?: "View"
+
+            val isInformative = text.isNotEmpty() || desc.isNotEmpty() || isClickable || isEditable || isCheckable
+            if (isInformative) {
+                val nodeId = "node_$counter"
+                nodeMap[nodeId] = node
+                nodeMap["$counter"] = node
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                val obj = JSONObject().apply {
+                    put("node_id", nodeId)
+                    put("class", className)
+                    put("text", text)
+                    put("desc", desc)
+                    put("clickable", isClickable)
+                    put("editable", isEditable)
+                    put("checked", isChecked)
+                    put("x", rect.left)
+                    put("y", rect.top)
+                }
+                array.put(obj)
+                counter++
+            }
+
+            for (i in 0 until node.childCount) {
+                traverse(node.getChild(i))
+            }
+        }
+
+        traverse(root)
+        return Pair(array, nodeMap)
+    }
+
+    fun executeUiAction(
+        actionPayload: JSONObject,
+        nodeMap: Map<String, AccessibilityNodeInfo> = emptyMap()
+    ): Boolean {
+        val action = actionPayload.optString("action", actionPayload.optString("type", "")).lowercase(Locale.ROOT)
+        Log.i(TAG, "executeUiAction: action='$action', payload=$actionPayload")
+        return when (action) {
+            "click", "tap" -> {
+                val nodeIdStr = actionPayload.optString("node_id", "")
+                val nodeIdInt = actionPayload.optInt("node_id", -1)
+                val targetKey = if (nodeIdStr.isNotBlank()) nodeIdStr else if (nodeIdInt >= 0) "node_$nodeIdInt" else ""
+                val targetNode = if (targetKey.isNotBlank()) {
+                    nodeMap[targetKey] ?: (if (nodeIdInt >= 0) nodeMap["$nodeIdInt"] else null)
+                } else null
+
+                if (targetNode != null) {
+                    clickNodeOrParent(targetNode)
+                } else {
+                    val targetText = actionPayload.optString("target_text", actionPayload.optString("keyword", actionPayload.optString("target", "")))
+                    if (targetText.isNotBlank()) clickElement(targetText) else false
+                }
+            }
+            "type", "input_text" -> {
+                val rawText = actionPayload.optString("text", actionPayload.optString("message", ""))
+                val cleanText = UtteranceStitcher.sanitizeLiteralText(rawText)
+                val submit = actionPayload.optBoolean("submit", actionPayload.optBoolean("auto_send", true))
+                val nodeIdStr = actionPayload.optString("node_id", "")
+                val nodeIdInt = actionPayload.optInt("node_id", -1)
+                val targetKey = if (nodeIdStr.isNotBlank()) nodeIdStr else if (nodeIdInt >= 0) "node_$nodeIdInt" else ""
+                val targetNode = if (targetKey.isNotBlank()) {
+                    nodeMap[targetKey] ?: (if (nodeIdInt >= 0) nodeMap["$nodeIdInt"] else null)
+                } else findEditableNode(rootInActiveWindow)
+
+                if (targetNode != null) {
+                    val args = Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cleanText)
+                    }
+                    val ok = targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                    if (submit) {
+                        serviceScope.launch {
+                            delay(400)
+                            clickSendButton()
+                        }
+                    }
+                    ok
+                } else {
+                    typeText(cleanText, submit)
+                }
+            }
+            "scroll" -> {
+                val dir = actionPayload.optString("direction", "down").lowercase(Locale.ROOT)
+                if (dir == "up") scrollUp() else scrollDown()
+            }
+            "global" -> {
+                val sub = actionPayload.optString("target", actionPayload.optString("type", "")).lowercase(Locale.ROOT)
+                when (sub) {
+                    "back" -> goBack()
+                    "home" -> goHome()
+                    "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+                    "notifications" -> openNotifications()
+                    else -> goBack()
+                }
+            }
+            "back" -> goBack()
+            "home" -> goHome()
+            "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+            "notifications" -> openNotifications()
+            "wait_and_tap" -> {
+                val delayMs = actionPayload.optLong("delay_ms", 1500L)
+                val nodeIdInt = actionPayload.optInt("node_id", -1)
+                val nodeIdStr = actionPayload.optString("node_id", "")
+                val targetKey = if (nodeIdStr.isNotBlank()) nodeIdStr else if (nodeIdInt >= 0) "node_$nodeIdInt" else ""
+                serviceScope.launch {
+                    delay(delayMs)
+                    val target = if (targetKey.isNotBlank()) {
+                        nodeMap[targetKey] ?: (if (nodeIdInt >= 0) nodeMap["$nodeIdInt"] else null)
+                    } else null
+                    if (target != null) {
+                        clickNodeOrParent(target)
+                    } else {
+                        clickSendButton()
+                    }
+                }
+                true
+            }
+            "done" -> true
+            else -> {
+                val intMap = mutableMapOf<Int, AccessibilityNodeInfo>()
+                nodeMap.forEach { (k, v) ->
+                    val cleanK = k.removePrefix("node_").toIntOrNull()
+                    if (cleanK != null) intMap[cleanK] = v
+                }
+                executeAtomicAction(action, actionPayload, intMap)
+            }
+        }
+    }
+
     fun runAgentLoop(
         goal: String,
         serverUrl: String,
@@ -440,8 +586,12 @@ class JarvisAccessibilityService : AccessibilityService() {
             while (currentStep < maxSteps) {
                 if (currentStep == 0) delay(1000)
 
-                val (serializedNodes, nodeMap) = withContext(Dispatchers.Main) {
+                val (serializedNodes, _) = withContext(Dispatchers.Main) {
                     serializeCurrentWindow()
+                }
+
+                val (dumpNodesArray, strNodeMap) = withContext(Dispatchers.Main) {
+                    dumpUiTree()
                 }
 
                 val currentPkg = withContext(Dispatchers.Main) {
@@ -456,6 +606,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                     put("package", currentPkg)
                     put("step", currentStep)
                     put("ui_tree", jsonArray)
+                    put("ui_nodes", dumpNodesArray)
                 }
 
                 val stepResponse = postAgentStep(serverUrl, payload)
@@ -473,11 +624,11 @@ class JarvisAccessibilityService : AccessibilityService() {
                 }
 
                 withContext(Dispatchers.Main) {
-                    executeAtomicAction(actionType, stepResponse, nodeMap)
+                    executeUiAction(stepResponse, strNodeMap)
                 }
 
                 currentStep++
-                delay(1200)
+                delay(1500)
             }
 
             withContext(Dispatchers.Main) {

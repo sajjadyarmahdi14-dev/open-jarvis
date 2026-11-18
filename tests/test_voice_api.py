@@ -973,6 +973,54 @@ def test_in_app_multi_step_goal_routing():
     assert any(a.get("type") == "launch_app" and a.get("package") == "com.miui.player" for a in d_mus.get("client_actions", []))
 
 
+def test_operate_device_ui_tool_and_structured_nodes():
+    """Verify AndroidOperateDeviceUiTool, AndroidTypeTextTool, and structured UI tree handling."""
+    from openjarvis.core.registry import ToolRegistry
+    from openjarvis.tools.android_tools import AndroidOperateDeviceUiTool, AndroidTypeTextTool
+
+    ToolRegistry.register_value("operate_device_ui", AndroidOperateDeviceUiTool)
+    ToolRegistry.register_value("type_text", AndroidTypeTextTool)
+
+    # 1. Verify tools are registered in ToolRegistry
+    op_tool = ToolRegistry.get("operate_device_ui")
+    assert op_tool is not None
+    res_op = op_tool().execute(objective="And type hello and send it", target_app="WhatsApp")
+    assert res_op.success is True
+    assert res_op.metadata.get("client_action") == "autonomous_agent"
+    assert res_op.metadata.get("goal") == "hello"
+
+    type_tool = ToolRegistry.get("type_text")
+    assert type_tool is not None
+    res_type = type_tool().execute(text="type meet me at 6 and send it", auto_send=True)
+    assert res_type.success is True
+    assert res_type.metadata.get("client_action") == "type_text"
+    assert res_type.metadata.get("text") == "meet me at 6"
+
+    # 2. Test /api/agent/step with structured JSON dicts
+    client = TestClient(app)
+    structured_tree = [
+        {"node_id": "node_0", "class": "EditText", "text": "", "desc": "Chat input", "clickable": True, "editable": True, "x": 50, "y": 800},
+        {"node_id": "node_1", "class": "Button", "text": "Send", "desc": "Send button", "clickable": True, "editable": False, "x": 400, "y": 800},
+    ]
+    r_step = client.post("/api/agent/step", json={
+        "goal": "send message hello there",
+        "step": 0,
+        "ui_nodes": structured_tree,
+    })
+    assert r_step.status_code == 200
+    d_step = r_step.json()
+    assert d_step.get("action") == "input_text"
+    assert d_step.get("node_id") == 0
+    assert d_step.get("text") == "hello there"
+
+    # 3. Test messenger fast-path sanitization
+    r_msg = client.post("/api/chat", json={"message": "send telegram message to Alice saying type hello world and send it"})
+    assert r_msg.status_code == 200
+    d_msg = r_msg.json()
+    assert d_msg.get("fast_path") is True
+    assert any(a.get("type") == "send_messenger" and a.get("message") == "hello world" for a in d_msg.get("client_actions", []))
+
+
 
 
 

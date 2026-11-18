@@ -373,8 +373,8 @@ object DeviceController {
                 }
 
                 // In-App Accessibility Automation & Closed-Loop Agent
-                "autonomous_agent", "agent_goal", "in_app_task" -> {
-                    val goal = act.optString("goal", "")
+                "autonomous_agent", "agent_goal", "in_app_task", "operate_device_ui", "android_operate_ui" -> {
+                    val goal = act.optString("goal", act.optString("objective", ""))
                     val targetApp = act.optString("target_app", act.optString("target", act.optString("package", "")))
                     val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
                     val serverUrl = prefs.getString("server_url", "http://104.252.175.159:8765") ?: "http://104.252.175.159:8765"
@@ -385,6 +385,9 @@ object DeviceController {
                     JarvisAccessibilityService.instance?.runAgentLoop(goal, serverUrl) { reply ->
                         Log.i(TAG, "Autonomous agent completed: $reply")
                     }
+                }
+                "execute_ui_action" -> {
+                    JarvisAccessibilityService.instance?.executeUiAction(act)
                 }
                 "type_text" -> {
                     val text = act.optString("text", "")

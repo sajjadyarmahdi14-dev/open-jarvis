@@ -101,7 +101,8 @@ class AgentStepRequest(BaseModel):
     goal: str
     package: Optional[str] = None
     step: int = 0
-    ui_tree: List[str] = []
+    ui_tree: List[Any] = []
+    ui_nodes: Optional[List[Dict[str, Any]]] = None
     history: Optional[List[Dict[str, Any]]] = None
 
 
@@ -114,8 +115,27 @@ def sanitize_literal_text(text: str) -> str:
         if len(s) >= 2:
             s = s[1:-1].strip()
 
+    # Direct literal replacements as requested
+    for p in (
+        "And type ", "and type ", "Type ", "type ", "Say ", "say ",
+        "Please type ", "please type ", "Send message ", "send message ",
+        "Send a message saying ", "send a message saying ", "Send ", "send ",
+    ):
+        if s.startswith(p):
+            s = s[len(p):].strip()
+    for end in (" and send it", " and send", " send it", " and submit it", " and submit"):
+        if s.endswith(end):
+            s = s[:-len(end)].strip()
+
+    for fa_p in ("لطفاً بنویس ", "لطفا بنویس ", "بنویس ", "بگو ", "تایپ کن ", "ارسال کن ", "بفرست "):
+        if s.startswith(fa_p):
+            s = s[len(fa_p):].strip()
+    for fa_s in (" و بفرست", " و ارسال کن", " بفرست", " ارسال کن"):
+        if s.endswith(fa_s):
+            s = s[:-len(fa_s)].strip()
+
     en_prefix = re.compile(
-        r"^(?:please\s+)?(?:and\s+)?(?:type|write|say|enter|input|message|send)\s+(?:that\s+|it\s+|text\s+)?(?:saying\s+|quoting\s+|:\s*)?",
+        r"^(?:please\s+)?(?:and\s+)?(?:type|write|say|enter|input|message|send)\s+(?:a\s+)?(?:that\s+|it\s+|text\s+|message\s+)?(?:saying\s+|quoting\s+|:\s*)?",
         re.IGNORECASE,
     )
     en_suffix = re.compile(
@@ -581,7 +601,7 @@ def _handle_fast_path(
     m_sms_fa = re.search(r"\b(?:پیامک\s+به|اس ام اس\s+به|پیام\s+بده\s+به)\s+(.+?)\s*(?:متن|که|پیام)?\s*(.+)$", raw_cleaned)
     if m_sms_en or m_sms_fa:
         t_contact = (m_sms_en.group(1) if m_sms_en else m_sms_fa.group(1)).strip()
-        t_msg = (m_sms_en.group(2) if m_sms_en else m_sms_fa.group(2)).strip()
+        t_msg = sanitize_literal_text((m_sms_en.group(2) if m_sms_en else m_sms_fa.group(2)).strip())
         reply = f"پیامک به {t_contact} ارسال شد قربان." if is_persian else f"Sending SMS to {t_contact}, sir."
         return {
             "response": reply,
@@ -596,7 +616,7 @@ def _handle_fast_path(
     if m_email and ("@" in norm or "email" in norm):
         recipient = (m_email.group(1) or "").strip()
         subject = (m_email.group(2) or "Jarvis Message").strip()
-        body = (m_email.group(3) or "").strip()
+        body = sanitize_literal_text((m_email.group(3) or "").strip())
         reply = f"Opening email composer for {recipient}, sir."
         return {
             "response": reply,
@@ -611,7 +631,7 @@ def _handle_fast_path(
     if m_msg_en:
         app_name = "whatsapp" if "whatsapp" in norm else "telegram"
         contact = m_msg_en.group(1).strip()
-        message = m_msg_en.group(2).strip()
+        message = sanitize_literal_text(m_msg_en.group(2).strip())
         reply = f"Sending {app_name.capitalize()} message to {contact}, sir."
         return {
             "response": reply,
@@ -1181,23 +1201,40 @@ async def agent_step_endpoint(req: AgentStepRequest):
         reply = "عملیات مورد نظر انجام شد قربان." if is_persian else "Target action has been completed, sir."
         return {"action": "done", "reply": reply}
 
-    # Parse node lines
+    # Parse node lines or structured node objects
     parsed_nodes = []
-    for line in ui_tree:
-        m = re.match(r"^\[(\d+)\]\s*(\w+)\s*\|\s*text=\"(.*?)\"\s*\|\s*desc=\"(.*?)\"\s*\|\s*clickable=(\w+)\s*\|\s*editable=(\w+)\s*\|\s*checked=(\w+)\s*\|\s*bounds=\((-?\d+),(-?\d+)\)", line)
-        if m:
+    items = req.ui_nodes if req.ui_nodes else req.ui_tree
+    for item in items:
+        if isinstance(item, dict):
+            raw_id = str(item.get("node_id", item.get("id", 0))).replace("node_", "")
+            nid = int(raw_id) if raw_id.isdigit() else len(parsed_nodes)
             parsed_nodes.append({
-                "id": int(m.group(1)),
-                "class": m.group(2),
-                "text": m.group(3),
-                "desc": m.group(4),
-                "clickable": m.group(5).lower() == "true",
-                "editable": m.group(6).lower() == "true",
-                "checked": m.group(7).lower() == "true",
-                "x": int(m.group(8)),
-                "y": int(m.group(9)),
-                "raw": line,
+                "id": nid,
+                "class": str(item.get("class", "View")),
+                "text": str(item.get("text", "")),
+                "desc": str(item.get("desc", "")),
+                "clickable": bool(item.get("clickable", False)),
+                "editable": bool(item.get("editable", False)),
+                "checked": bool(item.get("checked", False)),
+                "x": int(item.get("x", 0)),
+                "y": int(item.get("y", 0)),
+                "raw": str(item),
             })
+        elif isinstance(item, str):
+            m = re.match(r"^\[(?:node_)?(\d+)\]\s*(\w+)\s*\|\s*text=\"(.*?)\"\s*\|\s*desc=\"(.*?)\"\s*\|\s*clickable=(\w+)\s*\|\s*editable=(\w+)\s*\|\s*checked=(\w+)\s*\|\s*bounds=\((-?\d+),(-?\d+)\)", item)
+            if m:
+                parsed_nodes.append({
+                    "id": int(m.group(1)),
+                    "class": m.group(2),
+                    "text": m.group(3),
+                    "desc": m.group(4),
+                    "clickable": m.group(5).lower() == "true",
+                    "editable": m.group(6).lower() == "true",
+                    "checked": m.group(7).lower() == "true",
+                    "x": int(m.group(8)),
+                    "y": int(m.group(9)),
+                    "raw": item,
+                })
 
     goal_lower = goal.lower()
 

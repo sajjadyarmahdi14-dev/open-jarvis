@@ -33,6 +33,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.provider.AlarmClock
 import android.provider.ContactsContract
+import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -91,12 +92,22 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_TRIGGER_LISTEN = "com.openjarvis.ACTION_TRIGGER_LISTEN"
 
         private const val SAMPLE_RATE = 16000
-        private const val STANDBY_SILENCE_WINDOW_MS = 800L  // Fast wake word cutoff
-        private const val COMMAND_SILENCE_WINDOW_MS = 2800L // 2.8s silence cutoff (patient pause detection)
+        private const val STANDBY_SILENCE_WINDOW_MS = 3500L // Full 3.5s silence tracker to avoid cutting off natural speech
+        private const val COMMAND_SILENCE_WINDOW_MS = 3500L // 3.5s patient silence cutoff allowing natural pauses
         private const val MAX_COMMAND_DURATION_MS = 60000L  // Hard 60.0s max recording duration for long-form speech
         private const val PRE_ROLL_DURATION_MS = 400
         private const val CHUNK_SAMPLES = 1600 // 100ms at 16kHz
         private const val MIN_SPEECH_RMS = 300.0
+
+        fun createSpeechRecognizerIntent(language: String = "fa-IR"): Intent {
+            return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60000L)
+            }
+        }
 
         var serviceListener: VoiceEventListener? = null
         var isServiceRunning = false
@@ -607,14 +618,10 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             }
                         }
 
-                        val silenceCutoffMs = if (currentVadMode == VadMode.STANDBY_WAKE_WORD) {
-                            STANDBY_SILENCE_WINDOW_MS // Fast 800ms for wake word
+                        val silenceCutoffMs = if (accumulatedTranscript.isNotBlank() && UtteranceStitcher.hasIncompleteClause(accumulatedTranscript)) {
+                            COMMAND_SILENCE_WINDOW_MS + 1500L // Extended silence wait for trailing conjunctions/prepositions (5000ms)
                         } else {
-                            if (accumulatedTranscript.isNotBlank() && UtteranceStitcher.hasIncompleteClause(accumulatedTranscript)) {
-                                COMMAND_SILENCE_WINDOW_MS + 1500L // Extended silence wait for trailing conjunctions/prepositions
-                            } else {
-                                COMMAND_SILENCE_WINDOW_MS // 2.8s patient silence cutoff allowing natural pauses
-                            }
+                            COMMAND_SILENCE_WINDOW_MS // Full 3.5s (3500ms) patient silence cutoff before stopping
                         }
 
                         // Calculate RMS energy and zero-crossing count for human vocal frequency gate
@@ -673,7 +680,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         if (isUtteranceActive) {
                             val sessionDuration = now - utteranceStartTime
                             val silenceDuration = now - lastSpeechTimestamp
-                            val maxDuration = if (currentVadMode == VadMode.ACTIVE_COMMAND) MAX_COMMAND_DURATION_MS else 3500L
+                            val maxDuration = MAX_COMMAND_DURATION_MS // Full 60s max duration, never 3.5s!
                             val shouldStop = (sessionDuration >= maxDuration) || (silenceDuration >= silenceCutoffMs)
 
                             if (shouldStop) {
