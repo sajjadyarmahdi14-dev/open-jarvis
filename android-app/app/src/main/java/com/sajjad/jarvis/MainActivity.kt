@@ -160,6 +160,10 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         startHealthCheckLoop()
         registerUiUpdateReceiver()
 
+        // Step 10: Dynamic app indexer & VPS sync
+        AppLauncher.scanAllInstalledApps(applicationContext)
+        AppLauncher.syncAppsToServer(applicationContext, serverUrlState.value)
+
         if (intent?.getBooleanExtra("trigger_voice", false) == true) {
             triggerVoiceListen()
         }
@@ -1564,6 +1568,30 @@ private fun JarvisSettingsDialog(
                     )
                 }
 
+                // Step 10: Installed Apps Diagnostic Viewer
+                var showAppsDialog by remember { mutableStateOf(false) }
+                Button(
+                    onClick = { showAppsDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(0.8.dp, CyanNeon.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "📱 Installed Apps Indexed: ${AppLauncher.dynamicAppIndex.size} (Tap to View / Rescan)",
+                        color = CyanNeon,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (showAppsDialog) {
+                    InstalledAppsDialog(
+                        serverUrl = urlText,
+                        onDismiss = { showAppsDialog = false }
+                    )
+                }
+
                 // Save Button
                 Button(
                     onClick = { onSave(urlText, modelText, apiKeyText) },
@@ -1940,6 +1968,199 @@ private fun MemoryManagementDialog(
                         ) {
                             Text(text = "Clear All", color = Color(0xFFEF4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Step 10: Installed Apps Diagnostic Viewer Dialog in ENGINE SETTINGS.
+ * Lists all indexed launchable applications on the phone, provides live search,
+ * a 1-tap "Rescan & Sync Now" button, and Xiaomi HyperOS permission fix shortcut.
+ */
+@Composable
+fun InstalledAppsDialog(
+    serverUrl: String,
+    onDismiss: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var appsList by remember { mutableStateOf(AppLauncher.dynamicAppIndex.toList()) }
+    var searchQuery by remember { mutableStateOf("") }
+    var isSyncing by remember { mutableStateOf(false) }
+
+    val filteredApps = remember(appsList, searchQuery) {
+        if (searchQuery.isBlank()) appsList
+        else {
+            val q = searchQuery.trim().lowercase(Locale.ROOT)
+            appsList.filter {
+                it.label.lowercase(Locale.ROOT).contains(q) ||
+                it.packageName.lowercase(Locale.ROOT).contains(q)
+            }
+        }
+    }
+
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.85f),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = DarkBackground),
+            border = BorderStroke(1.dp, CyanNeon)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "📱 INSTALLED APPS (${appsList.size})",
+                        color = CyanNeon,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Xiaomi HyperOS Warning Banner if < 15 apps detected
+                if (appsList.size < 15) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0x33EF4444)),
+                        border = BorderStroke(1.dp, Color(0xFFEF4444))
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = "⚠️ Xiaomi HyperOS / Android Permission Alert",
+                                color = Color(0xFFEF4444),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Only ${appsList.size} apps detected. Xiaomi HyperOS may have restricted 'Get list of installed apps' or 'Display pop-up windows while running in background'.",
+                                color = TextPrimary,
+                                fontSize = 11.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Button(
+                                onClick = {
+                                    try {
+                                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                            data = Uri.parse("package:${context.packageName}")
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                    } catch (_: Exception) {}
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "Fix Xiaomi App List & Pop-up Permissions",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                // Search Filter
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search by name or package...", color = TextSecondary, fontSize = 12.sp) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyanNeon,
+                        unfocusedBorderColor = CyanDim.copy(alpha = 0.4f),
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Apps List
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    items(filteredApps) { app ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = app.label,
+                                    color = TextPrimary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = app.packageName,
+                                    color = CyanDim,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                        HorizontalDivider(color = CyanDim.copy(alpha = 0.15f))
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Rescan & Sync Now Button
+                Button(
+                    onClick = {
+                        if (!isSyncing) {
+                            isSyncing = true
+                            coroutineScope.launch(Dispatchers.IO) {
+                                val fresh = AppLauncher.scanAllInstalledApps(context)
+                                AppLauncher.syncAppsToServer(context, serverUrl)
+                                withContext(Dispatchers.Main) {
+                                    appsList = fresh
+                                    isSyncing = false
+                                }
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanNeon),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isSyncing) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = DarkBackground, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Scanning & Syncing...", color = DarkBackground, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    } else {
+                        Text(text = "🔄 Rescan & Sync Now", color = DarkBackground, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }
             }

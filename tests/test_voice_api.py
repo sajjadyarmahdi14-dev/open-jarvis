@@ -226,7 +226,7 @@ def test_fast_path_and_clean_tts():
     assert resp1.status_code == 200
     d1 = resp1.json()
     assert d1.get("fast_path") is True
-    assert "Opening camera" in d1["response"]
+    assert d1.get("response") == "" or "Opening camera" in d1.get("response", "")
     assert d1["client_actions"][0]["type"] == "launch_app"
 
     # 2. Persian fast path app launch
@@ -234,7 +234,8 @@ def test_fast_path_and_clean_tts():
     assert resp2.status_code == 200
     d2 = resp2.json()
     assert d2.get("fast_path") is True
-    assert "در حال باز کردن" in d2["response"]
+    assert d2.get("response") == "" or "در حال باز کردن" in d2.get("response", "")
+    assert d2["client_actions"][0]["type"] == "launch_app"
 
     # 3. Flashlight fast path
     resp3 = client.post("/api/chat", json={"message": "turn on flashlight"})
@@ -1299,6 +1300,75 @@ def test_step_9_memory_web_intel_and_vps_ops(monkeypatch):
     recent_history = mem_store.get_recent_chat_history(30)
     assert len(recent_history) > 0
     assert any("StarkTower2026" in t.get("content", "") for t in recent_history)
+
+
+def test_step_10_all_apps_discovery_and_verified_launch():
+    """Verify Step 10: Dynamic Device App Indexer, Cross-Script Resolution & Zero Fake Confirmations."""
+    client = TestClient(app)
+    from openjarvis.memory_store import get_memory_store, transliterate_persian_to_latin
+    mem_store = get_memory_store()
+
+    # 1. Phonetic transliteration check
+    assert transliterate_persian_to_latin("لترباکسد") == "ltrbaksd"
+    assert transliterate_persian_to_latin("اسنپسید") == "asnpsyd"
+    assert transliterate_persian_to_latin("ترمیوس") == "trmyvs"
+
+    # 2. Sync dynamic device apps via POST /api/device/apps
+    sample_apps = [
+        {"name": "Letterboxd", "pkg": "com.letterboxd.mobile", "variants": ["letterboxd", "لترباکسد"]},
+        {"name": "Snapseed", "pkg": "com.niksoftware.snapseed", "variants": ["snapseed", "اسنپسید"]},
+        {"name": "Termius", "pkg": "com.server.auditor.ssh.client", "variants": ["termius", "ترمیوس"]},
+    ]
+    r_sync = client.post("/api/device/apps", json={"apps": sample_apps})
+    assert r_sync.status_code == 200
+    d_sync = r_sync.json()
+    assert d_sync.get("status") == "ok"
+    assert d_sync.get("synced", 0) >= 3
+
+    # 3. GET /api/device/apps
+    r_get = client.get("/api/device/apps")
+    assert r_get.status_code == 200
+    d_get = r_get.json()
+    assert d_get.get("status") == "ok"
+    pkgs = [a.get("package") or a.get("pkg") for a in d_get.get("apps", [])]
+    assert "com.letterboxd.mobile" in pkgs
+    assert "com.niksoftware.snapseed" in pkgs
+    assert "com.server.auditor.ssh.client" in pkgs
+
+    # 4. Cross-Script Resolution via MemoryStore find_app_by_query
+    match_ltr = mem_store.find_app_by_query("لترباکسد رو باز کن")
+    assert match_ltr is not None
+    assert match_ltr["package"] == "com.letterboxd.mobile"
+
+    match_snap = mem_store.find_app_by_query("اسنپسید")
+    assert match_snap is not None
+    assert match_snap["package"] == "com.niksoftware.snapseed"
+
+    # 5. Zero Fake Confirmations Handshake on /api/chat
+    r_chat_fa = client.post("/api/chat", json={"message": "لترباکسد رو باز کن"})
+    assert r_chat_fa.status_code == 200
+    d_chat_fa = r_chat_fa.json()
+    assert d_chat_fa.get("fast_path") is True
+    # Server pre-speech response MUST be empty string so phone verifies first!
+    assert d_chat_fa.get("response") == ""
+    # Client action must contain launch_app with verify_and_speak = True
+    actions = d_chat_fa.get("client_actions", [])
+    assert len(actions) > 0
+    app_act = actions[0]
+    assert app_act.get("type") == "launch_app"
+    assert app_act.get("package_name") == "com.letterboxd.mobile"
+    assert app_act.get("verify_and_speak") is True
+
+    # 6. AndroidLaunchAppTool execution with verification flag
+    from openjarvis.tools.android_tools import AndroidLaunchAppTool
+    tool = AndroidLaunchAppTool()
+    tool_res = tool.execute(app="ترمیوس")
+    assert tool_res.success is True
+    meta = tool_res.metadata
+    assert meta.get("client_action") == "launch_app"
+    assert meta.get("package_name") == "com.server.auditor.ssh.client"
+    assert meta.get("verify_and_speak") is True
+
 
 
 

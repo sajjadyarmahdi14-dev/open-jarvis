@@ -230,10 +230,11 @@ LANGUAGE OVERRIDE: If the user explicitly commands you to change your language (
 
 _cached_agent = None
 _cached_tools = None
-_device_apps: List[Dict[str, str]] = []
+_device_apps: List[Dict[str, Any]] = []
 _conversation_history: deque = deque(maxlen=30)
 try:
     from openjarvis.memory_store import get_memory_store
+    _device_apps = get_memory_store().get_device_apps()
     for _t in get_memory_store().get_recent_chat_history(30):
         _conversation_history.append(_t)
 except Exception:
@@ -1314,20 +1315,32 @@ def _handle_fast_path(
         pkg = ""
         target_lower = app_target.lower()
 
-        # Respect explicit local music requests over streaming apps
+        # Respect explicit local music requests over streaming apps and video players
         if target_lower in ("music", "موزیک", "آهنگ", "اهنگ", "اپ موزیک"):
             for d_app in _device_apps:
-                lbl = d_app.get("label", "").lower()
-                p_name = d_app.get("package", "").lower()
-                if ("music" in lbl or "player" in p_name or "miui.player" in p_name) and "youtube" not in p_name:
-                    pkg = d_app.get("package", "")
-                    app_target = d_app.get("label", app_target)
+                lbl = (d_app.get("label") or d_app.get("name") or "").lower()
+                p_name = (d_app.get("package") or d_app.get("pkg") or "").lower()
+                if "video" in lbl or "video" in p_name:
+                    continue
+                if p_name == "com.miui.player" or lbl in ("music", "موزیک", "آهنگ") or "music" in p_name or "music" in lbl:
+                    pkg = d_app.get("package") or d_app.get("pkg") or ""
+                    app_target = d_app.get("label") or d_app.get("name") or app_target
                     break
 
         if not pkg:
+            try:
+                from openjarvis.memory_store import get_memory_store
+                matched_app = get_memory_store().find_app_by_query(app_target)
+                if matched_app:
+                    pkg = matched_app.get("package") or matched_app.get("pkg") or ""
+                    app_target = matched_app.get("label") or matched_app.get("name") or app_target
+            except Exception:
+                pass
+
+        if not pkg:
             for d_app in _device_apps:
-                lbl = d_app.get("label", "").lower()
-                p_name = d_app.get("package", "")
+                lbl = (d_app.get("label") or d_app.get("name") or "").lower()
+                p_name = d_app.get("package") or d_app.get("pkg") or ""
                 dvars = [v.lower() for v in d_app.get("variants", [])] if isinstance(d_app.get("variants"), list) else []
                 if lbl == target_lower or target_lower in lbl or target_lower in dvars or p_name.lower().endswith(f".{target_lower}"):
                     pkg = p_name
@@ -1337,16 +1350,20 @@ def _handle_fast_path(
             res = AndroidLaunchAppTool().execute(app=app_target)
             pkg = res.metadata.get("package", "") if hasattr(res, "metadata") and res.metadata else ""
 
-        reply = (
-            f"چشم قربان، در حال باز کردن {app_target}."
-            if is_persian
-            else f"Right away, sir. Opening {app_target}."
-        )
+        # ZERO Fake Confirmations Handshake:
+        # Pre-speech is empty so Jarvis stays silent until Android verifies the launch in foreground!
         return {
-            "response": reply,
-            "tool_calls": [{"name": "android_launch_app", "content": f"Opening {app_target}", "success": True}],
+            "response": "",
+            "tool_calls": [{"name": "android_launch_app", "content": f"Launching {app_target} (verification pending)", "success": True}],
             "turns": 1,
-            "client_actions": [{"type": "launch_app", "target": app_target, "package": pkg}],
+            "client_actions": [{
+                "type": "launch_app",
+                "package_name": pkg or "",
+                "package": pkg or "",
+                "app_query": app_target,
+                "target": app_target,
+                "verify_and_speak": True,
+            }],
             "fast_path": True,
         }
 
@@ -1727,22 +1744,33 @@ async def get_status():
 
 @app.post("/api/device/apps")
 async def register_device_apps(request: Request):
-    """Store dynamically discovered apps synced in real-time from the Android device."""
+    """Store dynamically discovered apps synced in real-time from the Android device into SQLite memory store."""
     global _device_apps
     try:
         data = await request.json()
-        if isinstance(data, list):
-            _device_apps = data
-            logger.info("Updated dynamic device apps index with %d packages", len(_device_apps))
-            return {"status": "ok", "count": len(_device_apps)}
+        apps_raw = data.get("apps", data) if isinstance(data, dict) else data
+        if not isinstance(apps_raw, list):
+            apps_raw = []
+        from openjarvis.memory_store import get_memory_store
+        synced_count = get_memory_store().replace_device_apps(apps_raw)
+        _device_apps = get_memory_store().get_device_apps()
+        logger.info("Synchronized %d device apps to persistent SQLite store (total: %d)", synced_count, len(_device_apps))
+        return {"status": "ok", "synced": synced_count, "count": len(_device_apps)}
     except Exception as exc:
         logger.warning("register_device_apps error: %s", exc)
-    return {"status": "error", "count": len(_device_apps)}
+        return {"status": "error", "error": str(exc), "count": len(_device_apps)}
 
 
 @app.get("/api/device/apps")
 async def get_device_apps():
-    """Retrieve current dynamic device apps index."""
+    """Retrieve current dynamic device apps index from SQLite store."""
+    global _device_apps
+    if not _device_apps:
+        try:
+            from openjarvis.memory_store import get_memory_store
+            _device_apps = get_memory_store().get_device_apps()
+        except Exception:
+            pass
     return {"status": "ok", "apps": _device_apps, "count": len(_device_apps)}
 
 
@@ -2121,6 +2149,10 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
     elif _active_language_override == "fa":
         input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak Persian. Respond entirely in Persian.]\n\n{input_text}"
+    if _device_apps:
+        compact_apps = ", ".join(f"{a.get('name') or a.get('label')}={a.get('pkg') or a.get('package')}" for a in _device_apps[:120])
+        input_text = f"[INSTALLED APPS ON PHONE]: {compact_apps}\nCRITICAL: If launching an app, select exact package name from this list.\n\n{input_text}"
+
     if req.screen_context:
         input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{input_text}"
 
@@ -2148,7 +2180,11 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
             elif tr.tool_name == "android_launch_app":
                 client_actions.append({
                     "type": "launch_app",
-                    "target": req.message,
+                    "package_name": meta.get("package_name") or meta.get("package") or "",
+                    "package": meta.get("package") or "",
+                    "app_query": meta.get("app_query") or req.message,
+                    "target": meta.get("target") or req.message,
+                    "verify_and_speak": True,
                 })
 
         # Universal strict text sanitization on all client actions
@@ -2159,7 +2195,11 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
                 if "message" in act:
                     act["message"] = sanitize_literal_text(act["message"])
 
+        has_verified_launch = any(a.get("type") == "launch_app" and a.get("verify_and_speak") for a in client_actions)
         clean_content = _clean_tts_response(result.content) if result.content else ""
+        if has_verified_launch:
+            clean_content = ""
+
         if req.tts and clean_content:
             _speak_async(clean_content)
 
@@ -2167,7 +2207,7 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         record_chat_turn("assistant", clean_content or result.content or "")
 
         return {
-            "response": clean_content or result.content,
+            "response": clean_content if has_verified_launch else (clean_content or result.content),
             "tool_calls": tool_calls,
             "turns": result.turns,
             "client_actions": client_actions,
@@ -2262,6 +2302,9 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
         elif _active_language_override == "fa":
             input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak Persian. Respond entirely in Persian.]\n\n{input_text}"
+        if _device_apps:
+            compact_apps = ", ".join(f"{a.get('name') or a.get('label')}={a.get('pkg') or a.get('package')}" for a in _device_apps[:120])
+            input_text = f"[INSTALLED APPS ON PHONE]: {compact_apps}\nCRITICAL: If launching an app, select exact package name from this list.\n\n{input_text}"
         if req.screen_context:
             input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{input_text}"
 

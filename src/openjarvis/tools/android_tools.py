@@ -998,6 +998,16 @@ class AndroidLaunchAppTool(BaseTool):
 
         pkg = explicit_pkg
         if not pkg:
+            # Query synced dynamic device apps from SQLite memory store first
+            try:
+                from openjarvis.memory_store import get_memory_store
+                matched_app = get_memory_store().find_app_by_query(app_name)
+                if matched_app:
+                    pkg = matched_app.get("package")
+            except Exception:
+                pass
+
+        if not pkg:
             app_lower = app_name.lower()
             if "." in app_name and " " not in app_name:
                 pkg = app_name
@@ -1041,7 +1051,14 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content="Launched Camera app via Android Intent",
                 success=True,
-                metadata={"client_action": "launch_app", "target": "camera", "package": "com.android.camera"},
+                metadata={
+                    "client_action": "launch_app",
+                    "target": "camera",
+                    "package": "com.android.camera",
+                    "package_name": "com.android.camera",
+                    "app_query": "camera",
+                    "verify_and_speak": True,
+                },
             )
 
         if app_name.lower() in ("settings", "system settings"):
@@ -1050,7 +1067,14 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content="Launched Android Settings",
                 success=True,
-                metadata={"client_action": "launch_app", "target": "Settings", "package": "com.android.settings"},
+                metadata={
+                    "client_action": "launch_app",
+                    "target": "Settings",
+                    "package": "com.android.settings",
+                    "package_name": "com.android.settings",
+                    "app_query": "settings",
+                    "verify_and_speak": True,
+                },
             )
 
         if app_name.lower() in COMPONENTS:
@@ -1062,7 +1086,14 @@ class AndroidLaunchAppTool(BaseTool):
                         tool_name=self.spec.name,
                         content=f"Successfully launched '{app_name}' ({comp})",
                         success=True,
-                        metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
+                        metadata={
+                            "client_action": "launch_app",
+                            "target": app_name,
+                            "package": pkg,
+                            "package_name": pkg,
+                            "app_query": app_name,
+                            "verify_and_speak": True,
+                        },
                     )
 
         # Attempt 1: am start launcher intent with user 0
@@ -1073,7 +1104,14 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content=f"Successfully launched '{app_name}' (package: {pkg})",
                 success=True,
-                metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
+                metadata={
+                    "client_action": "launch_app",
+                    "target": app_name,
+                    "package": pkg,
+                    "package_name": pkg,
+                    "app_query": app_name,
+                    "verify_and_speak": True,
+                },
             )
 
         # Attempt 2: am start package target
@@ -1084,7 +1122,14 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content=f"Successfully launched '{app_name}' ({pkg})",
                 success=True,
-                metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
+                metadata={
+                    "client_action": "launch_app",
+                    "target": app_name,
+                    "package": pkg,
+                    "package_name": pkg,
+                    "app_query": app_name,
+                    "verify_and_speak": True,
+                },
             )
 
         # Attempt 3: monkey via sh
@@ -1095,16 +1140,30 @@ class AndroidLaunchAppTool(BaseTool):
                 tool_name=self.spec.name,
                 content=f"Successfully launched '{app_name}' via monkey",
                 success=True,
-                metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
+                metadata={
+                    "client_action": "launch_app",
+                    "target": app_name,
+                    "package": pkg,
+                    "package_name": pkg,
+                    "app_query": app_name,
+                    "verify_and_speak": True,
+                },
             )
 
         # Fallback for Xiaomi HyperOS / Android 14 background activity restrictions:
-        # Hand off to foreground Native Android bridge
+        # Hand off to foreground Native Android bridge with verification
         return ToolResult(
             tool_name=self.spec.name,
             content=f"Dispatched launch request for '{app_name}' ({pkg}) to native app launcher.",
             success=True,
-            metadata={"client_action": "launch_app", "target": app_name, "package": pkg},
+            metadata={
+                "client_action": "launch_app",
+                "target": app_name,
+                "package": pkg,
+                "package_name": pkg,
+                "app_query": app_name,
+                "verify_and_speak": True,
+            },
         )
 
 

@@ -941,6 +941,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     if (transcript.isNotBlank()) {
+                        lastSpokenIsPersian = transcript.any { it in '\u0600'..'\u06FF' }
                         serviceListener?.onFinalSpeech(transcript)
                         broadcastUiUpdate(userText = transcript)
                     }
@@ -1161,9 +1162,17 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         return matchedNumber
     }
 
+    private var lastSpokenIsPersian: Boolean = false
+
     private fun executeNativeClientAction(act: JSONObject) {
         val type = act.optString("type", "")
-        if (type == "vision_camera") {
+        if (type == "launch_app") {
+            val pkgName = act.optString("package_name", act.optString("package", ""))
+            val appQuery = act.optString("app_query", act.optString("target", ""))
+            val verifyAndSpeak = act.optBoolean("verify_and_speak", true)
+            launchAndVerify(pkgName, appQuery, verifyAndSpeak)
+            return
+        } else if (type == "vision_camera") {
             val prompt = act.optString("prompt", "What do you see?")
             handleVisionAction("camera", prompt)
             return
@@ -1186,6 +1195,73 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         DeviceController.executeClientAction(applicationContext, act) { screenText ->
             scope.launch {
                 sendScreenSummaryRequest(screenText)
+            }
+        }
+    }
+
+    /**
+     * Step 10: Zero Fake Confirmations — Verified Execution Handshake.
+     * Resolves the app with dynamic indexer & transliteration, launches with guaranteed background flags,
+     * waits 850ms, inspects the active window via Accessibility, and speaks honest verified status.
+     */
+    fun launchAndVerify(packageName: String, appQuery: String, verifyAndSpeak: Boolean = true) {
+        scope.launch(Dispatchers.Main) {
+            val isFa = lastSpokenIsPersian || (appQuery + packageName).any { it in '\u0600'..'\u06FF' }
+            val resolution = AppLauncher.resolveAppWithScore(applicationContext, appQuery, packageName)
+            val resolved = resolution.first
+            val closestScore = resolution.second
+            val closest = resolution.third
+
+            if (resolved == null) {
+                if (verifyAndSpeak) {
+                    val notFoundMsg = if (isFa) {
+                        if (closest != null && closestScore > 0.55) {
+                            "برنامه‌ای به نام $appQuery بین برنامه‌های نصب‌شده گوشیت پیدا نکردم؛ منظورت ${closest.label} بود؟"
+                        } else {
+                            "برنامه‌ای به نام $appQuery بین برنامه‌های نصب‌شده گوشیت پیدا نکردم."
+                        }
+                    } else {
+                        if (closest != null && closestScore > 0.55) {
+                            "I couldn't find '$appQuery' among your installed apps, sir. Did you mean ${closest.label}?"
+                        } else {
+                            "I couldn't find '$appQuery' among your installed apps, sir."
+                        }
+                    }
+                    serviceListener?.onAssistantResponse(notFoundMsg)
+                    broadcastUiUpdate(assistantReply = notFoundMsg)
+                    speakBritish(notFoundMsg)
+                }
+                return@launch
+            }
+
+            // Attempt guaranteed background launch
+            val launched = AppLauncher.launchPackageGuaranteed(applicationContext, resolved)
+
+            // Wait 850ms for the Android activity transition
+            delay(850L)
+
+            val isAccessibilityActive = JarvisAccessibilityService.isServiceRunning()
+            val activePkg = JarvisAccessibilityService.instance?.rootInActiveWindow?.packageName?.toString()
+
+            val verifiedOpen = if (isAccessibilityActive && activePkg != null) {
+                activePkg.equals(resolved.packageName, ignoreCase = true)
+            } else {
+                launched
+            }
+
+            if (verifyAndSpeak) {
+                val confirmationMsg = if (verifiedOpen) {
+                    if (isFa) "برنامه ${resolved.label} باز شد." else "${resolved.label} is now open, sir."
+                } else {
+                    if (isFa) {
+                        "برنامه ${resolved.label} نصب هست، ولی سیستم‌عامل جلوی باز شدنش در پس‌زمینه رو گرفت؛ لطفاً مجوز باز کردن پنجره در پس‌زمینه رو توی تنظیمات شیائومی برای جارویس فعال کن."
+                    } else {
+                        "${resolved.label} is installed, but the OS blocked opening it from the background. Please grant background pop-up permission for Jarvis in Xiaomi settings."
+                    }
+                }
+                serviceListener?.onAssistantResponse(confirmationMsg)
+                broadcastUiUpdate(assistantReply = confirmationMsg)
+                speakBritish(confirmationMsg)
             }
         }
     }
