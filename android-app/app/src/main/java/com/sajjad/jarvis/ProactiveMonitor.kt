@@ -125,7 +125,7 @@ object ProactiveMonitor {
 
         scope.launch {
             JarvisVoiceService.instance?.let { service ->
-                if (!service.isServiceMuted) {
+                if (!JarvisVoiceService.isServiceMuted) {
                     service.broadcastUiUpdate(assistantReply = announcement)
                     JarvisOverlayManager.instance?.updateText(announcement)
                     service.speakBritish(announcement)
@@ -157,7 +157,7 @@ object ProactiveMonitor {
 
             scope.launch {
                 JarvisVoiceService.instance?.let { service ->
-                    if (!service.isServiceMuted) {
+                    if (!JarvisVoiceService.isServiceMuted) {
                         service.broadcastUiUpdate(assistantReply = announcement)
                         JarvisOverlayManager.instance?.updateText(announcement)
                         service.speakBritish(announcement)

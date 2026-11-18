@@ -58,6 +58,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -259,9 +260,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         SPEAKING
     }
 
-    @Volatile private var acousticState = AcousticState.IDLE
+    @Volatile var acousticState = AcousticState.IDLE
     @Volatile private var isProcessing = false
-    @Volatile private var isTtsSpeaking = false
+    @Volatile var isTtsSpeaking = false
     @Volatile private var activeMediaPlayer: MediaPlayer? = null
     private val audioPlayMutex = Mutex()
 
