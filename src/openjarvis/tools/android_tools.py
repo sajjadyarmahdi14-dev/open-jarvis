@@ -600,6 +600,186 @@ class AndroidMediaPlayerTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
+# 8b. Universal Audio & Video Media Engine Tools
+# ---------------------------------------------------------------------------
+
+
+@ToolRegistry.register("android_media_play")
+@ToolRegistry.register("media_play")
+class AndroidMediaPlayTool(BaseTool):
+    """Universal media play tool for local audio/video and streaming apps."""
+
+    tool_id = "android_media_play"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="android_media_play",
+            description=(
+                "Play music, songs, podcasts, or videos on the device. Routes locally to MediaStore "
+                "first, or directly to explicit streaming apps (YouTube, YouTube Music, Spotify, VLC, MX Player, Netflix)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "media_type": {
+                        "type": "string",
+                        "enum": ["audio", "video", "any"],
+                        "description": "Media type to play ('audio' for songs/podcasts, 'video' for movies/clips)",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Title, query, or song/video name to search and play",
+                    },
+                    "artist": {
+                        "type": "string",
+                        "description": "Artist or creator name (optional)",
+                    },
+                    "app": {
+                        "type": "string",
+                        "description": "Specific player: 'local', 'youtube', 'yt_music', 'vlc', 'mx_player', 'netflix', or custom package",
+                    },
+                    "shuffle": {
+                        "type": "boolean",
+                        "description": "Whether to shuffle playback",
+                    },
+                },
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        media_type = params.get("media_type", "audio")
+        query = params.get("query", "")
+        artist = params.get("artist", "")
+        app = params.get("app", "local")
+        shuffle = bool(params.get("shuffle", False))
+
+        target_desc = f"'{query}'" if query else ("local music library" if media_type == "audio" else "latest video")
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Now playing {target_desc} via {app}.",
+            success=True,
+            metadata={
+                "client_action": "media_play",
+                "media_type": media_type,
+                "query": query,
+                "artist": artist,
+                "app": app,
+                "shuffle": shuffle,
+            },
+        )
+
+
+@ToolRegistry.register("android_media_control")
+@ToolRegistry.register("media_control")
+class AndroidMediaControlTool(BaseTool):
+    """Universal media transport control (play, pause, next, previous, seek, fullscreen)."""
+
+    tool_id = "android_media_control"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="android_media_control",
+            description="Control active media playback: play, pause, resume, stop, next, previous, seek_forward, seek_backward, fullscreen.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": [
+                            "play",
+                            "pause",
+                            "resume",
+                            "stop",
+                            "next",
+                            "previous",
+                            "seek_forward",
+                            "seek_backward",
+                            "fullscreen",
+                        ],
+                        "description": "Transport command to execute",
+                    },
+                    "seconds": {
+                        "type": "integer",
+                        "description": "Seconds to seek forward or backward (default: 30)",
+                    },
+                },
+                "required": ["command"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        command = params.get("command", "play").lower()
+        seconds = int(params.get("seconds", 30))
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Media {command} executed.",
+            success=True,
+            metadata={
+                "client_action": "media_control",
+                "command": command,
+                "seconds": seconds,
+            },
+        )
+
+
+@ToolRegistry.register("android_volume_control")
+@ToolRegistry.register("volume_control")
+class AndroidVolumeControlTool(BaseTool):
+    """Universal volume level and mute control."""
+
+    tool_id = "android_volume_control"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="android_volume_control",
+            description="Adjust device volume: up, down, mute, unmute, or set explicit percentage (0-100).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["up", "down", "mute", "unmute", "set_percent"],
+                        "description": "Volume action to perform",
+                    },
+                    "percent": {
+                        "type": "integer",
+                        "description": "Target volume percentage from 0 to 100 (for 'set_percent')",
+                    },
+                    "stream": {
+                        "type": "string",
+                        "enum": ["media", "ring", "alarm", "call", "notification"],
+                        "description": "Audio stream (default: 'media')",
+                    },
+                },
+                "required": ["action"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        action = params.get("action", "up").lower()
+        percent = params.get("percent")
+        stream = params.get("stream", "media")
+        val_str = f" to {percent}%" if percent is not None and action == "set_percent" else ""
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Volume {action}{val_str} on stream '{stream}' executed.",
+            success=True,
+            metadata={
+                "client_action": "volume_control",
+                "action": action,
+                "percent": percent,
+                "stream": stream,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # 9. Android Intent Launcher (`am start`)
 # ---------------------------------------------------------------------------
 

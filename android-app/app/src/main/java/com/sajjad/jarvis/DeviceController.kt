@@ -28,27 +28,23 @@ object DeviceController {
     private var isTorchOn: Boolean = false
 
     // -------------------------------------------------------------------------
-    // 1. Music & Media Playback Control
+    // 1. Music & Media Playback Control (delegated to MediaEngine)
     // -------------------------------------------------------------------------
 
     fun playMusic(context: Context) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        dispatchMediaKey(am, KeyEvent.KEYCODE_MEDIA_PLAY)
+        MediaEngine.handleMediaPlay(context, "audio", "", null, "local", false)
     }
 
     fun pauseMusic(context: Context) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        dispatchMediaKey(am, KeyEvent.KEYCODE_MEDIA_PAUSE)
+        MediaEngine.handleMediaControl(context, "pause")
     }
 
     fun nextTrack(context: Context) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        dispatchMediaKey(am, KeyEvent.KEYCODE_MEDIA_NEXT)
+        MediaEngine.handleMediaControl(context, "next")
     }
 
     fun previousTrack(context: Context) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        dispatchMediaKey(am, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+        MediaEngine.handleMediaControl(context, "previous")
     }
 
     private fun dispatchMediaKey(am: AudioManager, keyCode: Int) {
@@ -64,36 +60,7 @@ object DeviceController {
     }
 
     fun playSong(context: Context, query: String) {
-        val cleanQuery = query.trim()
-        val intent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
-            putExtra(SearchManager.QUERY, cleanQuery)
-            putExtra(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-
-        val pm = context.packageManager
-        val preferredPackages = listOf(
-            "com.google.android.apps.youtube.music",
-            "com.miui.player",
-            "com.spotify.music",
-            "com.apple.android.music"
-        )
-
-        var chosenPackage: String? = null
-        for (pkg in preferredPackages) {
-            try {
-                pm.getPackageInfo(pkg, 0)
-                chosenPackage = pkg
-                break
-            } catch (_: Exception) {}
-        }
-
-        if (chosenPackage != null) {
-            intent.setPackage(chosenPackage)
-        }
-
-        AppLauncher.launchWithOverlayFallback(context, intent)
-        Log.i(TAG, "playSong executed for query='$cleanQuery' package=$chosenPackage")
+        MediaEngine.handleMediaPlay(context, "audio", query, null, null, false)
     }
 
     // -------------------------------------------------------------------------
@@ -388,14 +355,33 @@ object DeviceController {
         try {
             val type = act.optString("type", "")
             when (type) {
-                // Media / Music Controls
-                "play_music" -> playMusic(context)
-                "pause_music" -> pauseMusic(context)
-                "next_track" -> nextTrack(context)
-                "previous_track" -> previousTrack(context)
+                // Universal Media & Audio Engine Controls
+                "media_play" -> {
+                    val mediaType = act.optString("media_type", "audio")
+                    val query = act.optString("query", "")
+                    val artist = act.optString("artist", "")
+                    val app = act.optString("app", "")
+                    val shuffle = act.optBoolean("shuffle", false)
+                    MediaEngine.handleMediaPlay(context, mediaType, query, artist, app, shuffle)
+                }
+                "media_control" -> {
+                    val command = act.optString("command", "play")
+                    val seconds = act.optInt("seconds", 30)
+                    MediaEngine.handleMediaControl(context, command, seconds)
+                }
+                "volume_control" -> {
+                    val action = act.optString("action", "up")
+                    val percent = if (act.has("percent")) act.optInt("percent") else null
+                    val stream = act.optString("stream", "media")
+                    MediaEngine.handleVolumeControl(context, action, percent, stream)
+                }
+                "play_music" -> MediaEngine.handleMediaPlay(context, "audio", "", null, "local", false)
+                "pause_music" -> MediaEngine.handleMediaControl(context, "pause")
+                "next_track" -> MediaEngine.handleMediaControl(context, "next")
+                "previous_track" -> MediaEngine.handleMediaControl(context, "previous")
                 "play_song" -> {
                     val query = act.optString("query") ?: act.optString("song") ?: ""
-                    if (query.isNotBlank()) playSong(context, query)
+                    MediaEngine.handleMediaPlay(context, "audio", query, null, null, false)
                 }
 
                 // In-App Accessibility Automation & Closed-Loop Agent

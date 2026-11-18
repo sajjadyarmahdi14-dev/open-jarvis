@@ -759,6 +759,25 @@ def test_media_controls_and_music_playback_fast_path():
     r5 = client.post("/api/chat", json={"message": "play Bohemian Rhapsody by Queen"})
     d5 = r5.json()
     assert any(a.get("type") == "play_song" and "bohemian rhapsody" in a.get("query", "").lower() for a in d5.get("client_actions", []))
+    assert any(a.get("type") == "media_play" and "bohemian rhapsody" in a.get("query", "").lower() for a in d5.get("client_actions", []))
+
+    # 5. Media Engine: Seek Forward / Backward (Persian & English)
+    r_seek_f = client.post("/api/chat", json={"message": "۳۰ ثانیه بزن جلو"})
+    assert any(a.get("type") == "media_control" and a.get("command") == "seek_forward" for a in r_seek_f.json().get("client_actions", []))
+
+    r_seek_b = client.post("/api/chat", json={"message": "rewind"})
+    assert any(a.get("type") == "media_control" and a.get("command") == "seek_backward" for a in r_seek_b.json().get("client_actions", []))
+
+    # 6. Media Engine: Volume Control (Percent & Mute)
+    r_vol_pct = client.post("/api/chat", json={"message": "صدا رو بزار رو ۷۰ درصد"})
+    assert any(a.get("type") == "volume_control" and a.get("percent") == 70 for a in r_vol_pct.json().get("client_actions", []))
+
+    r_mute = client.post("/api/chat", json={"message": "سایلنت کن"})
+    assert any(a.get("type") == "volume_control" and a.get("action") == "mute" for a in r_mute.json().get("client_actions", []))
+
+    # 7. Media Engine: Video Play (VLC & Local)
+    r_vid = client.post("/api/chat", json={"message": "آخرین ویدیوم رو تو VLC پخش کن"})
+    assert any(a.get("type") == "media_play" and a.get("media_type") == "video" and a.get("app") == "vlc" for a in r_vid.json().get("client_actions", []))
 
 
 def test_accessibility_deep_automation_fast_paths():

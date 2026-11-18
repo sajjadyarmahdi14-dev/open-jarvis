@@ -640,6 +640,10 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
+            perms.add(Manifest.permission.READ_MEDIA_AUDIO)
+            perms.add(Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
         val needed = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED

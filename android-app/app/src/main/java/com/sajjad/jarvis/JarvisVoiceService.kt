@@ -910,11 +910,32 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         DeviceController.openCamera(applicationContext)
                     }
 
-                    // 100% Native execution of client actions (App, Torch, Alarm, Call, SMS, Volume)
+                    // 100% Native execution of client actions (App, Torch, Alarm, Call, SMS, Volume, Media)
                     if (clientActions != null) {
+                        var deferredMediaAction: JSONObject? = null
                         for (i in 0 until clientActions.length()) {
                             val act = clientActions.optJSONObject(i) ?: continue
-                            executeNativeClientAction(act)
+                            val type = act.optString("type", "")
+                            if (type in listOf("media_play", "play_song", "play_music")) {
+                                deferredMediaAction = act
+                            } else {
+                                executeNativeClientAction(act)
+                            }
+                        }
+
+                        // Audio Ducking / Mute Guard: Wait for Jarvis voice confirmation to finish speaking
+                        // BEFORE launching media playback, so Jarvis's voice doesn't clash with or pause the music player!
+                        if (deferredMediaAction != null) {
+                            if (response.isNotBlank()) {
+                                serviceListener?.onAssistantResponse(response)
+                                broadcastUiUpdate(assistantReply = response)
+                                speakBritish(response) {
+                                    executeNativeClientAction(deferredMediaAction)
+                                }
+                            } else {
+                                executeNativeClientAction(deferredMediaAction)
+                            }
+                            return@launch
                         }
                     }
 

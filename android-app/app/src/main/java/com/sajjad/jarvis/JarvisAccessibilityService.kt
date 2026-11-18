@@ -186,7 +186,54 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private fun clickNodeOrParent(node: AccessibilityNodeInfo?): Boolean {
+    fun clickPlayableMediaOrPlayButton(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val playKeywords = listOf(
+            "play", "shuffle", "پخش", "شروع", "play_btn", "play_button", "play button",
+            "btn_play", "action_play", "start", "watch", "تماشا", "پلی"
+        )
+
+        // 1. Explicit play or shuffle button
+        val matchPlayBtn = findNodeByPredicate(root) { n ->
+            val text = (n.text?.toString() ?: "").lowercase(Locale.ROOT)
+            val desc = (n.contentDescription?.toString() ?: "").lowercase(Locale.ROOT)
+            val viewId = (n.viewIdResourceName ?: "").lowercase(Locale.ROOT)
+            playKeywords.any { k -> text == k || desc == k || viewId.contains(k) }
+        }
+        if (matchPlayBtn != null) {
+            val clicked = clickNodeOrParent(matchPlayBtn)
+            if (clicked) {
+                Log.i(TAG, "clickPlayableMediaOrPlayButton clicked explicit play/shuffle button")
+                return true
+            }
+        }
+
+        // 2. Playable media row / video beneath search bar
+        val matchResultItem = findNodeByPredicate(root) { n ->
+            if (!n.isClickable && n.parent?.isClickable != true) return@findNodeByPredicate false
+            val text = (n.text?.toString() ?: "").lowercase(Locale.ROOT)
+            val desc = (n.contentDescription?.toString() ?: "").lowercase(Locale.ROOT)
+            val viewId = (n.viewIdResourceName ?: "").lowercase(Locale.ROOT)
+            val cls = n.className?.toString() ?: ""
+            if (cls.contains("EditText", ignoreCase = true) || cls.contains("SearchView", ignoreCase = true)) return@findNodeByPredicate false
+            if (viewId.contains("search") || viewId.contains("filter") || viewId.contains("chip") || viewId.contains("tab")) return@findNodeByPredicate false
+            if (text in listOf("all", "videos", "shorts", "playlists", "music", "همه", "ویدیوها", "آهنگ‌ها")) return@findNodeByPredicate false
+
+            viewId.contains("item") || viewId.contains("row") || viewId.contains("video") || viewId.contains("track") ||
+                    viewId.contains("song") || desc.contains("video") || desc.contains("play") || (text.isNotBlank() && n.isClickable)
+        }
+
+        if (matchResultItem != null) {
+            val clicked = clickNodeOrParent(matchResultItem)
+            if (clicked) {
+                Log.i(TAG, "clickPlayableMediaOrPlayButton clicked first playable media result item")
+                return true
+            }
+        }
+        return false
+    }
+
+    fun clickNodeOrParent(node: AccessibilityNodeInfo?): Boolean {
         var current = node
         while (current != null) {
             if (current.isClickable) {
@@ -198,7 +245,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         return node?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
     }
 
-    private fun findNodeByPredicate(
+    fun findNodeByPredicate(
         node: AccessibilityNodeInfo?,
         predicate: (AccessibilityNodeInfo) -> Boolean
     ): AccessibilityNodeInfo? {

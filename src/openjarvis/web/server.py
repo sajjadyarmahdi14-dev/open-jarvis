@@ -541,65 +541,184 @@ def _handle_fast_path(
             "fast_path": True,
         }
 
-    # 2.5 Full Music & Media Playback Control
+    # 2.5 Universal Audio, Music & Video Media Engine Control
     # Transport: Pause / Stop
-    if re.search(r"\b(?:pause\s+(?:music|song|playback|track|audio)|stop\s+(?:music|song|playback|audio)|قطع\s*(?:موزیک|آهنگ)|موزیک\s*(?:رو|را)?\s*قطع\s*کن|آهنگ\s*(?:رو|را)?\s*(?:قطع|متوقف)\s*کن|متوقف\s*کن)\b", norm) or cleaned in {"pause music", "stop music", "pause"}:
+    if re.search(r"\b(?:pause\s+(?:music|song|playback|track|audio|video)|stop\s+(?:music|song|playback|audio|video)|قطع\s*(?:موزیک|آهنگ|ویدیو)|موزیک\s*(?:رو|را)?\s*قطع\s*کن|آهنگ\s*(?:رو|را)?\s*(?:قطع|متوقف)\s*کن|متوقف\s*کن|پاز\s*کن|استپ\s*کن)\b", norm) or cleaned in {"pause music", "stop music", "pause", "stop"}:
         reply = "موزیک متوقف شد قربان." if is_persian else "Music paused, sir."
         return {
             "response": reply,
-            "tool_calls": [{"name": "music_control", "content": "Media playback paused", "success": True}],
+            "tool_calls": [{"name": "media_control", "content": "Media playback paused", "success": True}],
             "turns": 1,
-            "client_actions": [{"type": "pause_music"}],
+            "client_actions": [{"type": "pause_music"}, {"type": "media_control", "command": "pause"}],
             "fast_path": True,
         }
 
     # Transport: Play / Resume
-    if re.search(r"\b(?:play\s+music|resume\s+music|play\s+songs?|resume\s+playback|پخش\s*موزیک|موزیک\s*(?:رو|را)?\s*پخش\s*کن|آهنگ\s*(?:رو|را)?\s*پخش\s*کن|موزیک\s*بذار|آهنگ\s*بذار)\b", norm) or cleaned in {"play music", "resume music"}:
+    if re.search(r"\b(?:play\s+music|resume\s+music|play\s+songs?|resume\s+playback|پخش\s*موزیک|موزیک\s*(?:رو|را)?\s*پخش\s*کن|آهنگ\s*(?:رو|را)?\s*پخش\s*کن|موزیک\s*بذار|آهنگ\s*بذار|ادامه\s*بده|پلی\s*کن)\b", norm) or cleaned in {"play music", "resume music", "resume", "play"}:
         reply = "در حال پخش موزیک قربان." if is_persian else "Playing music, sir."
         return {
             "response": reply,
-            "tool_calls": [{"name": "music_control", "content": "Media playback started", "success": True}],
+            "tool_calls": [{"name": "media_play", "content": "Media playback started", "success": True}],
             "turns": 1,
-            "client_actions": [{"type": "play_music"}],
+            "client_actions": [{"type": "play_music"}, {"type": "media_play", "media_type": "audio", "query": "", "app": "local"}],
             "fast_path": True,
         }
 
     # Transport: Next Track
-    if re.search(r"\b(?:next\s+(?:track|song|music)|skip\s+(?:track|song)|موزیک\s*بعدی|آهنگ\s*بعدی|ترک\s*بعدی|برو\s*آهنگ\s*بعدی)\b", norm):
+    if re.search(r"\b(?:next\s+(?:track|song|music|video)|skip\s+(?:track|song)|موزیک\s*بعدی|آهنگ\s*بعدی|ترک\s*بعدی|برو\s*آهنگ\s*بعدی|بعدی)\b", norm):
         reply = "در حال رفتن به آهنگ بعدی قربان." if is_persian else "Skipping to the next track, sir."
         return {
             "response": reply,
-            "tool_calls": [{"name": "music_control", "content": "Skipped to next track", "success": True}],
+            "tool_calls": [{"name": "media_control", "content": "Skipped to next track", "success": True}],
             "turns": 1,
-            "client_actions": [{"type": "next_track"}],
+            "client_actions": [{"type": "next_track"}, {"type": "media_control", "command": "next"}],
             "fast_path": True,
         }
 
     # Transport: Previous Track
-    if re.search(r"\b(?:previous\s+(?:track|song|music)|last\s+(?:track|song)|آهنگ\s*قبلی|موزیک\s*قبلی|ترک\s*قبلی|برو\s*آهنگ\s*قبلی)\b", norm):
+    if re.search(r"\b(?:previous\s+(?:track|song|music|video)|last\s+(?:track|song)|آهنگ\s*قبلی|موزیک\s*قبلی|ترک\s*قبلی|برو\s*آهنگ\s*قبلی|قبلی)\b", norm):
         reply = "در حال بازگشت به آهنگ قبلی قربان." if is_persian else "Going back to previous track, sir."
         return {
             "response": reply,
-            "tool_calls": [{"name": "music_control", "content": "Returning to previous track", "success": True}],
+            "tool_calls": [{"name": "media_control", "content": "Returning to previous track", "success": True}],
             "turns": 1,
-            "client_actions": [{"type": "previous_track"}],
+            "client_actions": [{"type": "previous_track"}, {"type": "media_control", "command": "previous"}],
             "fast_path": True,
         }
 
-    # Play Specific Song or Artist
+    # Transport: Seek Forward (30s)
+    if re.search(r"\b(?:(?:seek|skip|jump|fast)\s+forward|forward\s+\d+|بزن\s*جلو|برو\s*جلو|۳۰\s*ثانیه\s*بزن\s*جلو)\b", norm):
+        reply = "سی ثانیه به جلو رفتیم قربان." if is_persian else "Fast-forwarding 30 seconds, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "media_control", "content": "Fast-forward 30s", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "media_control", "command": "seek_forward", "seconds": 30}],
+            "fast_path": True,
+        }
+
+    # Transport: Seek Backward (30s)
+    if re.search(r"\b(?:(?:seek|jump|rewind)\s+back(?:ward)?|rewind|بزن\s*عقب|برو\s*عقب|۳۰\s*ثانیه\s*بزن\s*عقب)\b", norm):
+        reply = "سی ثانیه به عقب بازگشتیم قربان." if is_persian else "Rewinding 30 seconds, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "media_control", "content": "Rewind 30s", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "media_control", "command": "seek_backward", "seconds": 30}],
+            "fast_path": True,
+        }
+
+    # Volume Control: Percentage
+    m_vol_pct = re.search(r"(?:volume|sound|صدا(?:\s*رو)?)\s*(?:set\s+to\s+|to\s+|روی\s*|رو\s*|بذار\s*رو(?:ی)?\s*|بزار\s*رو(?:ی)?\s*)?(\d{1,3})\s*(?:%|درصد)?", norm)
+    if m_vol_pct and ("volume" in norm or "صدا" in norm or "%" in norm or "درصد" in norm):
+        pct = int(m_vol_pct.group(1))
+        if 0 <= pct <= 100:
+            reply = f"میزان صدا روی {pct} درصد تنظیم شد قربان." if is_persian else f"Volume adjusted to {pct}%, sir."
+            return {
+                "response": reply,
+                "tool_calls": [{"name": "volume_control", "content": f"Volume set to {pct}%", "success": True}],
+                "turns": 1,
+                "client_actions": [
+                    {"type": "volume", "action": "set", "level": pct},
+                    {"type": "volume_control", "action": "set_percent", "percent": pct, "stream": "media"}
+                ],
+                "fast_path": True,
+            }
+
+    # Volume Control: Up / Down / Mute / Unmute
+    if re.search(r"\b(?:volume\s+up|increase\s+volume|louder|turn\s+it\s+up|صدا\s*(?:رو)?\s*زیاد\s*کن|صدا\s*(?:رو)?\s*ببر\s*بالا|افزایش\s*صدا|صدای\s*بیشتر)\b", norm):
+        reply = "میزان صدا افزایش یافت قربان." if is_persian else "Volume increased, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "volume_control", "content": "Volume increased", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "volume", "action": "up"}, {"type": "volume_control", "action": "up"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:volume\s+down|lower\s+volume|quieter|turn\s+it\s+down|صدا\s*(?:رو)?\s*کم\s*کن|کاهش\s*صدا|صدای\s*کمتر)\b", norm):
+        reply = "میزان صدا کاهش یافت قربان." if is_persian else "Volume decreased, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "volume_control", "content": "Volume decreased", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "volume", "action": "down"}, {"type": "volume_control", "action": "down"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:mute|silence|بی\s*صدا\s*کن|سایلنت\s*کن|قطع\s*صدا)\b", norm):
+        reply = "صدا قطع شد قربان." if is_persian else "Audio muted, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "volume_control", "content": "Audio muted", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "volume_control", "action": "mute"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:unmute|restore\s+volume|صدا\s*(?:رو)?\s*باز\s*کن|از\s*سایلنت\s*در\s*بیار)\b", norm):
+        reply = "صدا وصل شد قربان." if is_persian else "Audio unmuted, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "volume_control", "content": "Audio unmuted", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "volume_control", "action": "unmute"}],
+            "fast_path": True,
+        }
+
+    # Video Playback: Local vs VLC vs MX Player vs YouTube
+    is_video_cmd = (
+        ("ویدیو" in norm or "فیلم" in norm or "video" in norm)
+        and ("پخش" in norm or "play" in norm or "باز" in norm or "ببین" in norm)
+    )
+    if is_video_cmd:
+        v_app = "local"
+        if "vlc" in norm:
+            v_app = "vlc"
+        elif "mx" in norm:
+            v_app = "mx_player"
+        elif "youtube" in norm or "یوتیوب" in norm:
+            v_app = "youtube"
+        elif "netflix" in norm or "نتفلیکس" in norm:
+            v_app = "netflix"
+
+        clean_vq = re.sub(r"\b(?:play|the|video|in|on|vlc|youtube|netflix|mx\s*player)\b", " ", norm, flags=re.IGNORECASE)
+        clean_vq = re.sub(r"(?:آخرین|ویدیو(?:م)?|فیلم(?:م)?|رو|تو|در|پخش\s*کن|باز\s*کن|یوتیوب|نتفلیکس)", " ", clean_vq)
+        clean_vq = re.sub(r"\s+", " ", clean_vq).strip()
+        if not clean_vq or "آخرین" in norm or "latest" in norm or "last" in norm:
+            clean_vq = "latest"
+
+        reply = f"در حال پخش ویدیو در {v_app} قربان." if is_persian else f"Playing video in {v_app}, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "media_play", "content": f"Playing video '{clean_vq}' via {v_app}", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "media_play", "media_type": "video", "query": clean_vq, "app": v_app}],
+            "fast_path": True,
+        }
+
+    # Play Specific Song or Artist (with Local First routing unless explicit streaming app named)
     m_song_en = re.match(r"^play\s+(?:the\s+song\s+|song\s+|track\s+)?(.+?)[.!?]*$", raw_cleaned, re.IGNORECASE)
     m_song_fa = re.match(r"^(?:آهنگ|ترک|موزیک)\s+(.+?)\s*(?:رو|را)?\s*(?:پخش\s*کن|بذار)$", raw_cleaned)
     if m_song_en or m_song_fa:
         t_song = (m_song_en.group(1) if m_song_en else m_song_fa.group(1)).strip()
         app_names = {a.get("label", "").lower() for a in _device_apps if a.get("label")}
-        if t_song and t_song.lower() not in app_names and t_song.lower() not in ("music", "game", "camera", "store", "app", "apps"):
+        if t_song and t_song.lower() not in app_names and t_song.lower() not in ("music", "game", "camera", "store", "app", "apps", "video"):
             song_query = t_song
+            target_app = "local"
+            if "youtube" in norm or "یوتیوب" in norm:
+                target_app = "youtube"
+            elif "spotify" in norm or "اسپاتیفای" in norm:
+                target_app = "spotify"
+            elif "yt music" in norm or "youtube music" in norm:
+                target_app = "yt_music"
+
             reply = f"چشم قربان، در حال پخش {song_query}." if is_persian else f"Playing '{song_query}', sir."
             return {
                 "response": reply,
                 "tool_calls": [{"name": "play_song", "content": f"Playing {song_query}", "success": True}],
                 "turns": 1,
-                "client_actions": [{"type": "play_song", "query": song_query}],
+                "client_actions": [
+                    {"type": "play_song", "query": song_query},
+                    {"type": "media_play", "media_type": "audio", "query": song_query, "app": target_app}
+                ],
                 "fast_path": True,
             }
 
