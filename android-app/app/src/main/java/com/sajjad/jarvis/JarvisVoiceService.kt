@@ -70,7 +70,6 @@ import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
@@ -289,6 +288,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         val onFinished: (() -> Unit)? = null
     )
     private val speechQueue = Channel<SpeechItem>(Channel.UNLIMITED)
+    private val pendingSpeechCount = java.util.concurrent.atomic.AtomicInteger(0)
     private var speechQueueJob: Job? = null
 
     private val streamingHttpClient = OkHttpClient.Builder()
@@ -1114,7 +1114,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 Log.e(TAG, "dispatchVadUtterance error: ${e.message}", e)
             } finally {
                 isProcessing = false
-                if (!isTtsSpeaking && speechQueue.isEmpty) {
+                if (!isTtsSpeaking && pendingSpeechCount.get() <= 0) {
                     acousticState = AcousticState.IDLE
                     val st = if (isServiceMuted) "paused" else if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
                     serviceListener?.onWakeStateChanged(st)
@@ -1572,10 +1572,11 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     val request = reqBuilder.build()
-                    call = streamingHttpClient.newCall(request)
-                    activeStreamCall = call
+                    val streamCall = streamingHttpClient.newCall(request)
+                    call = streamCall
+                    activeStreamCall = streamCall
 
-                    val response = call.execute()
+                    val response = streamCall.execute()
                     if (response.isSuccessful) {
                         val responseStream = response.body?.byteStream()
                         if (responseStream != null) {
@@ -1644,7 +1645,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 fillerJob?.cancel()
                 withContext(Dispatchers.Main) {
                     isProcessing = false
-                    if (!isTtsSpeaking && speechQueue.isEmpty) {
+                    if (!isTtsSpeaking && pendingSpeechCount.get() <= 0) {
                         acousticState = AcousticState.IDLE
                         val st = if (isServiceMuted) "paused" else if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
                         serviceListener?.onWakeStateChanged(st)
@@ -1738,6 +1739,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         for (i in sentences.indices) {
             val isLast = (i == sentences.size - 1)
             val cb = if (isLast) onFinished else null
+            pendingSpeechCount.incrementAndGet()
             speechQueue.trySend(SpeechItem(sentences[i], cb))
         }
     }
@@ -1814,8 +1816,10 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
         item.onFinished?.invoke()
 
+        val remaining = pendingSpeechCount.decrementAndGet()
         // If queue is now empty, restore IDLE state
-        if (speechQueue.isEmpty) {
+        if (remaining <= 0 || speechQueue.isEmpty) {
+            pendingSpeechCount.set(0)
             withContext(Dispatchers.Main) {
                 isTtsSpeaking = false
                 isProcessing = false
@@ -1986,6 +1990,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             val polled = speechQueue.tryReceive()
             if (polled.isFailure) break
         }
+        pendingSpeechCount.set(0)
     }
 
     private suspend fun playLocalMp3File(file: File): Boolean = withContext(Dispatchers.Main) {
