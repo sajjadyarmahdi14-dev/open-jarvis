@@ -1118,6 +1118,89 @@ def test_vision_fast_paths_and_endpoint(monkeypatch):
     assert "coffee mug" in d_vis.get("response", "")
 
 
+def test_iron_man_protocols_and_proactive_intelligence(monkeypatch):
+    """Verify Step 8: Iron Man Protocols (Ghost, Sleep, Walk, Focus) and Proactive Intelligence."""
+    client = TestClient(app)
+
+    # 1. Ghost Protocol (English & Persian) - Ultra-fast & Silent
+    r_ghost_en = client.post("/api/chat", json={"message": "ghost protocol"})
+    assert r_ghost_en.status_code == 200
+    d_ghost_en = r_ghost_en.json()
+    assert d_ghost_en.get("fast_path") is True
+    assert d_ghost_en.get("response") == ""  # Zero spoken leakage!
+    assert any(a.get("type") == "protocol" and a.get("protocol") == "ghost" for a in d_ghost_en.get("client_actions", []))
+
+    r_ghost_fa = client.post("/api/chat", json={"message": "پروتکل مخفی"})
+    assert r_ghost_fa.status_code == 200
+    d_ghost_fa = r_ghost_fa.json()
+    assert d_ghost_fa.get("fast_path") is True
+    assert d_ghost_fa.get("response") == ""
+    assert any(a.get("type") == "protocol" and a.get("protocol") == "ghost" for a in d_ghost_fa.get("client_actions", []))
+
+    # 2. Sleep Protocol
+    r_sleep = client.post("/api/chat", json={"message": "sleep protocol"})
+    assert r_sleep.status_code == 200
+    d_sleep = r_sleep.json()
+    assert d_sleep.get("fast_path") is True
+    assert any(a.get("type") == "protocol" and a.get("protocol") == "sleep" for a in d_sleep.get("client_actions", []))
+
+    # 3. Walk Mode / Protocol
+    r_walk = client.post("/api/chat", json={"message": "walk mode"})
+    assert r_walk.status_code == 200
+    d_walk = r_walk.json()
+    assert d_walk.get("fast_path") is True
+    assert any(a.get("type") == "protocol" and a.get("protocol") == "walk" for a in d_walk.get("client_actions", []))
+
+    # 4. Focus Protocol
+    r_focus = client.post("/api/chat", json={"message": "focus protocol for 30 minutes"})
+    assert r_focus.status_code == 200
+    d_focus = r_focus.json()
+    assert d_focus.get("fast_path") is True
+    act_focus = next(a for a in d_focus.get("client_actions", []) if a.get("type") == "protocol")
+    assert act_focus.get("protocol") == "focus"
+    assert act_focus.get("duration") == 30
+
+    # 5. Summarize Notifications fast path
+    r_notif = client.post("/api/chat", json={"message": "summarize notifications"})
+    assert r_notif.status_code == 200
+    d_notif = r_notif.json()
+    assert d_notif.get("fast_path") is True
+    assert any(a.get("type") == "summarize_notifications" for a in d_notif.get("client_actions", []))
+
+    # 6. Silent RemoteInput Reply
+    r_reply = client.post("/api/chat", json={"message": "reply to John saying on my way"})
+    assert r_reply.status_code == 200
+    d_reply = r_reply.json()
+    assert d_reply.get("fast_path") is True
+    act_reply = next(a for a in d_reply.get("client_actions", []) if a.get("type") == "reply_notification")
+    assert act_reply.get("target") == "John"
+    assert "on my way" in act_reply.get("message")
+
+    # 7. Morning Briefing fast path
+    r_morn = client.post("/api/chat", json={"message": "morning briefing"})
+    assert r_morn.status_code == 200
+    d_morn = r_morn.json()
+    assert d_morn.get("fast_path") is True
+    assert any(a.get("type") == "morning_briefing" for a in d_morn.get("client_actions", []))
+
+    # 8. POST /api/notifications/summarize
+    r_sum_empty = client.post("/api/notifications/summarize", json={"notifications": []})
+    assert r_sum_empty.status_code == 200
+    assert "no unread notifications" in r_sum_empty.json().get("summary").lower()
+
+    r_sum_items = client.post("/api/notifications/summarize", json={
+        "notifications": [
+            {"app": "Telegram", "sender": "Pepper Potts", "text": "Board meeting rescheduled to 3 PM."},
+            {"app": "WhatsApp", "sender": "Rhodey", "text": "Are we flying this weekend?"}
+        ]
+    })
+    assert r_sum_items.status_code == 200
+    d_sum = r_sum_items.json()
+    assert d_sum.get("status") == "success"
+    assert d_sum.get("count") == 2
+    assert len(d_sum.get("summary", "")) > 10
+
+
 
 
 

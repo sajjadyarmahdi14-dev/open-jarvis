@@ -384,6 +384,115 @@ def _handle_fast_path(
             "fast_path": True,
         }
 
+    # -1.8. Iron Man Protocols (Ghost, Sleep, Walk, Focus) & Proactive Intelligence
+    ghost_patterns = [
+        r"\bghost\s*protocol\b",
+        r"\bپروتکل\s*(?:مخفی|شبح)\b",
+        r"\bحالت\s*(?:مخفی|شبح)\b",
+    ]
+    if any(re.search(pat, norm) for pat in ghost_patterns):
+        return {
+            "response": "",  # Completely silent!
+            "tool_calls": [{"name": "protocol", "content": "Ghost protocol engaged silently", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "protocol", "protocol": "ghost"}],
+            "fast_path": True,
+        }
+
+    sleep_proto_patterns = [
+        r"\bsleep\s*protocol\b",
+        r"\bپروتکل\s*(?:خواب|شب)\b",
+        r"\bحالت\s*خواب\b",
+    ]
+    if any(re.search(pat, norm) for pat in sleep_proto_patterns):
+        reply = "پروتکل خواب فعال شد. شب بخیر قربان." if is_persian else "Sleep protocol engaged. Goodnight, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "protocol", "content": "Sleep protocol engaged", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "protocol", "protocol": "sleep", "is_fa": is_persian}],
+            "fast_path": True,
+        }
+
+    walk_proto_patterns = [
+        r"\b(?:walk\s*mode|commute\s*protocol|walk\s*protocol)\b",
+        r"\bپروتکل\s*(?:پیاده‌روی|پیاده\s*روی|بیرون)\b",
+        r"\bحالت\s*(?:پیاده‌روی|پیاده\s*روی|بیرون)\b",
+    ]
+    if any(re.search(pat, norm) for pat in walk_proto_patterns):
+        reply = "حالت پیاده‌روی فعال شد قربان." if is_persian else "Walk mode active, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "protocol", "content": "Walk protocol engaged", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "protocol", "protocol": "walk", "is_fa": is_persian}],
+            "fast_path": True,
+        }
+
+    focus_proto_patterns = [
+        r"\b(?:focus\s*protocol|focus\s*mode)\b(?:\s+(?:for\s+)?(\d+)\s*(?:min(?:ute)?s?|دقیقه)?)?",
+        r"\b(?:پروتکل|حالت)\s*تمرکز\b(?:\s+(?:به\s*مدت\s*)?(\d+)\s*(?:دقیقه)?)?",
+    ]
+    for pat in focus_proto_patterns:
+        m = re.search(pat, norm)
+        if m:
+            duration = int(m.group(1)) if m.group(1) else 45
+            reply = f"پروتکل تمرکز به مدت {duration} دقیقه فعال شد قربان." if is_persian else f"Focus protocol active for {duration} minutes, sir."
+            return {
+                "response": reply,
+                "tool_calls": [{"name": "protocol", "content": f"Focus protocol engaged for {duration} min", "success": True}],
+                "turns": 1,
+                "client_actions": [{"type": "protocol", "protocol": "focus", "duration": duration, "is_fa": is_persian}],
+                "fast_path": True,
+            }
+
+    notif_summary_patterns = [
+        r"\b(?:what\s+did\s+i\s+miss|summarize\s+notifications|read\s+(?:my\s+)?notifications|read\s+(?:my\s+)?messages|check\s+notifications)\b",
+        r"\b(?:پیام‌هام\s*رو\s*بخون|پیامهام\s*رو\s*بخون|پیام‌های\s*جدید|پیامهای\s*جدید|خلاصه\s*نوتیفیکیشن‌ها|خلاصه\s*نوتیفیکیشنها)\b",
+    ]
+    if any(re.search(pat, norm) for pat in notif_summary_patterns):
+        reply = "در حال بررسی و خلاصه‌سازی اعلان‌های شما قربان." if is_persian else "Checking and summarizing your notifications, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "summarize_notifications", "content": "Summarizing active notifications", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "summarize_notifications"}],
+            "fast_path": True,
+        }
+
+    morning_briefing_patterns = [
+        r"\b(?:morning\s+briefing|morning\s+report|daily\s+briefing)\b",
+        r"\b(?:گزارش\s*صبحگاهی|خلاصه\s*صبحگاهی)\b",
+    ]
+    if any(re.search(pat, norm) for pat in morning_briefing_patterns):
+        reply = "در حال تهیه گزارش صبحگاهی قربان." if is_persian else "Preparing your morning briefing, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "morning_briefing", "content": "Generating morning briefing", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "morning_briefing"}],
+            "fast_path": True,
+        }
+
+    reply_patterns = [
+        r"\breply\s+to\s+([a-zA-Z0-9_\s\u0600-\u06FF]+?)\s+(?:saying|that|with)\s+(.+)$",
+        r"\b(?:جواب|پاسخ)\s+([a-zA-Z0-9_\s\u0600-\u06FF]+?)\s+(?:رو|را)?\s*بده\s*(?:بگو|که)\s*(.+)$",
+    ]
+    for pat in reply_patterns:
+        m = re.search(pat, msg, re.IGNORECASE) or re.search(pat, norm, re.IGNORECASE)
+        if m:
+            target = m.group(1).strip()
+            msg_body = m.group(2).strip()
+            clean_body = re.sub(r"^(?:and\s+say|and\s+type|type|say)\s+", "", msg_body, flags=re.IGNORECASE).strip()
+            reply = f"پاسخ به {target} ارسال شد قربان." if is_persian else f"Sending reply to {target}, sir."
+            return {
+                "response": reply,
+                "tool_calls": [{"name": "reply_notification", "content": f"Reply to {target}: {clean_body}", "success": True}],
+                "turns": 1,
+                "client_actions": [{"type": "reply_notification", "target": target, "message": clean_body}],
+                "fast_path": True,
+            }
+
     # -1. Sleep / Standby Mode Triggers (<5ms match, ZERO LLM call!)
     sleep_terms = (
         "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
@@ -2105,6 +2214,94 @@ async def vision_endpoint(req: VisionRequest, request: Request = None):
         "response": clean_result,
         "mode": req.mode,
         "prompt": user_prompt,
+        "status": "success",
+    }
+
+
+class NotificationSummarizeRequest(BaseModel):
+    notifications: List[Dict[str, Any]] = []
+    language: Optional[str] = None
+
+
+@app.post("/api/notifications/summarize")
+async def summarize_notifications_endpoint(req: NotificationSummarizeRequest, request: Request = None):
+    """Generate a 2-3 sentence executive briefing of active unread notifications."""
+    notifs = req.notifications or []
+    if not notifs:
+        return {
+            "summary": "You have no unread notifications, sir." if (req.language != "fa") else "هیچ اعلان جدیدی وجود ندارد قربان.",
+            "count": 0,
+            "status": "success",
+        }
+
+    formatted_items = []
+    has_persian = False
+    for n in notifs[:10]:
+        app_name = n.get("app") or n.get("package") or "App"
+        sender = n.get("sender") or "Unknown"
+        text = (n.get("text") or "").strip()
+        if any("\u0600" <= c <= "\u06FF" for c in (sender + text)):
+            has_persian = True
+        formatted_items.append(f"• [{app_name}] {sender}: {text}")
+
+    is_fa = req.language == "fa" or (req.language is None and has_persian)
+    prompt = (
+        f"You are J.A.R.V.I.S., Tony Stark's executive AI assistant. "
+        f"Summarize these {len(notifs)} unread notifications into a concise, polite 2-3 sentence briefing for Tony Stark. "
+        f"Highlight important senders and actions needed. Do NOT use markdown asterisks or bullet points in the summary, speak naturally.\n\n"
+        f"Notifications:\n" + "\n".join(formatted_items)
+    )
+    if is_fa:
+        prompt += "\nRespond entirely in elegant, natural Persian, addressing me as قربان."
+    else:
+        prompt += "\nRespond in English, addressing me as sir."
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if request is not None:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth[7:].strip()
+            if bearer:
+                api_key = bearer
+
+    cfg_status = get_config_status()
+    if not api_key:
+        api_key = cfg_status.get("openrouter_key")
+    gemini_key = cfg_status.get("gemini_key") or os.environ.get("GEMINI_API_KEY")
+    active_model = cfg_status.get("active_model")
+
+    summary = None
+    if api_key or gemini_key:
+        try:
+            import httpx
+            from openjarvis.engine.cloud_rest import generate_openai_compat_rest
+            base_url = os.environ.get("OPENAI_BASE_URL") or "https://openrouter.ai/api/v1"
+            with httpx.Client(timeout=15.0) as client:
+                res = generate_openai_compat_rest(
+                    client=client,
+                    base_url=base_url,
+                    api_key=api_key or gemini_key,
+                    model=active_model or "google/gemini-2.0-flash-exp:free",
+                    messages=[Message(role=Role.USER, content=prompt)],
+                    max_tokens=300,
+                )
+                summary = res.get("content", "").strip()
+        except Exception as e:
+            logger.warning(f"Notification summary LLM call failed: {e}")
+
+    if not summary:
+        senders = list(dict.fromkeys(n.get("sender") for n in notifs[:3] if n.get("sender")))
+        if is_fa:
+            senders_str = "، ".join(senders) if senders else "مخاطبین"
+            summary = f"قربان، شما {len(notifs)} اعلان جدید دارید؛ عمدتاً از طرف {senders_str}."
+        else:
+            senders_str = ", ".join(senders) if senders else "various senders"
+            summary = f"You have {len(notifs)} unread notifications, sir, primarily from {senders_str}."
+
+    clean_summary = _clean_tts_response(summary)
+    return {
+        "summary": clean_summary,
+        "count": len(notifs),
         "status": "success",
     }
 

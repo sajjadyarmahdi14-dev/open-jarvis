@@ -418,6 +418,43 @@ object DeviceController {
                     val prompt = act.optString("prompt", "What is on the screen?")
                     JarvisVoiceService.instance?.handleVisionAction("screen", prompt)
                 }
+
+                // Step 8: Iron Man Protocols & Proactive Notification Actions
+                "protocol" -> {
+                    val proto = act.optString("protocol", "").lowercase()
+                    val isFa = act.optBoolean("is_fa", false)
+                    when (proto) {
+                        "sleep" -> ProtocolEngine.executeSleepProtocol(context, isFa)
+                        "walk" -> ProtocolEngine.executeWalkProtocol(context, isFa)
+                        "focus" -> {
+                            val duration = act.optInt("duration", 45)
+                            ProtocolEngine.executeFocusProtocol(context, duration, isFa)
+                        }
+                        "ghost" -> ProtocolEngine.executeGhostProtocol(context)
+                    }
+                }
+                "reply_notification" -> {
+                    val target = act.optString("target", "")
+                    val msg = act.optString("message", "")
+                    val (ok, sender) = JarvisNotificationListener.replyToNotification(context, target, msg)
+                    val replyAck = if (ok) {
+                        if (JarvisVoiceService.isPersianOrArabic(msg)) "پاسخ به ${sender ?: target} ارسال شد."
+                        else "Replied to ${sender ?: target}."
+                    } else {
+                        if (JarvisVoiceService.isPersianOrArabic(msg)) "اعلان فعالی برای پاسخ یافت نشد."
+                        else "No active notification found to reply to."
+                    }
+                    JarvisVoiceService.instance?.speakBritish(replyAck)
+                }
+                "summarize_notifications" -> {
+                    JarvisVoiceService.instance?.handleSummarizeNotificationsAction()
+                }
+                "morning_briefing" -> {
+                    val sUrl = JarvisVoiceService.instance?.getServerUrl() ?: ""
+                    ProactiveMonitor.generateMorningBriefing(context, sUrl) { briefing ->
+                        JarvisVoiceService.instance?.speakBritish(briefing)
+                    }
+                }
                 "open_camera", "camera" -> {
                     openCamera(context)
                 }

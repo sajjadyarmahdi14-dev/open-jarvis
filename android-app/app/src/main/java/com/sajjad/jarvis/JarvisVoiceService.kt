@@ -431,6 +431,18 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    fun setVadMode(mode: VadMode) {
+        currentVadMode = mode
+        val st = when (mode) {
+            VadMode.ACTIVE_COMMAND -> "listening_cmd"
+            VadMode.SLEEP_WAKEWORD_ONLY -> "paused"
+            VadMode.STANDBY_WAKE_WORD -> "active"
+        }
+        serviceListener?.onWakeStateChanged(st)
+        broadcastUiUpdate(wakeStatus = st)
+        Log.i(TAG, "VAD mode switched to $mode ($st)")
+    }
+
     fun setTorchState(turnOn: Boolean) {
         try {
             val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -456,7 +468,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     // Configurable Server URL (Local Termux vs Remote VPS)
     // -----------------------------------------------------------------------
 
-    private fun getServerUrl(): String {
+    fun getServerUrl(): String {
         val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
         val raw = prefs.getString("server_url", "http://104.252.175.159:8765")?.trim() ?: "http://104.252.175.159:8765"
         // Auto-migrate legacy localhost default to 24/7 remote VPS
@@ -910,6 +922,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 updateNotification("Processing speech...")
 
                 val (batPct, isCharging) = getBatteryTelemetry()
+                ProactiveMonitor.checkBatteryAlert(applicationContext, batPct, isCharging)
 
                 val result = withContext(Dispatchers.IO) {
                     sendVadUtterance(wavBytes, batPct, isCharging)
@@ -961,6 +974,18 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     accumulatedTranscript = ""
 
                     val cleanT = transcript.trim().lowercase(Locale.ROOT)
+
+                    // Part C: Ghost Protocol (<300ms fast path, completely silent!)
+                    if (cleanT.contains("ghost protocol") || cleanT.contains("پروتکل مخفی") || cleanT.contains("پروتکل شبح")) {
+                        ProtocolEngine.executeGhostProtocol(applicationContext)
+                        isProcessing = false
+                        acousticState = AcousticState.IDLE
+                        val st = "active"
+                        serviceListener?.onWakeStateChanged(st)
+                        broadcastUiUpdate(wakeStatus = st)
+                        return@launch
+                    }
+
                     val sleepTriggers = listOf(
                         "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
                         "jarvis sleep", "sleep mode", "standby", "that's all jarvis", "mute yourself",
@@ -1146,11 +1171,81 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             val prompt = act.optString("prompt", "What is on the screen?")
             handleVisionAction("screen", prompt)
             return
+        } else if (type == "summarize_notifications") {
+            handleSummarizeNotificationsAction()
+            return
+        } else if (type == "morning_briefing") {
+            ProactiveMonitor.generateMorningBriefing(applicationContext, getServerUrl()) { briefing ->
+                serviceListener?.onAssistantResponse(briefing)
+                broadcastUiUpdate(assistantReply = briefing)
+                speakBritish(briefing)
+            }
+            return
         }
 
         DeviceController.executeClientAction(applicationContext, act) { screenText ->
             scope.launch {
                 sendScreenSummaryRequest(screenText)
+            }
+        }
+    }
+
+    /**
+     * Part A: Summarize unread cached notifications via backend briefing API
+     */
+    fun handleSummarizeNotificationsAction() {
+        scope.launch {
+            try {
+                val unread = JarvisNotificationListener.getUnreadNotificationsJson()
+                if (unread.length() == 0) {
+                    val emptyMsg = if (Locale.getDefault().language == "fa") "هیچ اعلان جدیدی وجود ندارد قربان."
+                                   else "You have no unread notifications, sir."
+                    serviceListener?.onAssistantResponse(emptyMsg)
+                    broadcastUiUpdate(assistantReply = emptyMsg)
+                    speakBritish(emptyMsg)
+                    return@launch
+                }
+                updateNotification("Summarizing notifications...")
+                serviceListener?.onWakeStateChanged("processing")
+                broadcastUiUpdate(wakeStatus = "processing")
+
+                val summary = withContext(Dispatchers.IO) {
+                    try {
+                        val url = URL("${getServerUrl().removeSuffix("/")}/api/notifications/summarize")
+                        val conn = url.openConnection() as HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                        conn.connectTimeout = 5000
+                        conn.readTimeout = 12000
+                        conn.doOutput = true
+
+                        val req = JSONObject().apply {
+                            put("notifications", unread)
+                        }
+                        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(req.toString()) }
+
+                        if (conn.responseCode in 200..299) {
+                            val resp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                            JSONObject(resp).optString("summary", "")
+                        } else null
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Notification summary request failed: ${e.message}")
+                        null
+                    }
+                }
+
+                val finalResp = if (!summary.isNullOrBlank()) {
+                    summary
+                } else {
+                    val count = unread.length()
+                    if (Locale.getDefault().language == "fa") "شما $count اعلان جدید دارید قربان."
+                    else "You have $count unread notifications, sir."
+                }
+                serviceListener?.onAssistantResponse(finalResp)
+                broadcastUiUpdate(assistantReply = finalResp)
+                speakBritish(finalResp)
+            } catch (e: Exception) {
+                Log.e(TAG, "handleSummarizeNotificationsAction error: ${e.message}", e)
             }
         }
     }
@@ -1276,6 +1371,16 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
+        val cleanP = prompt.trim().lowercase(Locale.ROOT)
+        // Part C: Ghost Protocol (<300ms fast path, completely silent!)
+        if (cleanP.contains("ghost protocol") || cleanP.contains("پروتکل مخفی") || cleanP.contains("پروتکل شبح")) {
+            ProtocolEngine.executeGhostProtocol(applicationContext)
+            isProcessing = false
+            acousticState = AcousticState.IDLE
+            broadcastUiUpdate(wakeStatus = "active")
+            return
+        }
+
         isProcessing = true
         acousticState = AcousticState.PROCESSING
         serviceListener?.onWakeStateChanged("processing")
@@ -1311,6 +1416,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 val server = getServerUrl()
                 val url = "$server/api/chat/stream"
                 val (batPct, isCharging) = getBatteryTelemetry()
+                ProactiveMonitor.checkBatteryAlert(applicationContext, batPct, isCharging)
 
                 val bodyJson = JSONObject().apply {
                     put("message", prompt)

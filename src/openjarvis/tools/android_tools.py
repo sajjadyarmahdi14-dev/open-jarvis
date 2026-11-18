@@ -1918,6 +1918,92 @@ class AndroidTypeTextTool(BaseTool):
         )
 
 
+class AndroidProtocolTool(BaseTool):
+    """Execute multi-step Iron Man protocols (ghost, sleep, walk, focus)."""
+
+    tool_id = "android_protocol"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="android_protocol",
+            description="Execute Iron Man protocols: ghost (silent shutdown), sleep (night standby), walk (commute/outdoor), focus (Do Not Disturb with Pomodoro timer).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "protocol": {
+                        "type": "string",
+                        "enum": ["ghost", "sleep", "walk", "focus"],
+                        "description": "Protocol identifier to activate",
+                    },
+                    "duration": {
+                        "type": "integer",
+                        "description": "Optional focus duration in minutes (default: 45)",
+                    },
+                },
+                "required": ["protocol"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        protocol = str(params.get("protocol", "")).lower().strip()
+        duration = int(params.get("duration", 45))
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Protocol '{protocol}' engaged.",
+            success=True,
+            metadata={
+                "client_action": "protocol",
+                "protocol": protocol,
+                "duration": duration,
+            },
+        )
+
+
+class AndroidNotificationReplyTool(BaseTool):
+    """Directly reply to active messaging notifications via RemoteInput without opening the app."""
+
+    tool_id = "android_notification_reply"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="android_notification_reply",
+            description="Directly reply to an active messaging notification (Telegram, WhatsApp, SMS) using Android RemoteInput without launching the messenger app.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Sender name or app name to reply to",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Literal text message to reply with",
+                    },
+                },
+                "required": ["target", "message"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        target = str(params.get("target", "")).strip()
+        raw_msg = str(params.get("message", "")).strip()
+        clean_msg = sanitize_literal_text(raw_msg)
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Replying to {target}: '{clean_msg}'",
+            success=True,
+            metadata={
+                "client_action": "reply_notification",
+                "target": target,
+                "message": clean_msg,
+            },
+        )
+
+
 __all__ = [
     "AndroidBatteryTool",
     "AndroidCameraCaptureTool",
@@ -1928,9 +2014,11 @@ __all__ = [
     "AndroidIntentTool",
     "AndroidLaunchAppTool",
     "AndroidMediaPlayerTool",
+    "AndroidNotificationReplyTool",
     "AndroidNotificationTool",
     "AndroidOperateDeviceUiTool",
     "AndroidPhoneCallTool",
+    "AndroidProtocolTool",
     "AndroidSendEmailTool",
     "AndroidSetAlarmTool",
     "AndroidSmsInboxTool",

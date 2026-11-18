@@ -2,6 +2,7 @@ package com.sajjad.jarvis
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -267,6 +268,12 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                                 },
                                 onAccessibilitySetup = {
                                     openAccessibilitySettings()
+                                },
+                                onNotificationListenerSetup = {
+                                    openNotificationListenerSettings()
+                                },
+                                onProtocolPermissionsSetup = {
+                                    openDndAndWriteSettings()
                                 }
                             )
                         }
@@ -628,6 +635,43 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
             startActivity(intent)
         } catch (e: Exception) {
             Toast.makeText(this, "Open Settings -> Accessibility -> Jarvis", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openNotificationListenerSettings() {
+        try {
+            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not open Notification Listener settings: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openDndAndWriteSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                if (nm?.isNotificationPolicyAccessGranted != true) {
+                    val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                    return
+                }
+                if (!Settings.System.canWrite(this)) {
+                    val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                        data = Uri.parse("package:$packageName")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                    return
+                }
+                Toast.makeText(this, "DND and Write permissions are already granted!", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not open permissions settings: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1114,12 +1158,20 @@ private fun JarvisSettingsDialog(
     onAssistantSetup: () -> Unit,
     onOverlaySetup: () -> Unit,
     onBatterySetup: () -> Unit,
-    onAccessibilitySetup: () -> Unit
+    onAccessibilitySetup: () -> Unit,
+    onNotificationListenerSetup: () -> Unit,
+    onProtocolPermissionsSetup: () -> Unit
 ) {
     var urlText by remember { mutableStateOf(currentUrl) }
     var modelText by remember { mutableStateOf(currentModel) }
     var apiKeyText by remember { mutableStateOf(currentApiKey) }
     var isPasswordVisible by remember { mutableStateOf(false) }
+
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE) }
+    var proactiveAlertsEnabled by remember {
+        mutableStateOf(prefs.getBoolean("proactive_alerts_enabled", true))
+    }
 
     val coroutineScope = rememberCoroutineScope()
     var isTestingConnection by remember { mutableStateOf(false) }
@@ -1389,6 +1441,42 @@ private fun JarvisSettingsDialog(
 
                 HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
 
+                // Part D: Proactive Alerts Toggle Switch
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Proactive Alerts (Messages & Battery)",
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Headphone voice previews & low-battery alerts",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = proactiveAlertsEnabled,
+                        onCheckedChange = { checked ->
+                            proactiveAlertsEnabled = checked
+                            prefs.edit().putBoolean("proactive_alerts_enabled", checked).apply()
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
+
                 // One-Tap System Assistant Setup Buttons (Pillar 1)
                 Text(
                     text = "System Permissions & Roles",
@@ -1435,6 +1523,26 @@ private fun JarvisSettingsDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(text = "Enable Deep App Control (Accessibility)", color = CyanNeon, fontSize = 12.sp)
+                }
+
+                Button(
+                    onClick = onNotificationListenerSetup,
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(0.6.dp, CyanNeon.copy(alpha = 0.4f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "Enable Notification Access & Silent Reply", color = CyanNeon, fontSize = 12.sp)
+                }
+
+                Button(
+                    onClick = onProtocolPermissionsSetup,
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(0.6.dp, CyanNeon.copy(alpha = 0.4f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "Allow DND & Brightness Protocols", color = CyanNeon, fontSize = 12.sp)
                 }
 
                 // Save Button
