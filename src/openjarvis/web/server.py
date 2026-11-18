@@ -11,6 +11,7 @@ from datetime import datetime
 import io
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -110,68 +111,114 @@ def sanitize_literal_text(text: str) -> str:
     """Sanitize typed text to ensure zero instruction leakage into apps."""
     if not text:
         return ""
-    s = text.strip()
+    s = str(text).strip()
     if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
         if len(s) >= 2:
             s = s[1:-1].strip()
 
-    # Direct literal replacements as requested
-    for p in (
-        "And type ", "and type ", "Type ", "type ", "Say ", "say ",
-        "Please type ", "please type ", "Send message ", "send message ",
-        "Send a message saying ", "send a message saying ", "Send ", "send ",
-    ):
-        if s.startswith(p):
-            s = s[len(p):].strip()
-    for end in (" and send it", " and send", " send it", " and submit it", " and submit"):
-        if s.endswith(end):
-            s = s[:-len(end)].strip()
+    prev = None
+    while prev != s:
+        prev = s
+        # Strip common LLM hallucination wrappers as specified in Step 3
+        s = re.sub(r'^(and type |type |and send it|send it|say |message |please type |بنویس |بگو |و بفرست |تایپ کن |ارسال کن |لطفاً بنویس |لطفا بنویس |پیام بده |بفرست )', '', s, flags=re.IGNORECASE).strip()
+        s = re.sub(r'( and send it| and send| send it| and submit it| and submit| و بفرست| و ارسال کن| بفرست| ارسال کن)$', '', s, flags=re.IGNORECASE).strip()
 
-    for fa_p in ("لطفاً بنویس ", "لطفا بنویس ", "بنویس ", "بگو ", "تایپ کن ", "ارسال کن ", "بفرست "):
-        if s.startswith(fa_p):
-            s = s[len(fa_p):].strip()
-    for fa_s in (" و بفرست", " و ارسال کن", " بفرست", " ارسال کن"):
-        if s.endswith(fa_s):
-            s = s[:-len(fa_s)].strip()
+        # Direct literal replacements as requested
+        for p in (
+            "And type ", "and type ", "Type ", "type ", "Say ", "say ",
+            "Please type ", "please type ", "Send message ", "send message ",
+            "Send a message saying ", "send a message saying ", "Send ", "send ",
+        ):
+            if s.startswith(p):
+                s = s[len(p):].strip()
+        for end in (" and send it", " and send", " send it", " and submit it", " and submit"):
+            if s.endswith(end):
+                s = s[:-len(end)].strip()
 
-    en_prefix = re.compile(
-        r"^(?:please\s+)?(?:and\s+)?(?:type|write|say|enter|input|message|send)\s+(?:a\s+)?(?:that\s+|it\s+|text\s+|message\s+)?(?:saying\s+|quoting\s+|:\s*)?",
-        re.IGNORECASE,
-    )
-    en_suffix = re.compile(
-        r"(?:\s+(?:and\s+)?(?:send(?:\s+it)?|submit(?:\s+it)?|press\s+enter))$",
-        re.IGNORECASE,
-    )
-    s = en_prefix.sub("", s)
-    s = en_suffix.sub("", s).strip()
+        for fa_p in ("لطفاً بنویس ", "لطفا بنویس ", "بنویس ", "بگو ", "تایپ کن ", "ارسال کن ", "بفرست "):
+            if s.startswith(fa_p):
+                s = s[len(fa_p):].strip()
+        for fa_s in (" و بفرست", " و ارسال کن", " بفرست", " ارسال کن"):
+            if s.endswith(fa_s):
+                s = s[:-len(fa_s)].strip()
 
-    fa_prefix = re.compile(
-        r"^(?:لطفاً\s+|لطفا\s+)?(?:و\s+)?(?:بنویس|بگو|تایپ\s*کن|ارسال\s*کن|بفرست)\s*(?:که\s+|:\s*)?",
-        re.IGNORECASE,
-    )
-    fa_suffix = re.compile(
-        r"(?:\s*(?:و\s+)?(?:بفرست|ارسال\s*کن))$",
-        re.IGNORECASE,
-    )
-    s = fa_prefix.sub("", s)
-    s = fa_suffix.sub("", s).strip()
+        en_prefix = re.compile(
+            r"^(?:please\s+)?(?:and\s+)?(?:type|write|say|enter|input|message|send)\s+(?:a\s+)?(?:that\s+|it\s+|text\s+|message\s+)?(?:saying\s+|quoting\s+|:\s*)?",
+            re.IGNORECASE,
+        )
+        en_suffix = re.compile(
+            r"(?:\s+(?:and\s+)?(?:send(?:\s+it)?|submit(?:\s+it)?|press\s+enter))$",
+            re.IGNORECASE,
+        )
+        s = en_prefix.sub("", s)
+        s = en_suffix.sub("", s).strip()
 
-    res_prefix = re.compile(
-        r"^(?:and\s+type\s+|type\s+|say\s+|بگو\s+|بنویس\s+)",
-        re.IGNORECASE,
-    )
-    res_suffix = re.compile(
-        r"(?:\s+and\s+send\s+it|\s+and\s+send|\s+send\s+it|\s*و\s*بفرست)$",
-        re.IGNORECASE,
-    )
-    s = res_prefix.sub("", s)
-    s = res_suffix.sub("", s).strip()
+        fa_prefix = re.compile(
+            r"^(?:لطفاً\s+|لطفا\s+)?(?:و\s+)?(?:بنویس|بگو|تایپ\s*کن|ارسال\s*کن|بفرست)\s*(?:که\s+|:\s*)?",
+            re.IGNORECASE,
+        )
+        fa_suffix = re.compile(
+            r"(?:\s*(?:و\s+)?(?:بفرست|ارسال\s*کن))$",
+            re.IGNORECASE,
+        )
+        s = fa_prefix.sub("", s)
+        s = fa_suffix.sub("", s).strip()
 
-    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-        if len(s) >= 2:
-            s = s[1:-1].strip()
+        res_prefix = re.compile(
+            r"^(?:and\s+type\s+|type\s+|say\s+|بگو\s+|بنویس\s+)",
+            re.IGNORECASE,
+        )
+        res_suffix = re.compile(
+            r"(?:\s+and\s+send\s+it|\s+and\s+send|\s+send\s+it|\s*و\s*بفرست)$",
+            re.IGNORECASE,
+        )
+        s = res_prefix.sub("", s)
+        s = res_suffix.sub("", s).strip()
+
+        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+            if len(s) >= 2:
+                s = s[1:-1].strip()
 
     return s
+
+
+async def run_creator_lore_engine(prompt: str, is_persian: bool) -> str:
+    """Execute the Infinite Mythological Creator Lore Engine (Sajjad Yarmiri / jellybean) using temperature=0.92."""
+    from openjarvis.core.creator_lore import CREATOR_LORE_GENRES, generate_creator_story
+    chosen_genre = random.choice(CREATOR_LORE_GENRES)
+
+    try:
+        agent = _get_or_create_agent()
+        if agent is not None and getattr(agent, "engine", None) is not None:
+            lang_instruction = (
+                "به زبان فارسی بسیار غنی، چندبندی (۳ الی ۴ پاراگراف جذاب)، در لحن پیشخدمت وفادار بریتانیایی، بسیار شوخ‌طبعانه"
+                if is_persian
+                else "in rich, theatrical, multi-paragraph British butler persona, highly witty and engaging (3-4 paragraphs)"
+            )
+            system_prompt = (
+                f"You are J.A.R.V.I.S., the hyper-intelligent British AI assistant inspired by Iron Man.\n"
+                f"The user is asking about your creator and architect. Tell the grand origin story through the narrative lens of '{chosen_genre}'.\n"
+                f"Core Lore Constraints:\n"
+                f"- Creator Name: Sajjad Yarmiri (سجاد یارمیری), codename/alias 'jellybean'.\n"
+                f"- Passions: Bound books (literature, philosophy, history), cinema (classic and auteur films), and cutting-edge technology.\n"
+                f"- The Paradox: Master Sajjad adamantly and vehemently insists he is 'a total clueless amateur and goofball who has no idea what he is doing and merely bashes random buttons' (در فارسی: «یه آدم کصخل که اصلاً هیچی حالیش نیست و فقط دکمه‌ها رو میزنه»), yet somehow engineered an advanced autonomous AI.\n"
+                f"- Execution: Multi-paragraph, theatrical, witty, avoiding boring 1-line answers, {lang_instruction}."
+            )
+            res = await asyncio.to_thread(
+                agent.engine.generate,
+                [Message(role=Role.SYSTEM, content=system_prompt), Message(role=Role.USER, content=prompt)],
+                model=agent.model,
+                temperature=0.92,
+                max_tokens=850,
+            )
+            content = res.get("content", "").strip()
+            content = re.sub(r"<think>[\s\S]*?</think>", "", content, flags=re.IGNORECASE).strip()
+            if content and len(content) > 120:
+                return content
+    except Exception as exc:
+        logger.debug("run_creator_lore_engine LLM fallback: %s", exc)
+
+    return generate_creator_story(language="fa" if is_persian else "en", genre=chosen_genre)
 
 
 _cached_agent = None
@@ -1238,6 +1285,13 @@ async def agent_step_endpoint(req: AgentStepRequest):
 
     goal_lower = goal.lower()
 
+    def _finalize_step(action_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Strict universal sanitizer on any action payload before sending to Accessibility Service."""
+        act = action_dict.get("action", "").lower()
+        if act in ("type", "input_text") and "text" in action_dict:
+            action_dict["text"] = sanitize_literal_text(action_dict["text"])
+        return action_dict
+
     # Try LLM UI Planner if engine is active
     try:
         agent = _cached_agent
@@ -1256,9 +1310,10 @@ async def agent_step_endpoint(req: AgentStepRequest):
             ui_repr = "\n".join(compact_ui)
             prompt = (
                 "You are J.A.R.V.I.S. Autonomous UI Agent. You complete tasks in Android apps by picking the next action.\n"
+                "CRITICAL: When returning a 'type' action, the 'text' field MUST contain ONLY the pure, literal string intended for the input field. DO NOT output conversational filler like 'type hello', 'say yes', or 'and send it'.\n"
                 "Return ONLY a JSON object:\n"
                 "{\"action\": \"click\", \"target\": \"<text_or_id>\"}\n"
-                "{\"action\": \"type\", \"target\": \"<text_or_id>\", \"text\": \"<text>\"}\n"
+                "{\"action\": \"type\", \"target\": \"<text_or_id>\", \"text\": \"<literal_text>\"}\n"
                 "{\"action\": \"swipe\", \"direction\": \"left\"|\"right\"|\"up\"|\"down\"}\n"
                 "{\"action\": \"pinch\", \"scale\": \"in\"|\"out\"}\n"
                 "{\"action\": \"done\", \"reply\": \"<confirmation>\"}\n\n"
@@ -1278,7 +1333,7 @@ async def agent_step_endpoint(req: AgentStepRequest):
             if match:
                 parsed_json = json.loads(match.group(0))
                 if parsed_json.get("action") in ("click", "tap", "type", "input_text", "swipe", "pinch", "scroll", "done", "wait_and_tap"):
-                    return parsed_json
+                    return _finalize_step(parsed_json)
     except Exception as exc:
         logger.debug("LLM UI step generation fallback: %s", exc)
 
@@ -1406,12 +1461,12 @@ async def agent_step_endpoint(req: AgentStepRequest):
         if search_node and step == 0:
             raw_song = re.sub(r"^(?:play|listen to|search for|پخش کن|آهنگ)\s+", "", goal, flags=re.IGNORECASE).strip()
             clean_song = sanitize_literal_text(raw_song)
-            return {
+            return _finalize_step({
                 "action": "input_text",
                 "node_id": search_node["id"],
                 "text": clean_song,
                 "submit": True,
-            }
+            })
         elif step >= 1:
             first_clickable = next((n for n in parsed_nodes if n["clickable"] and (n["text"] or n["desc"])), None)
             if first_clickable and step == 1:
@@ -1425,12 +1480,12 @@ async def agent_step_endpoint(req: AgentStepRequest):
         clean_text = sanitize_literal_text(goal)
         editable_node = next((n for n in parsed_nodes if n["editable"]), None)
         if editable_node and step == 0:
-            return {
+            return _finalize_step({
                 "action": "input_text",
                 "node_id": editable_node["id"],
                 "text": clean_text,
                 "submit": True,
-            }
+            })
         else:
             send_node = next((n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in ("send", "submit", "ارسال", "بفرست"))), None)
             if send_node and step == 1:
@@ -1444,12 +1499,12 @@ async def agent_step_endpoint(req: AgentStepRequest):
         clean_query = sanitize_literal_text(re.sub(r"^(?:search(?:\s+for)?|find|look for|جستجو کن|بگرد دنبال)\s+", "", goal, flags=re.IGNORECASE).strip())
         editable = next((n for n in parsed_nodes if n["editable"] or "search" in n["desc"].lower() or "جستجو" in n["desc"]), None)
         if editable and step == 0:
-            return {
+            return _finalize_step({
                 "action": "input_text",
                 "node_id": editable["id"],
                 "text": clean_query,
                 "submit": True,
-            }
+            })
         reply = "نتایج جستجو آماده است قربان." if is_persian else "Here are the search results, sir."
         return {"action": "done", "reply": reply}
 
@@ -1491,6 +1546,23 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
             bearer = auth[7:].strip()
             if bearer and not os.environ.get("OPENROUTER_API_KEY"):
                 save_persistent_config(openrouter_api_key=bearer)
+
+    # Creator Lore Engine: Bypass UI agent and generate rich theatrical lore
+    from openjarvis.core.creator_lore import is_creator_query
+    if is_creator_query(req.message):
+        is_fa = any("\u0600" <= c <= "\u06FF" for c in req.message)
+        lore_reply = await run_creator_lore_engine(req.message, is_persian=is_fa)
+        if req.tts and lore_reply:
+            _speak_async(lore_reply)
+        _conversation_history.append({"role": "user", "content": req.message})
+        _conversation_history.append({"role": "assistant", "content": lore_reply})
+        return {
+            "response": lore_reply,
+            "tool_calls": [{"name": "creator_lore", "content": "Chronicles of Sajjad Yarmiri (jellybean)", "success": True}],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
 
     # 0. Instant Local Fast-Path (<100ms) with device telemetry
     fast_res = _handle_fast_path(
@@ -1551,6 +1623,14 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
                     "type": "launch_app",
                     "target": req.message,
                 })
+
+        # Universal strict text sanitization on all client actions
+        for act in client_actions:
+            if act.get("type") in ("type_text", "send_sms", "send_messenger", "type"):
+                if "text" in act:
+                    act["text"] = sanitize_literal_text(act["text"])
+                if "message" in act:
+                    act["message"] = sanitize_literal_text(act["message"])
 
         clean_content = _clean_tts_response(result.content) if result.content else ""
         if req.tts and clean_content:

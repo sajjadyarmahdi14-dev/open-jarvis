@@ -46,10 +46,12 @@ _CREATOR_PATTERNS = [
     r"\b(?:who(?:\s+is|\s*'s)?\s+(?:your\s+)?creator|who\s+created\s+you|who\s+made\s+you|who\s+built\s+you|who\s+programmed\s+you|who\s+coded\s+you)\b",
     r"\b(?:who\s+is\s+sajjad(?:\s+yarmiri)?|who\s+is\s+jellybean|who(?:'s|\s+is)\s+jelly\s*bean|tell\s+me\s+about\s+(?:your\s+creator|sajjad|jellybean))\b",
     r"\b(?:who\s+invented\s+you|who\s+owns\s+you|who\s+is\s+your\s+master|who\s+is\s+your\s+father|who\s+wrote\s+your\s+code)\b",
+    r"\b(?:sajjad\s*yarmiri|jellybean)\b",
     # Persian patterns
     r"(?:سازند(?:ه|ت|ت\s*کیه|ات\s*کیه|ه\s*ات\s*کیه|ه\s*تو\s*کیه)|کی\s*تو\s*رو\s*ساخته|کی\s*تو\s*رو\s*درست\s*کرده|کی\s*ساختت)",
-    r"(?:سجاد\s*یارمیری\s*کیه|سجاد\s*کیه|جلی\s*بین\s*کیه|جلی‌بین\s*کیه|جلی\s*بین\s*کیست|سجاد\s*یارمیری\s*کیست)",
+    r"(?:سجاد\s*یارمیری\s*کیه|سجاد\s*کیه|جلی\s*بین\s*کیه|جلی‌بین\s*کیه|جلی\s*بین\s*کیست|سجاد\s*یارمیری\s*کیست|jellybean\s*(?:کیه|کیست))",
     r"(?:درباره\s*سازندت|در\s*مورد\s*سازندت|سازندت\s*رو\s*معرفی\s*کن|کی\s*برنامه‌نویسیت\s*کرده|کی\s*کدت\s*رو\s*نوشته)",
+    r"(?:سجاد\s*یارمیری|جلی\s*بین)",
 ]
 
 _CREATOR_REGEX = re.compile("|".join(f"(?:{p})" for p in _CREATOR_PATTERNS), re.IGNORECASE)

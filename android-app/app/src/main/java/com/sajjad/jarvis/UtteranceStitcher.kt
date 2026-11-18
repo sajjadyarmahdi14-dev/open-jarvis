@@ -69,24 +69,33 @@ object UtteranceStitcher {
             }
         }
 
-        // English wrapper regexes
-        val enPrefix = Regex("^(?:please\\s+)?(?:and\\s+)?(?:type|write|say|enter|input|message|send)\\s+(?:that\\s+|it\\s+|text\\s+)?(?:saying\\s+|quoting\\s+|:\\s*)?", RegexOption.IGNORE_CASE)
-        val enSuffix = Regex("(?:\\s+(?:and\\s+)?(?:send(?:\\s+it)?|submit(?:\\s+it)?|press\\s+enter))$", RegexOption.IGNORE_CASE)
-        text = text.replace(enPrefix, "").replace(enSuffix, "").trim()
+        var prev = ""
+        while (prev != text) {
+            prev = text
+            // Strip common LLM hallucination wrappers globally
+            val strictPrefix = Regex("^(?:and type |type |and send it|send it|say |message |بنویس |بگو |و بفرست |تایپ کن |ارسال کن )", RegexOption.IGNORE_CASE)
+            val strictSuffix = Regex("(?: and send it| and send| send it| و بفرست| و ارسال کن| بفرست)$", RegexOption.IGNORE_CASE)
+            text = text.replace(strictPrefix, "").replace(strictSuffix, "").trim()
 
-        // Persian wrapper regexes
-        val faPrefix = Regex("^(?:لطفاً\\s+|لطفا\\s+)?(?:و\\s+)?(?:بنویس|بگو|تایپ\\s*کن|ارسال\\s*کن|بفرست)\\s*(?:که\\s+|:\\s*)?", RegexOption.IGNORE_CASE)
-        val faSuffix = Regex("(?:\\s*(?:و\\s+)?(?:بفرست|ارسال\\s*کن))$", RegexOption.IGNORE_CASE)
-        text = text.replace(faPrefix, "").replace(faSuffix, "").trim()
+            // English wrapper regexes
+            val enPrefix = Regex("^(?:please\\s+)?(?:and\\s+)?(?:type|write|say|enter|input|message|send)\\s+(?:that\\s+|it\\s+|text\\s+)?(?:saying\\s+|quoting\\s+|:\\s*)?", RegexOption.IGNORE_CASE)
+            val enSuffix = Regex("(?:\\s+(?:and\\s+)?(?:send(?:\\s+it)?|submit(?:\\s+it)?|press\\s+enter))$", RegexOption.IGNORE_CASE)
+            text = text.replace(enPrefix, "").replace(enSuffix, "").trim()
 
-        // Standalone residual wrappers
-        val resPrefix = Regex("^(?:and\\s+type\\s+|type\\s+|say\\s+|بگو\\s+|بنویس\\s+)", RegexOption.IGNORE_CASE)
-        val resSuffix = Regex("(?:\\s+and\\s+send\\s+it|\\s+and\\s+send|\\s+send\\s+it|\\s*و\\s*بفرست)$", RegexOption.IGNORE_CASE)
-        text = text.replace(resPrefix, "").replace(resSuffix, "").trim()
+            // Persian wrapper regexes
+            val faPrefix = Regex("^(?:لطفاً\\s+|لطفا\\s+)?(?:و\\s+)?(?:بنویس|بگو|تایپ\\s*کن|ارسال\\s*کن|بفرست)\\s*(?:که\\s+|:\\s*)?", RegexOption.IGNORE_CASE)
+            val faSuffix = Regex("(?:\\s*(?:و\\s+)?(?:بفرست|ارسال\\s*کن))$", RegexOption.IGNORE_CASE)
+            text = text.replace(faPrefix, "").replace(faSuffix, "").trim()
 
-        if ((text.startsWith("\"") && text.endsWith("\"")) || (text.startsWith("'") && text.endsWith("'"))) {
-            if (text.length >= 2) {
-                text = text.substring(1, text.length - 1).trim()
+            // Standalone residual wrappers
+            val resPrefix = Regex("^(?:and\\s+type\\s+|type\\s+|say\\s+|بگو\\s+|بنویس\\s+)", RegexOption.IGNORE_CASE)
+            val resSuffix = Regex("(?:\\s+and\\s+send\\s+it|\\s+and\\s+send|\\s+send\\s+it|\\s*و\\s*بفرست)$", RegexOption.IGNORE_CASE)
+            text = text.replace(resPrefix, "").replace(resSuffix, "").trim()
+
+            if ((text.startsWith("\"") && text.endsWith("\"")) || (text.startsWith("'") && text.endsWith("'"))) {
+                if (text.length >= 2) {
+                    text = text.substring(1, text.length - 1).trim()
+                }
             }
         }
 
