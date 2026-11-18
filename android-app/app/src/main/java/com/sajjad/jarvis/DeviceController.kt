@@ -372,7 +372,20 @@ object DeviceController {
                     if (query.isNotBlank()) playSong(context, query)
                 }
 
-                // In-App Accessibility Automation
+                // In-App Accessibility Automation & Closed-Loop Agent
+                "autonomous_agent", "agent_goal", "in_app_task" -> {
+                    val goal = act.optString("goal", "")
+                    val targetApp = act.optString("target_app", act.optString("target", act.optString("package", "")))
+                    val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                    val serverUrl = prefs.getString("server_url", "http://104.252.175.159:8765") ?: "http://104.252.175.159:8765"
+
+                    if (targetApp.isNotBlank()) {
+                        AppLauncher.launchApp(context, targetApp)
+                    }
+                    JarvisAccessibilityService.instance?.runAgentLoop(goal, serverUrl) { reply ->
+                        Log.i(TAG, "Autonomous agent completed: $reply")
+                    }
+                }
                 "type_text" -> {
                     val text = act.optString("text", "")
                     val autoSend = act.optBoolean("auto_send", false)

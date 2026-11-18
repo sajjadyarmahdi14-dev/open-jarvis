@@ -855,6 +855,125 @@ def test_multi_turn_conversation_rolling_history():
     assert hist[-1]["role"] == "assistant"
 
 
+def test_creator_lore_engine_stories():
+    """Verify dynamic mythological & comedic creator lore engine (Sajjad Yarmiri / jellybean)."""
+    client = TestClient(app)
+
+    # English creator query
+    r_en = client.post("/api/chat", json={"message": "Who created you?"})
+    assert r_en.status_code == 200
+    d_en = r_en.json()
+    assert d_en.get("fast_path") is True
+    resp_en = d_en["response"]
+    assert "Sajjad Yarmiri" in resp_en
+    assert "jellybean" in resp_en
+    assert "\n\n" in resp_en  # Multi-paragraph verification
+    assert any(term in resp_en.lower() for term in ("book", "cinema", "film", "technology"))
+    assert any(term in resp_en.lower() for term in ("goofball", "amateur", "clueless", "accident", "luck"))
+
+    # Persian creator query
+    r_fa = client.post("/api/chat", json={"message": "سازندت کیه؟"})
+    assert r_fa.status_code == 200
+    d_fa = r_fa.json()
+    assert d_fa.get("fast_path") is True
+    resp_fa = d_fa["response"]
+    assert "سجاد یارمیری" in resp_fa
+    assert "jellybean" in resp_fa or "جلی‌بین" in resp_fa
+    assert "\n\n" in resp_fa  # Multi-paragraph verification
+    assert any(term in resp_fa for term in ("کتاب", "سینما", "فیلم", "تکنولوژی"))
+    assert any(term in resp_fa for term in ("آماتور", "کصخل", "شانسی", "معمولی", "دکمه‌ها"))
+
+
+def test_agent_step_endpoint_and_strict_sanitizer():
+    """Verify /api/agent/step autonomous closed-loop planning and literal text sanitizer."""
+    from openjarvis.web.server import sanitize_literal_text
+
+    # 1. Test Strict Literal Text Sanitizer
+    assert sanitize_literal_text("and type hello and send it") == "hello"
+    assert sanitize_literal_text("type I will be there at 5 and send it") == "I will be there at 5"
+    assert sanitize_literal_text("بنویس سلام چطوری و بفرست") == "سلام چطوری"
+    assert sanitize_literal_text('"Hello World"') == "Hello World"
+
+    client = TestClient(app)
+
+    # 2. Camera photo step planner
+    ui_camera = [
+        '[0] FrameLayout | text="" | desc="" | clickable=false | editable=false | checked=false | bounds=(0,0)',
+        '[1] ImageButton | text="" | desc="Camera Shutter" | clickable=true | editable=false | checked=false | bounds=(450,1800)',
+    ]
+    r_cam = client.post("/api/agent/step", json={
+        "goal": "take a picture",
+        "package": "com.android.camera",
+        "step": 0,
+        "ui_tree": ui_camera,
+    })
+    assert r_cam.status_code == 200
+    d_cam = r_cam.json()
+    assert d_cam.get("action") == "wait_and_tap"
+    assert d_cam.get("node_id") == 1
+
+    # 3. In-App search and media input
+    ui_search = [
+        '[0] EditText | text="" | desc="Search YouTube" | clickable=true | editable=true | checked=false | bounds=(100,50)',
+        '[1] TextView | text="Search" | desc="Submit Search" | clickable=true | editable=false | checked=false | bounds=(900,50)',
+    ]
+    r_search = client.post("/api/agent/step", json={
+        "goal": "play Interstellar theme",
+        "package": "com.google.android.youtube",
+        "step": 0,
+        "ui_tree": ui_search,
+    })
+    assert r_search.status_code == 200
+    d_search = r_search.json()
+    assert d_search.get("action") == "input_text"
+    assert d_search.get("node_id") == 0
+    assert "Interstellar theme" in d_search.get("text", "")
+    assert d_search.get("submit") is True
+
+    # 4. Final step limit
+    r_done = client.post("/api/agent/step", json={
+        "goal": "anything",
+        "step": 7,
+        "ui_tree": [],
+    })
+    assert r_done.status_code == 200
+    assert r_done.json().get("action") == "done"
+
+
+def test_in_app_multi_step_goal_routing():
+    """Verify autonomous agent routing for in-app multi-step instructions."""
+    client = TestClient(app)
+
+    # Register sample apps
+    client.post("/api/device/apps", json=[
+        {"label": "WhatsApp", "package": "com.whatsapp", "variants": ["واتساپ"]},
+        {"label": "Snapp", "package": "cab.snapp.passenger", "variants": ["اسنپ"]},
+        {"label": "Music", "package": "com.miui.player", "variants": ["موزیک"]},
+    ])
+
+    # 1. In-app goal English
+    r_in_en = client.post("/api/chat", json={"message": "open WhatsApp and message John hello"})
+    assert r_in_en.status_code == 200
+    d_in_en = r_in_en.json()
+    assert d_in_en.get("fast_path") is True
+    assert any(a.get("type") == "autonomous_agent" and "message john hello" in a.get("goal", "").lower() for a in d_in_en.get("client_actions", []))
+
+    # 2. In-app goal Persian
+    r_in_fa = client.post("/api/chat", json={"message": "توی اسنپ یه ماشین بگیر"})
+    assert r_in_fa.status_code == 200
+    d_in_fa = r_in_fa.json()
+    assert d_in_fa.get("fast_path") is True
+    assert any(a.get("type") == "autonomous_agent" for a in d_in_fa.get("client_actions", []))
+
+    # 3. Local music priority
+    r_mus = client.post("/api/chat", json={"message": "open music"})
+    assert r_mus.status_code == 200
+    d_mus = r_mus.json()
+    assert d_mus.get("fast_path") is True
+    assert any(a.get("type") == "launch_app" and a.get("package") == "com.miui.player" for a in d_mus.get("client_actions", []))
+
+
+
 
 
 

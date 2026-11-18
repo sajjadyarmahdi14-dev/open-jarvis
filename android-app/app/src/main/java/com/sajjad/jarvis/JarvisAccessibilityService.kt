@@ -16,6 +16,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 
 class JarvisAccessibilityService : AccessibilityService() {
@@ -58,6 +64,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     // -------------------------------------------------------------------------
 
     fun typeText(text: String, autoSend: Boolean = false): Boolean {
+        val cleanText = UtteranceStitcher.sanitizeLiteralText(text)
         val root = rootInActiveWindow ?: return false
         val targetNode = findEditableNode(root) ?: root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
 
@@ -67,10 +74,10 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
 
         val arguments = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cleanText)
         }
         val success = targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-        Log.i(TAG, "typeText performed: success=$success, text='$text'")
+        Log.i(TAG, "typeText performed: success=$success, text='$cleanText'")
 
         if (autoSend) {
             serviceScope.launch {
@@ -270,5 +277,214 @@ class JarvisAccessibilityService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(path, 0, 300)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchGesture(gesture, null, null)
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. Live Semantic Screen Serializer & Closed-Loop Autonomous UI Execution
+    // -------------------------------------------------------------------------
+
+    fun serializeCurrentWindow(): Pair<List<String>, Map<Int, AccessibilityNodeInfo>> {
+        val root = rootInActiveWindow ?: return Pair(emptyList(), emptyMap())
+        val nodeMap = mutableMapOf<Int, AccessibilityNodeInfo>()
+        val serialized = mutableListOf<String>()
+        var counter = 0
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            if (node == null || !node.isVisibleToUser) return
+
+            val text = node.text?.toString()?.replace("\n", " ")?.trim() ?: ""
+            val desc = node.contentDescription?.toString()?.replace("\n", " ")?.trim() ?: ""
+            val isClickable = node.isClickable
+            val isEditable = node.isEditable
+            val isCheckable = node.isCheckable
+            val isChecked = node.isChecked
+            val className = node.className?.toString()?.substringAfterLast(".") ?: "View"
+
+            val isInformative = text.isNotEmpty() || desc.isNotEmpty() || isClickable || isEditable || isCheckable
+            if (isInformative) {
+                val id = counter++
+                nodeMap[id] = node
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                val line = "[$id] $className | text=\"$text\" | desc=\"$desc\" | clickable=$isClickable | editable=$isEditable | checked=$isChecked | bounds=(${rect.left},${rect.top})"
+                serialized.add(line)
+            }
+
+            for (i in 0 until node.childCount) {
+                traverse(node.getChild(i))
+            }
+        }
+
+        traverse(root)
+        return Pair(serialized, nodeMap)
+    }
+
+    fun executeAtomicAction(
+        actionType: String,
+        params: JSONObject,
+        nodeMap: Map<Int, AccessibilityNodeInfo>
+    ): Boolean {
+        Log.i(TAG, "executeAtomicAction: type=$actionType, params=$params")
+        return when (actionType.lowercase(Locale.ROOT)) {
+            "tap" -> {
+                val nodeId = params.optInt("node_id", -1)
+                val node = if (nodeId >= 0) nodeMap[nodeId] else null
+                if (node != null) {
+                    clickNodeOrParent(node)
+                } else {
+                    val targetText = params.optString("target_text", "")
+                    if (targetText.isNotBlank()) clickElement(targetText) else false
+                }
+            }
+            "input_text" -> {
+                val rawText = params.optString("text", "")
+                val cleanText = UtteranceStitcher.sanitizeLiteralText(rawText)
+                val submit = params.optBoolean("submit", true)
+                val nodeId = params.optInt("node_id", -1)
+                val node = if (nodeId >= 0) nodeMap[nodeId] else findEditableNode(rootInActiveWindow)
+                if (node != null) {
+                    val args = Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cleanText)
+                    }
+                    val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                    if (submit) {
+                        serviceScope.launch {
+                            delay(350)
+                            clickSendButton()
+                        }
+                    }
+                    ok
+                } else {
+                    typeText(cleanText, submit)
+                }
+            }
+            "scroll" -> {
+                val dir = params.optString("direction", "down").lowercase(Locale.ROOT)
+                if (dir == "up") scrollUp() else scrollDown()
+            }
+            "wait_and_tap" -> {
+                val delayMs = params.optLong("delay_ms", 1500L)
+                val nodeId = params.optInt("node_id", -1)
+                serviceScope.launch {
+                    delay(delayMs)
+                    val target = if (nodeId >= 0) nodeMap[nodeId] else null
+                    if (target != null) {
+                        clickNodeOrParent(target)
+                    } else {
+                        clickSendButton()
+                    }
+                }
+                true
+            }
+            "media_key" -> {
+                val key = params.optString("key", "PLAY").uppercase(Locale.ROOT)
+                when (key) {
+                    "PLAY" -> DeviceController.playMusic(this)
+                    "PAUSE" -> DeviceController.pauseMusic(this)
+                    "NEXT" -> DeviceController.nextTrack(this)
+                    "PREVIOUS" -> DeviceController.previousTrack(this)
+                }
+                true
+            }
+            "local_audio_uri" -> {
+                val query = params.optString("query", "")
+                if (query.isNotBlank()) {
+                    DeviceController.playSong(this, query)
+                }
+                true
+            }
+            "back" -> goBack()
+            "home" -> goHome()
+            "done" -> true
+            else -> false
+        }
+    }
+
+    private fun postAgentStep(serverUrl: String, payload: JSONObject): JSONObject? {
+        return try {
+            val cleanUrl = serverUrl.trim().removeSuffix("/")
+            val url = URL("$cleanUrl/api/agent/step")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            conn.setRequestProperty("Accept", "application/json")
+            conn.connectTimeout = 6000
+            conn.readTimeout = 12000
+            conn.doOutput = true
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+            val code = conn.responseCode
+            if (code in 200..299) {
+                val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                JSONObject(respStr)
+            } else {
+                Log.w(TAG, "postAgentStep HTTP $code")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "postAgentStep error: ${e.message}")
+            null
+        }
+    }
+
+    fun runAgentLoop(
+        goal: String,
+        serverUrl: String,
+        onComplete: ((String) -> Unit)? = null
+    ) {
+        serviceScope.launch(Dispatchers.IO) {
+            val maxSteps = 8
+            var currentStep = 0
+            var lastReply = ""
+
+            while (currentStep < maxSteps) {
+                if (currentStep == 0) delay(1000)
+
+                val (serializedNodes, nodeMap) = withContext(Dispatchers.Main) {
+                    serializeCurrentWindow()
+                }
+
+                val currentPkg = withContext(Dispatchers.Main) {
+                    rootInActiveWindow?.packageName?.toString() ?: ""
+                }
+
+                val jsonArray = JSONArray()
+                serializedNodes.forEach { jsonArray.put(it) }
+
+                val payload = JSONObject().apply {
+                    put("goal", goal)
+                    put("package", currentPkg)
+                    put("step", currentStep)
+                    put("ui_tree", jsonArray)
+                }
+
+                val stepResponse = postAgentStep(serverUrl, payload)
+                if (stepResponse == null) {
+                    Log.w(TAG, "Agent step $currentStep returned null response from server")
+                    break
+                }
+
+                val actionType = stepResponse.optString("action", "done")
+                lastReply = stepResponse.optString("reply", "")
+
+                if (actionType.equals("done", ignoreCase = true)) {
+                    Log.i(TAG, "Agent goal completed at step $currentStep: reply='$lastReply'")
+                    break
+                }
+
+                withContext(Dispatchers.Main) {
+                    executeAtomicAction(actionType, stepResponse, nodeMap)
+                }
+
+                currentStep++
+                delay(1200)
+            }
+
+            withContext(Dispatchers.Main) {
+                val finalMsg = if (lastReply.isNotBlank()) lastReply else "Task completed, sir."
+                onComplete?.invoke(finalMsg)
+                JarvisVoiceService.instance?.speakBritish(finalMsg)
+            }
+        }
     }
 }

@@ -21,7 +21,8 @@ data class AppEntry(
     val label: String,
     val normalizedLabel: String,
     val packageName: String,
-    val shortPackageToken: String
+    val shortPackageToken: String,
+    val bilingualVariants: List<String> = emptyList()
 )
 
 object AppLauncher {
@@ -203,6 +204,61 @@ object AppLauncher {
         return 1.0 - (d[s1.length][s2.length].toDouble() / maxLen.toDouble())
     }
 
+    fun generateVariants(label: String, packageName: String): List<String> {
+        val variants = mutableListOf<String>()
+        val l = label.lowercase(Locale.ROOT)
+        val token = packageName.substringAfterLast(".").lowercase(Locale.ROOT)
+
+        variants.add(l)
+        variants.add(token)
+
+        when {
+            l.contains("music") || token.contains("music") || token.contains("player") -> {
+                variants.addAll(listOf("موزیک", "آهنگ", "اهنگ", "music", "player", "اپ موزیک"))
+            }
+            l.contains("camera") || token.contains("camera") -> {
+                variants.addAll(listOf("دوربین", "camera", "شاتر", "عکاسی"))
+            }
+            l.contains("gallery") || l.contains("photos") || token.contains("gallery") -> {
+                variants.addAll(listOf("گالری", "عکس", "photos", "gallery"))
+            }
+            l.contains("telegram") || token.contains("telegram") -> {
+                variants.addAll(listOf("تلگرام", "telegram"))
+            }
+            l.contains("whatsapp") || token.contains("whatsapp") -> {
+                variants.addAll(listOf("واتساپ", "واتس اپ", "whatsapp"))
+            }
+            l.contains("instagram") || token.contains("instagram") -> {
+                variants.addAll(listOf("اینستاگرام", "اینستا", "instagram"))
+            }
+            l.contains("settings") || token.contains("settings") -> {
+                variants.addAll(listOf("تنظیمات", "settings"))
+            }
+            l.contains("notes") || token.contains("notes") || token.contains("keep") -> {
+                variants.addAll(listOf("یادداشت", "نوت", "notes", "notepad"))
+            }
+            l.contains("clock") || token.contains("clock") || token.contains("deskclock") -> {
+                variants.addAll(listOf("ساعت", "آلارم", "clock", "alarm"))
+            }
+            l.contains("file") || token.contains("file") || token.contains("explorer") -> {
+                variants.addAll(listOf("فایل", "مدیریت فایل", "فایل منیجر", "files"))
+            }
+            l.contains("calculator") || token.contains("calculator") -> {
+                variants.addAll(listOf("ماشین حساب", "calculator"))
+            }
+            l.contains("message") || token.contains("mms") || token.contains("sms") -> {
+                variants.addAll(listOf("پیامک", "پیام‌ها", "پیام", "sms", "messages"))
+            }
+            l.contains("phone") || token.contains("dialer") -> {
+                variants.addAll(listOf("تلفن", "تماس", "phone", "dialer"))
+            }
+            l.contains("browser") || token.contains("browser") || token.contains("chrome") -> {
+                variants.addAll(listOf("مرورگر", "کروم", "browser", "chrome"))
+            }
+        }
+        return variants.distinct()
+    }
+
     /**
      * Dynamically scan and index all installed launchable applications.
      */
@@ -227,7 +283,8 @@ object AppLauncher {
                 }
                 val norm = normalizeAlphanumeric(label)
                 val token = pkg.substringAfterLast(".").lowercase(Locale.ROOT)
-                entries.add(AppEntry(label, norm, pkg, token))
+                val variants = generateVariants(label, pkg)
+                entries.add(AppEntry(label, norm, pkg, token, variants))
             }
 
             val installed = pm.getInstalledApplications(PackageManager.GET_META_DATA)
@@ -243,7 +300,8 @@ object AppLauncher {
                     }
                     val norm = normalizeAlphanumeric(label)
                     val token = pkg.substringAfterLast(".").lowercase(Locale.ROOT)
-                    entries.add(AppEntry(label, norm, pkg, token))
+                    val variants = generateVariants(label, pkg)
+                    entries.add(AppEntry(label, norm, pkg, token, variants))
                 }
             }
 
@@ -278,7 +336,8 @@ object AppLauncher {
                 val sb = StringBuilder("[")
                 dynamicAppIndex.forEachIndexed { i, entry ->
                     val escapedLabel = entry.label.replace("\"", "\\\"")
-                    sb.append("""{"label":"$escapedLabel","package":"${entry.packageName}"}""")
+                    val variantsJson = entry.bilingualVariants.joinToString(",") { """"${it.replace("\"", "\\\"")}"""" }
+                    sb.append("""{"label":"$escapedLabel","package":"${entry.packageName}","variants":[$variantsJson]}""")
                     if (i < dynamicAppIndex.size - 1) sb.append(",")
                 }
                 sb.append("]")
@@ -336,22 +395,27 @@ object AppLauncher {
                 } catch (_: Exception) {}
             }
 
-            // Layer B: System & Bilingual Aliases check
-            val candidatePkgs = systemAliases[clean] ?: systemAliases[normQuery]
-            if (candidatePkgs != null) {
-                for (pkg in candidatePkgs) {
-                    val res = tryLaunchPackage(context, pkg, clean)
-                    if (res != null) return res
-                }
+            // Layer A: Dynamic Package Index First (prioritize local installed apps)
+            // 1. Exact case-insensitive label match or exact variant match
+            var matched = dynamicAppIndex.firstOrNull { entry ->
+                entry.label.equals(clean, ignoreCase = true) ||
+                entry.bilingualVariants.any { it.equals(clean, ignoreCase = true) }
             }
-
-            // Layer A: Dynamic Package Index Matching
-            // 1. Exact case-insensitive label match
-            var matched = dynamicAppIndex.firstOrNull { it.label.equals(clean, ignoreCase = true) }
 
             // 2. Normalized alphanumeric match
             if (matched == null && normQuery.isNotEmpty()) {
                 matched = dynamicAppIndex.firstOrNull { it.normalizedLabel == normQuery }
+            }
+
+            // Layer B: System & Bilingual Aliases check
+            if (matched == null) {
+                val candidatePkgs = systemAliases[clean] ?: systemAliases[normQuery]
+                if (candidatePkgs != null) {
+                    for (pkg in candidatePkgs) {
+                        val res = tryLaunchPackage(context, pkg, clean)
+                        if (res != null) return res
+                    }
+                }
             }
 
             // 3. Prefix or token match

@@ -11,6 +11,7 @@ from datetime import datetime
 import io
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -94,6 +95,63 @@ class ConfigUpdateRequest(BaseModel):
     openrouter_model: Optional[str] = None
     gemini_model: Optional[str] = None
     active_model: Optional[str] = None
+
+
+class AgentStepRequest(BaseModel):
+    goal: str
+    package: Optional[str] = None
+    step: int = 0
+    ui_tree: List[str] = []
+    history: Optional[List[Dict[str, Any]]] = None
+
+
+def sanitize_literal_text(text: str) -> str:
+    """Sanitize typed text to ensure zero instruction leakage into apps."""
+    if not text:
+        return ""
+    s = text.strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        if len(s) >= 2:
+            s = s[1:-1].strip()
+
+    en_prefix = re.compile(
+        r"^(?:please\s+)?(?:and\s+)?(?:type|write|say|enter|input|message|send)\s+(?:that\s+|it\s+|text\s+)?(?:saying\s+|quoting\s+|:\s*)?",
+        re.IGNORECASE,
+    )
+    en_suffix = re.compile(
+        r"(?:\s+(?:and\s+)?(?:send(?:\s+it)?|submit(?:\s+it)?|press\s+enter))$",
+        re.IGNORECASE,
+    )
+    s = en_prefix.sub("", s)
+    s = en_suffix.sub("", s).strip()
+
+    fa_prefix = re.compile(
+        r"^(?:لطفاً\s+|لطفا\s+)?(?:و\s+)?(?:بنویس|بگو|تایپ\s*کن|ارسال\s*کن|بفرست)\s*(?:که\s+|:\s*)?",
+        re.IGNORECASE,
+    )
+    fa_suffix = re.compile(
+        r"(?:\s*(?:و\s+)?(?:بفرست|ارسال\s*کن))$",
+        re.IGNORECASE,
+    )
+    s = fa_prefix.sub("", s)
+    s = fa_suffix.sub("", s).strip()
+
+    res_prefix = re.compile(
+        r"^(?:and\s+type\s+|type\s+|say\s+|بگو\s+|بنویس\s+)",
+        re.IGNORECASE,
+    )
+    res_suffix = re.compile(
+        r"(?:\s+and\s+send\s+it|\s+and\s+send|\s+send\s+it|\s*و\s*بفرست)$",
+        re.IGNORECASE,
+    )
+    s = res_prefix.sub("", s)
+    s = res_suffix.sub("", s).strip()
+
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        if len(s) >= 2:
+            s = s[1:-1].strip()
+
+    return s
 
 
 _cached_agent = None
@@ -238,6 +296,18 @@ def _handle_fast_path(
 
     cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", norm).strip()
     raw_cleaned = re.sub(r"[^\w\s\u0600-\u06FF]", "", msg_lower).strip()
+
+    # -2. Dynamic Mythological & Comedic Creator Lore Engine (Sajjad Yarmiri / jellybean)
+    from openjarvis.core.creator_lore import is_creator_query, generate_creator_story
+    if is_creator_query(raw_cleaned) or is_creator_query(norm) or is_creator_query(msg):
+        reply = generate_creator_story(language="fa" if is_persian else "en")
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "creator_lore", "content": "Chronicles of Sajjad Yarmiri (jellybean)", "success": True}],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
 
     # -1. Sleep / Standby Mode Triggers (<5ms match, ZERO LLM call!)
     sleep_terms = (
@@ -537,11 +607,11 @@ def _handle_fast_path(
         }
 
     # Send Messenger (Telegram / WhatsApp)
-    m_msg_en = re.search(r"\b(?:send\s+)?(telegram|whatsapp)\s+(?:message\s+)?(?:to\s+)?([a-zA-Z0-9_@+ -]+?)\s+(?:saying|message|that)?\s*(.+)$", norm)
+    m_msg_en = re.search(r"\b(?:send\s+(?:a\s+)?(?:telegram|whatsapp)|(?:telegram|whatsapp)\s+message)\s+(?:message\s+)?(?:to\s+)?([a-zA-Z0-9_@+ -]+?)\s+(?:saying|message|that)?\s*(.+)$", norm)
     if m_msg_en:
-        app_name = m_msg_en.group(1).lower()
-        contact = m_msg_en.group(2).strip()
-        message = m_msg_en.group(3).strip()
+        app_name = "whatsapp" if "whatsapp" in norm else "telegram"
+        contact = m_msg_en.group(1).strip()
+        message = m_msg_en.group(2).strip()
         reply = f"Sending {app_name.capitalize()} message to {contact}, sir."
         return {
             "response": reply,
@@ -596,6 +666,47 @@ def _handle_fast_path(
             "fast_path": True,
         }
 
+    # 2.8 Autonomous In-App Multi-Step Agent Routing
+    m_in_en = re.match(r"^(?:in|inside|on|open)\s+([a-zA-Z0-9_\- ]+?)(?:\s+and|\s*,|\s+to|\s+please)?\s+(.+)$", norm, re.IGNORECASE)
+    m_in_fa = re.match(r"^(?:توی|داخل|در|برو\s+توی|برو\s+داخل|باز\s*کن)\s+(.+?)\s+(?:و\s+)?(.+)$", norm)
+    app_hint = None
+    in_app_goal = None
+    if m_in_en:
+        app_hint = m_in_en.group(1).strip()
+        in_app_goal = m_in_en.group(2).strip()
+    elif m_in_fa:
+        app_hint = m_in_fa.group(1).strip()
+        in_app_goal = m_in_fa.group(2).strip()
+
+    if app_hint and in_app_goal and len(app_hint) <= 30 and len(in_app_goal) >= 3 and app_hint.lower() not in ("my", "the", "a", "an", "this", "screen", "page"):
+        target_pkg = None
+        target_label = app_hint
+        hint_lower = app_hint.lower()
+
+        for d in _device_apps:
+            dlbl = d.get("label", "").lower()
+            dpkg = d.get("package", "")
+            dvars = [v.lower() for v in d.get("variants", [])] if isinstance(d.get("variants"), list) else []
+            if dlbl == hint_lower or hint_lower in dlbl or hint_lower in dvars or dpkg.lower().endswith(f".{hint_lower}"):
+                target_pkg = dpkg
+                target_label = d.get("label", app_hint)
+                break
+
+        reply = (
+            f"چشم قربان، در حال باز کردن {target_label} و اجرای «{in_app_goal}»."
+            if is_persian
+            else f"Right away, sir. Opening {target_label} to execute '{in_app_goal}'."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "autonomous_agent", "content": f"In-app agent goal: {in_app_goal} in {target_label}", "success": True}],
+            "turns": 1,
+            "client_actions": [
+                {"type": "autonomous_agent", "goal": in_app_goal, "target_app": target_pkg or target_label, "package": target_pkg or ""}
+            ],
+            "fast_path": True,
+        }
+
     # 3. Open / Launch App: English & Persian with Dynamic Device Apps Matching
     m_en = re.match(r"^(?:open|launch|start|run|play)\s+(?:the\s+)?([a-zA-Z0-9_\- ]+?)[.!?]*$", norm, re.IGNORECASE)
     m_fa = re.match(r"^(?:برنامه\s+|بازی\s+)?(.+?)\s*(?:رو|را)?\s*(?:باز\s*کن|اجرا\s*کن|بالا\s*بیار)[.!?]*$", norm)
@@ -622,12 +733,25 @@ def _handle_fast_path(
 
         pkg = ""
         target_lower = app_target.lower()
-        for d_app in _device_apps:
-            lbl = d_app.get("label", "").lower()
-            p_name = d_app.get("package", "")
-            if lbl == target_lower or target_lower in lbl or p_name.lower().endswith(f".{target_lower}"):
-                pkg = p_name
-                break
+
+        # Respect explicit local music requests over streaming apps
+        if target_lower in ("music", "موزیک", "آهنگ", "اهنگ", "اپ موزیک"):
+            for d_app in _device_apps:
+                lbl = d_app.get("label", "").lower()
+                p_name = d_app.get("package", "").lower()
+                if ("music" in lbl or "player" in p_name or "miui.player" in p_name) and "youtube" not in p_name:
+                    pkg = d_app.get("package", "")
+                    app_target = d_app.get("label", app_target)
+                    break
+
+        if not pkg:
+            for d_app in _device_apps:
+                lbl = d_app.get("label", "").lower()
+                p_name = d_app.get("package", "")
+                dvars = [v.lower() for v in d_app.get("variants", [])] if isinstance(d_app.get("variants"), list) else []
+                if lbl == target_lower or target_lower in lbl or target_lower in dvars or p_name.lower().endswith(f".{target_lower}"):
+                    pkg = p_name
+                    break
 
         if not pkg:
             res = AndroidLaunchAppTool().execute(app=app_target)
@@ -1040,6 +1164,139 @@ async def register_device_apps(request: Request):
 async def get_device_apps():
     """Retrieve current dynamic device apps index."""
     return {"status": "ok", "apps": _device_apps, "count": len(_device_apps)}
+
+
+@app.post("/api/agent/step")
+async def agent_step_endpoint(req: AgentStepRequest):
+    """Closed-loop autonomous UI step planner for ANY Android application."""
+    goal = req.goal.strip()
+    pkg = req.package or ""
+    step = req.step
+    ui_tree = req.ui_tree or []
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in goal)
+
+    logger.info("Agent Step %d: goal='%s', pkg='%s', nodes=%d", step, goal, pkg, len(ui_tree))
+
+    if step >= 7:
+        reply = "عملیات مورد نظر انجام شد قربان." if is_persian else "Target action has been completed, sir."
+        return {"action": "done", "reply": reply}
+
+    # Parse node lines
+    parsed_nodes = []
+    for line in ui_tree:
+        m = re.match(r"^\[(\d+)\]\s*(\w+)\s*\|\s*text=\"(.*?)\"\s*\|\s*desc=\"(.*?)\"\s*\|\s*clickable=(\w+)\s*\|\s*editable=(\w+)\s*\|\s*checked=(\w+)\s*\|\s*bounds=\((-?\d+),(-?\d+)\)", line)
+        if m:
+            parsed_nodes.append({
+                "id": int(m.group(1)),
+                "class": m.group(2),
+                "text": m.group(3),
+                "desc": m.group(4),
+                "clickable": m.group(5).lower() == "true",
+                "editable": m.group(6).lower() == "true",
+                "checked": m.group(7).lower() == "true",
+                "x": int(m.group(8)),
+                "y": int(m.group(9)),
+                "raw": line,
+            })
+
+    goal_lower = goal.lower()
+
+    # 1. Camera / Photo Goals
+    cam_terms = ("photo", "picture", "camera", "عکس", "تصویر", "شاتر")
+    if any(t in goal_lower for t in cam_terms):
+        shutter_keywords = ("shutter", "capture", "take", "عکس", "شاتر", "camera")
+        shutter_node = next(
+            (n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in shutter_keywords)),
+            None
+        )
+        if not shutter_node:
+            shutter_node = next((n for n in parsed_nodes if n["clickable"] and n["y"] > 1200), None)
+
+        if shutter_node and step == 0:
+            return {
+                "action": "wait_and_tap",
+                "node_id": shutter_node["id"],
+                "delay_ms": 1500,
+                "countdown_speech": True,
+            }
+        else:
+            reply = "عکس با موفقیت ثبت شد قربان." if is_persian else "Photo captured successfully, sir."
+            return {"action": "done", "reply": reply}
+
+    # 2. Media Playback Goals
+    media_terms = ("play", "music", "song", "track", "پخش", "آهنگ", "موزیک")
+    if any(t in goal_lower for t in media_terms):
+        if "pause" in goal_lower or "متوقف" in goal_lower or "قطع" in goal_lower:
+            reply = "پخش متوقف شد قربان." if is_persian else "Playback paused, sir."
+            return {"action": "media_key", "key": "PAUSE", "reply": reply}
+        if "next" in goal_lower or "بعدی" in goal_lower:
+            reply = "ترک بعدی در حال پخش است قربان." if is_persian else "Skipping to next track, sir."
+            return {"action": "media_key", "key": "NEXT", "reply": reply}
+        if "previous" in goal_lower or "قبلی" in goal_lower:
+            reply = "ترک قبلی در حال پخش است قربان." if is_persian else "Returning to previous track, sir."
+            return {"action": "media_key", "key": "PREVIOUS", "reply": reply}
+
+        search_node = next((n for n in parsed_nodes if n["editable"] or "search" in n["desc"].lower() or "search" in n["text"].lower() or "جستجو" in n["text"] or "جستجو" in n["desc"]), None)
+        if search_node and step == 0:
+            raw_song = re.sub(r"^(?:play|listen to|search for|پخش کن|آهنگ)\s+", "", goal, flags=re.IGNORECASE).strip()
+            clean_song = sanitize_literal_text(raw_song)
+            return {
+                "action": "input_text",
+                "node_id": search_node["id"],
+                "text": clean_song,
+                "submit": True,
+            }
+        elif step >= 1:
+            first_clickable = next((n for n in parsed_nodes if n["clickable"] and (n["text"] or n["desc"])), None)
+            if first_clickable and step == 1:
+                return {"action": "tap", "node_id": first_clickable["id"]}
+            reply = "در حال پخش آهنگ انتخابی شما قربان." if is_persian else "Playing requested music, sir."
+            return {"action": "done", "reply": reply}
+
+    # 3. Typing / Messaging Goals
+    type_terms = ("type", "write", "send", "message", "say", "بنویس", "ارسال", "بفرست", "بگو", "پیام")
+    if any(t in goal_lower for t in type_terms):
+        clean_text = sanitize_literal_text(goal)
+        editable_node = next((n for n in parsed_nodes if n["editable"]), None)
+        if editable_node and step == 0:
+            return {
+                "action": "input_text",
+                "node_id": editable_node["id"],
+                "text": clean_text,
+                "submit": True,
+            }
+        else:
+            send_node = next((n for n in parsed_nodes if any(k in n["text"].lower() or k in n["desc"].lower() for k in ("send", "submit", "ارسال", "بفرست"))), None)
+            if send_node and step == 1:
+                return {"action": "tap", "node_id": send_node["id"]}
+            reply = "پیام با موفقیت تایپ و ارسال شد قربان." if is_persian else "Message typed and sent, sir."
+            return {"action": "done", "reply": reply}
+
+    # 4. Search Goals
+    search_terms = ("search", "find", "look for", "جستجو", "پیدا کن", "بگرد")
+    if any(t in goal_lower for t in search_terms):
+        clean_query = sanitize_literal_text(re.sub(r"^(?:search(?:\s+for)?|find|look for|جستجو کن|بگرد دنبال)\s+", "", goal, flags=re.IGNORECASE).strip())
+        editable = next((n for n in parsed_nodes if n["editable"] or "search" in n["desc"].lower() or "جستجو" in n["desc"]), None)
+        if editable and step == 0:
+            return {
+                "action": "input_text",
+                "node_id": editable["id"],
+                "text": clean_query,
+                "submit": True,
+            }
+        reply = "نتایج جستجو آماده است قربان." if is_persian else "Here are the search results, sir."
+        return {"action": "done", "reply": reply}
+
+    # 5. Generic Target Matching: tap on element mentioned in goal
+    for n in parsed_nodes:
+        if n["clickable"] and (n["text"] or n["desc"]):
+            nt = (n["text"] or n["desc"]).lower()
+            if nt and nt in goal_lower:
+                return {"action": "tap", "node_id": n["id"]}
+
+    # Default fallback
+    reply = "درخواست شما اجرا شد قربان." if is_persian else "Your request has been executed, sir."
+    return {"action": "done", "reply": reply}
 
 
 @app.get("/api/chat/history")

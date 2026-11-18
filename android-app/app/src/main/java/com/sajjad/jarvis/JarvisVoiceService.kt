@@ -92,8 +92,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
         private const val SAMPLE_RATE = 16000
         private const val STANDBY_SILENCE_WINDOW_MS = 800L  // Fast wake word cutoff
-        private const val COMMAND_SILENCE_WINDOW_MS = 2200L // 2.2s silence cutoff (patient pause detection)
-        private const val MAX_COMMAND_DURATION_MS = 45000L  // Hard 45.0s max recording duration for long-form speech
+        private const val COMMAND_SILENCE_WINDOW_MS = 2800L // 2.8s silence cutoff (patient pause detection)
+        private const val MAX_COMMAND_DURATION_MS = 60000L  // Hard 60.0s max recording duration for long-form speech
         private const val PRE_ROLL_DURATION_MS = 400
         private const val CHUNK_SAMPLES = 1600 // 100ms at 16kHz
         private const val MIN_SPEECH_RMS = 300.0
@@ -232,6 +232,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     @Volatile private var currentVadMode = VadMode.STANDBY_WAKE_WORD
     @Volatile private var awakeUntilTimestamp = 0L
+    @Volatile private var accumulatedTranscript = ""
 
     private var isTorchOn = false
 
@@ -609,7 +610,11 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         val silenceCutoffMs = if (currentVadMode == VadMode.STANDBY_WAKE_WORD) {
                             STANDBY_SILENCE_WINDOW_MS // Fast 800ms for wake word
                         } else {
-                            COMMAND_SILENCE_WINDOW_MS // 2.2s patient silence cutoff allowing natural pauses
+                            if (accumulatedTranscript.isNotBlank() && UtteranceStitcher.hasIncompleteClause(accumulatedTranscript)) {
+                                COMMAND_SILENCE_WINDOW_MS + 1500L // Extended silence wait for trailing conjunctions/prepositions
+                            } else {
+                                COMMAND_SILENCE_WINDOW_MS // 2.8s patient silence cutoff allowing natural pauses
+                            }
                         }
 
                         // Calculate RMS energy and zero-crossing count for human vocal frequency gate
@@ -799,9 +804,14 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
             if (result != null) {
                 val status = result.optString("status", "")
                 val action = result.optString("action", "")
-                val transcript = result.optString("transcription", "")
+                var transcript = result.optString("transcription", "")
                 val response = result.optString("response", "")
                 val clientActions = result.optJSONArray("client_actions")
+
+                // Multi-Clause Utterance Accumulator: stitch partial chunks
+                if (accumulatedTranscript.isNotBlank() && transcript.isNotBlank()) {
+                    transcript = UtteranceStitcher.stitchUtterances(accumulatedTranscript, transcript)
+                }
 
                 if (transcript.isNotBlank()) {
                     serviceListener?.onFinalSpeech(transcript)
@@ -816,6 +826,21 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     updateNotification("J.A.R.V.I.S. Standby — Say 'Jarvis' anytime")
                     return@launch
                 }
+
+                // Incomplete-Clause Guard: if trailing conjunction/preposition, buffer and keep listening
+                if (status != "sleep" && transcript.isNotBlank() && UtteranceStitcher.hasIncompleteClause(transcript)) {
+                    Log.i(TAG, "Incomplete clause guard tripped for '$transcript'. Buffering and extending pause wait.")
+                    accumulatedTranscript = transcript
+                    currentVadMode = VadMode.ACTIVE_COMMAND
+                    awakeUntilTimestamp = System.currentTimeMillis() + 15000L
+                    val st = "listening_cmd"
+                    serviceListener?.onWakeStateChanged(st)
+                    broadcastUiUpdate(wakeStatus = st)
+                    updateNotification("Listening for completion...")
+                    return@launch
+                }
+
+                accumulatedTranscript = ""
 
                 val cleanT = transcript.trim().lowercase(Locale.ROOT)
                 val sleepTriggers = listOf(
