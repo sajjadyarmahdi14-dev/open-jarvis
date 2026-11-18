@@ -1201,6 +1201,106 @@ def test_iron_man_protocols_and_proactive_intelligence(monkeypatch):
     assert len(d_sum.get("summary", "")) > 10
 
 
+def test_step_9_memory_web_intel_and_vps_ops(monkeypatch):
+    """Verify Step 9: Long-Term Memory (SQLite), Zero-Cost Web Intel, and Safe VPS Ops."""
+    from openjarvis.memory_store import get_memory_store
+    client = TestClient(app)
+    mem_store = get_memory_store()
+
+    # Clear memory store for clean test run
+    mem_store.clear_all_memories()
+
+    # 1. Remember fact (Persian & English)
+    r_rem_fa = client.post("/api/chat", json={"message": "یادت باشه رمز وای‌فای StarkTower2026 است"})
+    assert r_rem_fa.status_code == 200
+    d_rem_fa = r_rem_fa.json()
+    assert d_rem_fa.get("fast_path") is True
+    assert "حافظه" in d_rem_fa.get("response", "")
+
+    r_rem_en = client.post("/api/chat", json={"message": "Remember that Tony prefers black coffee"})
+    assert r_rem_en.status_code == 200
+    d_rem_en = r_rem_en.json()
+    assert d_rem_en.get("fast_path") is True
+    assert "memory" in d_rem_en.get("response", "").lower()
+
+    # 2. GET /api/memory
+    r_get_mem = client.get("/api/memory")
+    assert r_get_mem.status_code == 200
+    mems = r_get_mem.json().get("memories", [])
+    assert len(mems) >= 2
+    mem_id = mems[0]["id"]
+
+    # 3. Recall memory (Fuzzy Persian with Yeh normalization)
+    r_rec_fa = client.post("/api/chat", json={"message": "یادت هست رمز وای فای چی بود"})
+    assert r_rec_fa.status_code == 200
+    d_rec_fa = r_rec_fa.json()
+    assert d_rec_fa.get("fast_path") is True
+    assert "StarkTower2026" in d_rec_fa.get("response", "")
+
+    r_rec_en = client.post("/api/chat", json={"message": "What did I tell you about coffee"})
+    assert r_rec_en.status_code == 200
+    d_rec_en = r_rec_en.json()
+    assert d_rec_en.get("fast_path") is True
+    assert "black coffee" in d_rec_en.get("response", "").lower()
+
+    # 4. DELETE /api/memory/{id} and DELETE /api/memory
+    r_del_one = client.delete(f"/api/memory/{mem_id}")
+    assert r_del_one.status_code == 200
+    assert r_del_one.json().get("status") == "success"
+
+    r_del_all = client.delete("/api/memory")
+    assert r_del_all.status_code == 200
+    assert r_del_all.json().get("status") == "cleared"
+
+    # 5. VPS Status fast path & endpoint
+    r_vps_chat = client.post("/api/chat", json={"message": "وضعیت سرور چطوره"})
+    assert r_vps_chat.status_code == 200
+    d_vps_chat = r_vps_chat.json()
+    assert d_vps_chat.get("fast_path") is True
+    assert any(k in d_vps_chat.get("response", "") for k in ("سرور", "رم", "پردازنده"))
+
+    r_vps_ep = client.get("/api/vps/status")
+    assert r_vps_ep.status_code == 200
+    d_vps = r_vps_ep.json()
+    assert "cpu" in d_vps
+    assert "ram" in d_vps
+    assert "disk" in d_vps
+
+    # 6. VPS Logs fast path
+    r_logs = client.post("/api/chat", json={"message": "check server logs"})
+    assert r_logs.status_code == 200
+    assert r_logs.json().get("fast_path") is True
+
+    # 7. VPS Restart fast path & safety
+    r_rst_chat = client.post("/api/chat", json={"message": "restart openjarvis"})
+    assert r_rst_chat.status_code == 200
+    assert r_rst_chat.json().get("fast_path") is True
+    assert "Restarting" in r_rst_chat.json().get("response", "") or "راه‌اندازی" in r_rst_chat.json().get("response", "")
+
+    r_rst_prohib = client.post("/api/vps/restart", json={"service": "unauthorized_service"})
+    assert r_rst_prohib.status_code == 200
+    assert r_rst_prohib.json().get("success") is False
+
+    # 8. Live Real-Time Weather fast path
+    r_weather = client.post("/api/chat", json={"message": "how is the weather"})
+    assert r_weather.status_code == 200
+    d_w = r_weather.json()
+    assert d_w.get("fast_path") is True
+    assert "°C" in d_w.get("response", "") or "درجه" in d_w.get("response", "")
+
+    # 9. Live Crypto / Market Price fast path
+    r_price = client.post("/api/chat", json={"message": "قیمت بیت کوین"})
+    assert r_price.status_code == 200
+    d_p = r_price.json()
+    assert d_p.get("fast_path") is True
+    assert "USD" in d_p.get("response", "") or "دلار" in d_p.get("response", "")
+
+    # 10. Persistent rolling chat turns in SQLite
+    recent_history = mem_store.get_recent_chat_history(30)
+    assert len(recent_history) > 0
+    assert any("StarkTower2026" in t.get("content", "") for t in recent_history)
+
+
 
 
 

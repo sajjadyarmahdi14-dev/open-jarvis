@@ -231,8 +231,27 @@ LANGUAGE OVERRIDE: If the user explicitly commands you to change your language (
 _cached_agent = None
 _cached_tools = None
 _device_apps: List[Dict[str, str]] = []
-_conversation_history: deque = deque(maxlen=20)
+_conversation_history: deque = deque(maxlen=30)
+try:
+    from openjarvis.memory_store import get_memory_store
+    for _t in get_memory_store().get_recent_chat_history(30):
+        _conversation_history.append(_t)
+except Exception:
+    pass
+
 _active_language_override: Optional[str] = None
+
+
+def record_chat_turn(role: str, content: str) -> None:
+    """Store chat turn in memory buffer and persist in SQLite."""
+    if not content:
+        return
+    _conversation_history.append({"role": role, "content": content})
+    try:
+        from openjarvis.memory_store import get_memory_store
+        get_memory_store().save_chat_turn(role, content)
+    except Exception as e:
+        logger.debug(f"Failed to persist chat turn: {e}")
 
 
 def _get_or_create_agent():
@@ -335,6 +354,21 @@ def _speak_async(text: str) -> None:
             logger.debug("Android TTS failed: %s", exc)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _run_sync(coro: Any) -> Any:
+    """Run an async coroutine synchronously from sync or async contexts safely."""
+    import concurrent.futures
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    else:
+        return asyncio.run(coro)
 
 
 def _handle_fast_path(
@@ -465,12 +499,183 @@ def _handle_fast_path(
         r"\b(?:گزارش\s*صبحگاهی|خلاصه\s*صبحگاهی)\b",
     ]
     if any(re.search(pat, norm) for pat in morning_briefing_patterns):
-        reply = "در حال تهیه گزارش صبحگاهی قربان." if is_persian else "Preparing your morning briefing, sir."
+        from openjarvis.web_intel import get_weather
+        try:
+            w_info = _run_sync(get_weather("Mashhad"))
+            w_summary = w_info.get("summary_fa" if is_persian else "summary_en", "")
+        except Exception:
+            w_summary = ""
+        reply = (
+            f"صبح بخیر قربان. تمام سیستم‌ها در وضعیت ایده‌آل هستند. {w_summary}".strip()
+            if is_persian
+            else f"Good morning, sir. All core systems are nominal. {w_summary}".strip()
+        )
         return {
             "response": reply,
-            "tool_calls": [{"name": "morning_briefing", "content": "Generating morning briefing", "success": True}],
+            "tool_calls": [{"name": "morning_briefing", "content": reply, "success": True}],
             "turns": 1,
             "client_actions": [{"type": "morning_briefing"}],
+            "fast_path": True,
+        }
+
+    # Memory: Remember Fact
+    m_rem_fa = re.search(r"\b(?:یادت\s*باشه|به\s*خاطر\s*بسپار|ذخیره\s*کن|یادداشت\s*کن)\s*(?:که\s*)?(.+)$", msg, re.IGNORECASE)
+    m_rem_en = re.search(r"\b(?:remember\s+(?:that\s+)?|don't\s+forget\s+(?:that\s+)?|save\s+(?:that\s+)?|note\s+(?:that\s+)?)(.+)$", msg, re.IGNORECASE)
+    if m_rem_fa or m_rem_en:
+        fact_text = (m_rem_fa.group(1) if m_rem_fa else m_rem_en.group(1)).strip()
+        if len(fact_text) >= 3:
+            from openjarvis.memory_store import get_memory_store
+            mem_res = get_memory_store().remember(fact_text, category="fact")
+            reply = (
+                f"«{fact_text}» در حافظه ذخیره شد قربان."
+                if is_persian
+                else f"I have committed that to memory, sir: '{fact_text}'."
+            )
+            return {
+                "response": reply,
+                "tool_calls": [{"name": "remember_fact", "content": f"Saved fact: {fact_text}", "success": True}],
+                "turns": 1,
+                "client_actions": [],
+                "fast_path": True,
+            }
+
+    # Memory: Forget Fact
+    m_forg_fa = re.search(r"\b(?:فراموش\s*کن|از\s*یادت\s*ببر|پاک\s*کن\s*از\s*حافظه)\s*(?:که\s*)?(.+)$", msg, re.IGNORECASE)
+    m_forg_en = re.search(r"\b(?:forget\s+(?:that\s+)?|delete\s+memory|erase\s+memory)\s*(.+)$", msg, re.IGNORECASE)
+    if m_forg_fa or m_forg_en:
+        forg_target = (m_forg_fa.group(1) if m_forg_fa else m_forg_en.group(1)).strip()
+        from openjarvis.memory_store import get_memory_store
+        cnt = get_memory_store().forget(forg_target)
+        reply = (
+            f"مورد مرتبط با «{forg_target}» از حافظه پاک شد قربان."
+            if is_persian
+            else f"I have expunged that memory, sir."
+        )
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "forget_memory", "content": f"Forgot memory matching: {forg_target} (count: {cnt})", "success": True}],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+
+    # Memory: Recall Fact
+    m_rec_fa = re.search(r"\b(?:یادت\s*(?:هست|میاد|هستش)|چی\s*گفته\s*بودم|درباره\s*(.+?)\s*چی\s*(?:میدونی|یادته)|اسم\s*(?:اون|آن)\s*(.+?)\s*چی\s*بود)\b", msg, re.IGNORECASE)
+    m_rec_en = re.search(r"\b(?:what\s+did\s+i\s+tell\s+you\s+about|do\s+you\s+remember|recall\s+what|what\s+was\s+(?:my|the))\s+(.+)$", msg, re.IGNORECASE)
+    if m_rec_fa or m_rec_en:
+        q_target = (m_rec_fa.group(1) or m_rec_fa.group(2) if m_rec_fa and (m_rec_fa.group(1) or m_rec_fa.group(2)) else (m_rec_en.group(1) if m_rec_en else msg)).strip()
+        q_clean = re.sub(r"\b(?:یادت\s*(?:هست|میاد|هستش)|چی\s*(?:بود|بودش|چیه|چیست)|do\s+you\s+remember|what\s+was)\b", " ", q_target, flags=re.IGNORECASE).strip()
+        from openjarvis.memory_store import get_memory_store
+        matches = get_memory_store().recall(q_clean or q_target or msg, limit=3)
+        if matches:
+            best = matches[0]["content"]
+            reply = (
+                f"بله قربان، به خاطر دارم: «{best}»."
+                if is_persian
+                else f"Yes, sir. I recall that {best}."
+            )
+            return {
+                "response": reply,
+                "tool_calls": [{"name": "recall_memory", "content": f"Recalled: {best}", "success": True}],
+                "turns": 1,
+                "client_actions": [],
+                "fast_path": True,
+            }
+
+    # Real-Time Weather
+    weather_patterns = [
+        r"\b(?:هوا\s*(?:چطوره|چگونه\s*است|چند\s*درجه‌ست|امروز\s*چطوره)|وضعیت\s*هوا|دمای\s*هوا)\b",
+        r"\b(?:weather|temperature|how(?:'s|\s+is)\s+the\s+weather|current\s+weather)\b",
+    ]
+    if any(re.search(pat, norm) for pat in weather_patterns):
+        from openjarvis.web_intel import get_weather
+        m_city = re.search(r"(?:in|for|در|هوای)\s+([a-zA-Z\u0600-\u06FF\s]+?)(?:$|\s+(?:چطوره|today|now))", msg, re.IGNORECASE)
+        city_name = m_city.group(1).strip() if m_city and len(m_city.group(1).strip()) >= 3 else "Mashhad"
+        try:
+            w_data = _run_sync(get_weather(city_name))
+            reply = w_data["summary_fa"] if is_persian else w_data["summary_en"]
+        except Exception as e:
+            reply = f"Could not retrieve weather: {e}"
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "get_weather", "content": reply, "success": True}],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+
+    # Live Crypto & Market Prices
+    price_patterns = [
+        r"\b(?:قیمت|نرخ)\s+([a-zA-Z0-9_\s\u0600-\u06FF]+?)(?:\s*(?:چنده|امروز|الان|لحظه‌ای))?$",
+        r"\b(?:price\s+of|cost\s+of)\s+([a-zA-Z0-9_\s]+?)(?:\s*(?:today|now))?$",
+    ]
+    for pat in price_patterns:
+        m = re.search(pat, msg, re.IGNORECASE)
+        if m:
+            target_sym = m.group(1).strip().lower()
+            if target_sym not in ("این", "اون", "آن", "این چنده", "this", "that", "it") and len(target_sym) >= 2:
+                from openjarvis.web_intel import get_market_price
+                try:
+                    p_data = _run_sync(get_market_price(target_sym))
+                    reply = p_data["summary_fa"] if is_persian else p_data["summary_en"]
+                except Exception as e:
+                    reply = f"Could not retrieve price: {e}"
+                return {
+                    "response": reply,
+                    "tool_calls": [{"name": "get_market_price", "content": reply, "success": True}],
+                    "turns": 1,
+                    "client_actions": [],
+                    "fast_path": True,
+                }
+
+    # VPS & Server Ops: Status
+    vps_status_patterns = [
+        r"\b(?:وضعیت\s*سرور|سلامت\s*سرور|استاتوس\s*سرور|سی\s*پی\s*یو\s*و\s*رم|وضعیت\s*سیستم)\b",
+        r"\b(?:vps\s*status|server\s*status|server\s*health|check\s*server|cpu\s*(?:and|&)\s*ram)\b",
+    ]
+    if any(re.search(pat, norm) for pat in vps_status_patterns):
+        from openjarvis.vps_ops import vps_status
+        st = vps_status()
+        reply = st["summary_fa"] if is_persian else st["summary_en"]
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "vps_status", "content": reply, "success": True}],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+
+    # VPS & Server Ops: Logs
+    vps_logs_patterns = [
+        r"\b(?:لاگ(?:\s*های)?\s*سرور|خطاهای\s*سرور|لاگ\s*جارویس)\b",
+        r"\b(?:vps\s*logs|server\s*logs|check\s*logs|error\s*logs)\b",
+    ]
+    if any(re.search(pat, norm) for pat in vps_logs_patterns):
+        from openjarvis.vps_ops import vps_logs
+        lg = vps_logs(lines=25)
+        reply = lg["summary_fa"] if is_persian else lg["summary_en"]
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "vps_logs", "content": reply, "success": True}],
+            "turns": 1,
+            "client_actions": [],
+            "fast_path": True,
+        }
+
+    # VPS & Server Ops: Restart
+    vps_restart_patterns = [
+        r"\b(?:سرور\s*(?:رو)?\s*ری‌استارت\s*کن|ری‌استارت\s*سرور|سرور\s*جارویس\s*رو\s*ری‌استارت\s*کن)\b",
+        r"\b(?:restart\s+openjarvis|restart\s+(?:the\s+)?server|reboot\s+openjarvis)\b",
+    ]
+    if any(re.search(pat, norm) for pat in vps_restart_patterns):
+        from openjarvis.vps_ops import vps_restart_service
+        res = vps_restart_service("openjarvis")
+        reply = res.get("message_fa") if is_persian else res.get("message")
+        return {
+            "response": reply or "Restarting server now, sir.",
+            "tool_calls": [{"name": "vps_restart_service", "content": "Triggered delayed restart for openjarvis", "success": True}],
+            "turns": 1,
+            "client_actions": [],
             "fast_path": True,
         }
 
@@ -1862,8 +2067,8 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         lore_reply = await run_creator_lore_engine(req.message, is_persian=is_fa)
         if req.tts and lore_reply:
             _speak_async(lore_reply)
-        _conversation_history.append({"role": "user", "content": req.message})
-        _conversation_history.append({"role": "assistant", "content": lore_reply})
+        record_chat_turn("user", req.message)
+        record_chat_turn("assistant", lore_reply)
         return {
             "response": lore_reply,
             "tool_calls": [{"name": "creator_lore", "content": "Chronicles of Sajjad Yarmiri (jellybean)", "success": True}],
@@ -1881,9 +2086,9 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
     if fast_res is not None:
         if req.tts and fast_res.get("response"):
             _speak_async(fast_res["response"])
-        _conversation_history.append({"role": "user", "content": req.message})
+        record_chat_turn("user", req.message)
         if fast_res.get("response"):
-            _conversation_history.append({"role": "assistant", "content": fast_res["response"]})
+            record_chat_turn("assistant", fast_res["response"])
         return fast_res
 
     try:
@@ -1902,6 +2107,16 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         context = AgentContext(conversation=conv)
 
     input_text = req.message
+    # Long-Term Memory Recall Injection (Part A)
+    try:
+        from openjarvis.memory_store import get_memory_store
+        recalled_mems = get_memory_store().recall(req.message, limit=6)
+        if recalled_mems:
+            mem_lines = "\n".join(f"- [{m.get('category', 'general')}] {m.get('content')}" for m in recalled_mems)
+            input_text = f"[LONG-TERM MEMORY CONTEXT (User Facts & Preferences)]:\n{mem_lines}\n\n{input_text}"
+    except Exception as e:
+        logger.debug(f"Memory recall notice in chat: {e}")
+
     if _active_language_override == "en":
         input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
     elif _active_language_override == "fa":
@@ -1948,8 +2163,8 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         if req.tts and clean_content:
             _speak_async(clean_content)
 
-        _conversation_history.append({"role": "user", "content": req.message})
-        _conversation_history.append({"role": "assistant", "content": clean_content or result.content or ""})
+        record_chat_turn("user", req.message)
+        record_chat_turn("assistant", clean_content or result.content or "")
 
         return {
             "response": clean_content or result.content,
@@ -2013,9 +2228,9 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             acts = fast_res.get("client_actions", [])
             yield json.dumps({"type": "actions", "client_actions": acts}) + "\n"
             yield json.dumps({"type": "done"}) + "\n"
-            _conversation_history.append({"role": "user", "content": req.message})
+            record_chat_turn("user", req.message)
             if resp:
-                _conversation_history.append({"role": "assistant", "content": resp})
+                record_chat_turn("assistant", resp)
             return
 
         # 3. Stream from Cloud Engine
@@ -2033,6 +2248,16 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             model = DEFAULT_OPENROUTER_MODEL
 
         input_text = req.message
+        # Long-Term Memory Recall Injection (Part A)
+        try:
+            from openjarvis.memory_store import get_memory_store
+            recalled_mems = get_memory_store().recall(req.message, limit=6)
+            if recalled_mems:
+                mem_lines = "\n".join(f"- [{m.get('category', 'general')}] {m.get('content')}" for m in recalled_mems)
+                input_text = f"[LONG-TERM MEMORY CONTEXT (User Facts & Preferences)]:\n{mem_lines}\n\n{input_text}"
+        except Exception as e:
+            logger.debug(f"Memory recall notice in stream: {e}")
+
         if _active_language_override == "en":
             input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
         elif _active_language_override == "fa":
@@ -2151,8 +2376,8 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             yield json.dumps({"type": "done"}) + "\n"
 
             full_reply = " ".join(emitted_sentences)
-            _conversation_history.append({"role": "user", "content": req.message})
-            _conversation_history.append({"role": "assistant", "content": full_reply})
+            record_chat_turn("user", req.message)
+            record_chat_turn("assistant", full_reply)
 
         except Exception as exc:
             logger.exception("Streaming failed")
@@ -2304,6 +2529,52 @@ async def summarize_notifications_endpoint(req: NotificationSummarizeRequest, re
         "count": len(notifs),
         "status": "success",
     }
+
+
+# ---------------------------------------------------------------------------
+# Part A & C: Long-Term Memory and Safe VPS Operations Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/memory")
+async def list_memories_endpoint(limit: int = 100):
+    """List persistent long-term memories."""
+    from openjarvis.memory_store import get_memory_store
+    mems = get_memory_store().list_memories(limit=limit)
+    return {"memories": mems, "count": len(mems), "status": "success"}
+
+
+@app.delete("/api/memory/{memory_id}")
+async def delete_memory_endpoint(memory_id: int):
+    """Delete a specific stored memory by ID."""
+    from openjarvis.memory_store import get_memory_store
+    ok = get_memory_store().delete_memory(memory_id)
+    return {"id": memory_id, "deleted": ok, "status": "success" if ok else "not_found"}
+
+
+@app.delete("/api/memory")
+async def clear_all_memories_endpoint():
+    """Clear all stored long-term memories."""
+    from openjarvis.memory_store import get_memory_store
+    cnt = get_memory_store().clear_all_memories()
+    return {"count": cnt, "status": "cleared"}
+
+
+@app.get("/api/vps/status")
+async def vps_status_endpoint():
+    """Retrieve VPS systems telemetry and whitelisted service health."""
+    from openjarvis.vps_ops import vps_status
+    return vps_status()
+
+
+class VpsRestartRequest(BaseModel):
+    service: str = "openjarvis"
+
+
+@app.post("/api/vps/restart")
+async def vps_restart_endpoint(req: VpsRestartRequest):
+    """Safely restart whitelisted VPS daemon services."""
+    from openjarvis.vps_ops import vps_restart_service
+    return vps_restart_service(req.service)
 
 
 @app.post("/api/voice")

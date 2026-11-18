@@ -2004,21 +2004,327 @@ class AndroidNotificationReplyTool(BaseTool):
         )
 
 
+@ToolRegistry.register("remember_fact")
+class AndroidRememberFactTool(BaseTool):
+    """Store long-term user facts and preferences in persistent memory."""
+
+    tool_id = "remember_fact"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="remember_fact",
+            description="Commit a fact, preference, contact detail, or reminder into long-term memory for future recall.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The exact fact or preference to remember",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["fact", "preference", "book_movie", "contact", "reminder", "general"],
+                        "description": "Category for the memory (default: general)",
+                    },
+                },
+                "required": ["content"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.memory_store import get_memory_store
+        content = str(params.get("content", "")).strip()
+        category = str(params.get("category", "general")).strip()
+        res = get_memory_store().remember(content, category=category)
+        msg = f"Memory saved: '{content}' (Category: {category})"
+        return ToolResult(tool_name=self.spec.name, content=msg, success=True, metadata=res)
+
+
+@ToolRegistry.register("recall_memory")
+class AndroidRecallMemoryTool(BaseTool):
+    """Search and recall facts from long-term memory."""
+
+    tool_id = "recall_memory"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="recall_memory",
+            description="Recall previously remembered facts, preferences, passwords, books, or details from long-term memory.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query or keywords to recall",
+                    },
+                },
+                "required": ["query"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.memory_store import get_memory_store
+        query = str(params.get("query", "")).strip()
+        results = get_memory_store().recall(query, limit=5)
+        if not results:
+            return ToolResult(tool_name=self.spec.name, content=f"No memories found matching '{query}'.", success=True)
+        items_str = "\n".join(f"- [{r['category']}] {r['content']}" for r in results)
+        return ToolResult(tool_name=self.spec.name, content=f"Recalled memories:\n{items_str}", success=True)
+
+
+@ToolRegistry.register("forget_memory")
+class AndroidForgetMemoryTool(BaseTool):
+    """Delete a fact from long-term memory."""
+
+    tool_id = "forget_memory"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="forget_memory",
+            description="Remove or forget a specific memory from long-term memory banks.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword or memory text to forget",
+                    },
+                },
+                "required": ["query"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.memory_store import get_memory_store
+        query = str(params.get("query", "")).strip()
+        count = get_memory_store().forget(query)
+        return ToolResult(tool_name=self.spec.name, content=f"Expunged {count} memory entries matching '{query}'.", success=True)
+
+
+@ToolRegistry.register("live_web_search")
+class AndroidLiveWebSearchTool(BaseTool):
+    """Perform real-time zero-cost internet search via DuckDuckGo and Wikipedia."""
+
+    tool_id = "live_web_search"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="live_web_search",
+            description="Search the live internet for recent news, facts, release dates, reviews, or definitions.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to look up on the live web",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of search snippets (default: 5)",
+                    },
+                },
+                "required": ["query"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        import asyncio
+        from openjarvis.web_intel import web_search, format_search_context
+        query = str(params.get("query", "")).strip()
+        max_results = int(params.get("max_results", 5))
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    results = pool.submit(asyncio.run, web_search(query, max_results=max_results)).result()
+            else:
+                results = loop.run_until_complete(web_search(query, max_results=max_results))
+        except Exception:
+            results = asyncio.run(web_search(query, max_results=max_results))
+
+        context = format_search_context(results)
+        return ToolResult(tool_name=self.spec.name, content=context, success=bool(results))
+
+
+@ToolRegistry.register("realtime_weather")
+class AndroidWeatherTool(BaseTool):
+    """Retrieve real-time weather and forecast."""
+
+    tool_id = "realtime_weather"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="realtime_weather",
+            description="Get real-time temperature, condition, and forecast for any city.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "City name (e.g. Mashhad, Tehran, London)",
+                    },
+                },
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        import asyncio
+        from openjarvis.web_intel import get_weather
+        city = str(params.get("city", "Mashhad")).strip() or "Mashhad"
+        res = asyncio.run(get_weather(city))
+        summary = res.get("summary_en", "Weather data unavailable.")
+        return ToolResult(tool_name=self.spec.name, content=summary, success=res.get("success", True), metadata=res)
+
+
+@ToolRegistry.register("get_market_price")
+class AndroidCryptoPriceTool(BaseTool):
+    """Retrieve live cryptocurrency and market prices."""
+
+    tool_id = "get_market_price"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="get_market_price",
+            description="Get real-time price and 24h change for crypto (BTC, ETH, TON, SOL, USDT) or market assets.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Ticker symbol or name (e.g. BTC, ETH, TON, Gold)",
+                    },
+                },
+                "required": ["symbol"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        import asyncio
+        from openjarvis.web_intel import get_market_price
+        symbol = str(params.get("symbol", "BTC")).strip()
+        res = asyncio.run(get_market_price(symbol))
+        summary = res.get("summary_en", "Price data unavailable.")
+        return ToolResult(tool_name=self.spec.name, content=summary, success=res.get("success", True), metadata=res)
+
+
+@ToolRegistry.register("vps_status")
+class AndroidVpsStatusTool(BaseTool):
+    """Retrieve VPS and server system diagnostics."""
+
+    tool_id = "vps_status"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="vps_status",
+            description="Check CPU load, RAM usage, disk space, uptime, and active service health on the Linux VPS.",
+            parameters={"type": "object", "properties": {}},
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.vps_ops import vps_status
+        res = vps_status()
+        return ToolResult(tool_name=self.spec.name, content=res.get("summary_en", "VPS status nominal."), success=True, metadata=res)
+
+
+@ToolRegistry.register("vps_logs")
+class AndroidVpsLogsTool(BaseTool):
+    """Inspect recent server journal logs."""
+
+    tool_id = "vps_logs"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="vps_logs",
+            description="Inspect recent journalctl log entries for the Open-Jarvis server daemon.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of log lines to inspect (default: 30, max: 60)",
+                    },
+                },
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.vps_ops import vps_logs
+        lines = int(params.get("lines", 30))
+        res = vps_logs(lines=lines)
+        return ToolResult(tool_name=self.spec.name, content=res.get("summary_en", "Logs inspected."), success=True, metadata=res)
+
+
+@ToolRegistry.register("vps_restart_service")
+class AndroidVpsRestartTool(BaseTool):
+    """Restart allowed server services with safety guards."""
+
+    tool_id = "vps_restart_service"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="vps_restart_service",
+            description="Safely restart whitelisted server services (openjarvis, nginx).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "enum": ["openjarvis", "nginx"],
+                        "description": "Name of the service to restart",
+                    },
+                },
+                "required": ["service"],
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.vps_ops import vps_restart_service
+        service = str(params.get("service", "openjarvis")).strip()
+        res = vps_restart_service(service)
+        msg = res.get("message") or res.get("error", f"Restarting {service}")
+        return ToolResult(tool_name=self.spec.name, content=msg, success=res.get("success", False), metadata=res)
+
+
 __all__ = [
     "AndroidBatteryTool",
     "AndroidCameraCaptureTool",
     "AndroidClipboardGetTool",
     "AndroidClipboardSetTool",
     "AndroidContactsSearchTool",
+    "AndroidCryptoPriceTool",
+    "AndroidForgetMemoryTool",
     "AndroidGpsLocationTool",
     "AndroidIntentTool",
     "AndroidLaunchAppTool",
+    "AndroidLiveWebSearchTool",
     "AndroidMediaPlayerTool",
     "AndroidNotificationReplyTool",
     "AndroidNotificationTool",
     "AndroidOperateDeviceUiTool",
     "AndroidPhoneCallTool",
     "AndroidProtocolTool",
+    "AndroidRecallMemoryTool",
+    "AndroidRememberFactTool",
     "AndroidSendEmailTool",
     "AndroidSetAlarmTool",
     "AndroidSmsInboxTool",
@@ -2029,6 +2335,10 @@ __all__ = [
     "AndroidTypeTextTool",
     "AndroidVibrateTool",
     "AndroidVolumeTool",
+    "AndroidVpsLogsTool",
+    "AndroidVpsRestartTool",
+    "AndroidVpsStatusTool",
+    "AndroidWeatherTool",
     "AndroidWebSearchTool",
     "AndroidWifiControlTool",
 ]

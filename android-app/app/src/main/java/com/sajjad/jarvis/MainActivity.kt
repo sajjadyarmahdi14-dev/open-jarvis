@@ -1181,6 +1181,7 @@ private fun JarvisSettingsDialog(
 
     var isFetchingModels by remember { mutableStateOf(false) }
     var showModelSelectionDialog by remember { mutableStateOf(false) }
+    var showMemoryDialog by remember { mutableStateOf(false) }
     var availableModels by remember { mutableStateOf(CuratedFreeModels) }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -1545,6 +1546,24 @@ private fun JarvisSettingsDialog(
                     Text(text = "Allow DND & Brightness Protocols", color = CyanNeon, fontSize = 12.sp)
                 }
 
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
+
+                // Part A: Long-Term Memory Management
+                Button(
+                    onClick = { showMemoryDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(0.8.dp, CyanNeon.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "🧠 Manage Long-Term Memory",
+                        color = CyanNeon,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
                 // Save Button
                 Button(
                     onClick = { onSave(urlText, modelText, apiKeyText) },
@@ -1691,5 +1710,239 @@ private fun JarvisSettingsDialog(
             shape = RoundedCornerShape(16.dp),
             tonalElevation = 6.dp
         )
+    }
+
+    if (showMemoryDialog) {
+        MemoryManagementDialog(
+            serverUrl = urlText,
+            onDismiss = { showMemoryDialog = false }
+        )
+    }
+}
+
+data class StoredMemoryItem(
+    val id: Int,
+    val category: String,
+    val content: String,
+    val created_at: String
+)
+
+@Composable
+private fun MemoryManagementDialog(
+    serverUrl: String,
+    onDismiss: () -> Unit
+) {
+    var memories by remember { mutableStateOf<List<StoredMemoryItem>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+
+    fun fetchMemories() {
+        isLoading = true
+        scope.launch(Dispatchers.IO) {
+            val list = mutableListOf<StoredMemoryItem>()
+            try {
+                val s = serverUrl.trim().removeSuffix("/")
+                val u = URL("$s/api/memory")
+                val conn = u.openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("Accept", "application/json")
+                conn.connectTimeout = 6000
+                conn.readTimeout = 8000
+                if (conn.responseCode in 200..299) {
+                    val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val json = JSONObject(respStr)
+                    val arr = json.optJSONArray("memories")
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val o = arr.getJSONObject(i)
+                            list.add(
+                                StoredMemoryItem(
+                                    id = o.optInt("id", 0),
+                                    category = o.optString("category", "general"),
+                                    content = o.optString("content", ""),
+                                    created_at = o.optString("created_at", "").take(10)
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("MemoryDialog", "Error fetching memories: ${e.message}")
+            }
+            withContext(Dispatchers.Main) {
+                memories = list
+                isLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        fetchMemories()
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = DarkCard,
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, CyanNeon.copy(alpha = 0.4f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "🧠 Memory Banks",
+                        color = CyanNeon,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                    }
+                }
+
+                Text(
+                    text = "Persistent facts, preferences & learned user details",
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
+
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
+
+                if (isLoading) {
+                    Box(modifier = Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = CyanNeon, strokeWidth = 2.dp)
+                    }
+                } else if (memories.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "No memories stored yet.\nSay 'Remember that...' or 'یادت باشه...'",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(memories, key = { it.id }) { mem ->
+                            Surface(
+                                color = DarkSurface,
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(0.6.dp, CyanDim.copy(alpha = 0.3f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "[${mem.category}]",
+                                                color = CyanNeon,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (mem.created_at.isNotBlank()) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = mem.created_at,
+                                                    color = TextSecondary,
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = mem.content,
+                                            color = TextPrimary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            scope.launch(Dispatchers.IO) {
+                                                try {
+                                                    val s = serverUrl.trim().removeSuffix("/")
+                                                    val u = URL("$s/api/memory/${mem.id}")
+                                                    val conn = u.openConnection() as HttpURLConnection
+                                                    conn.requestMethod = "DELETE"
+                                                    conn.connectTimeout = 4000
+                                                    conn.responseCode
+                                                } catch (_: Exception) {}
+                                                withContext(Dispatchers.Main) {
+                                                    memories = memories.filter { it.id != mem.id }
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "Delete Memory",
+                                            tint = Color(0xFFEF4444)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${memories.size} memories",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                    if (memories.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        val s = serverUrl.trim().removeSuffix("/")
+                                        val u = URL("$s/api/memory")
+                                        val conn = u.openConnection() as HttpURLConnection
+                                        conn.requestMethod = "DELETE"
+                                        conn.connectTimeout = 4000
+                                        conn.responseCode
+                                    } catch (_: Exception) {}
+                                    withContext(Dispatchers.Main) {
+                                        memories = emptyList()
+                                    }
+                                }
+                            }
+                        ) {
+                            Text(text = "Clear All", color = Color(0xFFEF4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
