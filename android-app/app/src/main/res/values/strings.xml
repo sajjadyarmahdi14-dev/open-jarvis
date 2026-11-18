@@ -19,4 +19,5 @@
     <string name="voice_action_mute">Mute</string>
     <string name="voice_action_unmute">Unmute</string>
     <string name="voice_action_stop">Stop</string>
+    <string name="accessibility_service_desc">Enables J.A.R.V.I.S. deep in-app automation, screen reading, typing, camera shutter clicks, and UI navigation.</string>
 </resources>

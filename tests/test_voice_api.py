@@ -723,6 +723,139 @@ def test_get_free_models_endpoint():
     assert resp2.json()["status"] == "success"
 
 
+def test_media_controls_and_music_playback_fast_path():
+    """Verify v2.1.0-android full music & media playback controls."""
+    client = TestClient(app)
+
+    # 1. Transport: pause / stop music
+    r1 = client.post("/api/chat", json={"message": "pause music"})
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert d1.get("fast_path") is True
+    assert any(a.get("type") == "pause_music" for a in d1.get("client_actions", []))
+
+    # Persian pause
+    r1_fa = client.post("/api/chat", json={"message": "موزیک رو قطع کن"})
+    assert any(a.get("type") == "pause_music" for a in r1_fa.json().get("client_actions", []))
+
+    # 2. Transport: play / resume music
+    r2 = client.post("/api/chat", json={"message": "play music"})
+    d2 = r2.json()
+    assert d2.get("fast_path") is True
+    assert any(a.get("type") == "play_music" for a in d2.get("client_actions", []))
+
+    # Persian play
+    r2_fa = client.post("/api/chat", json={"message": "موزیک رو پخش کن"})
+    assert any(a.get("type") == "play_music" for a in r2_fa.json().get("client_actions", []))
+
+    # 3. Transport: next track & previous track
+    r3 = client.post("/api/chat", json={"message": "next track"})
+    assert any(a.get("type") == "next_track" for a in r3.json().get("client_actions", []))
+
+    r4 = client.post("/api/chat", json={"message": "previous track"})
+    assert any(a.get("type") == "previous_track" for a in r4.json().get("client_actions", []))
+
+    # 4. Specific song query: "play Bohemian Rhapsody"
+    r5 = client.post("/api/chat", json={"message": "play Bohemian Rhapsody by Queen"})
+    d5 = r5.json()
+    assert any(a.get("type") == "play_song" and "bohemian rhapsody" in a.get("query", "").lower() for a in d5.get("client_actions", []))
+
+
+def test_accessibility_deep_automation_fast_paths():
+    """Verify v2.1.0-android deep in-app automation and accessibility fast paths."""
+    client = TestClient(app)
+
+    # 1. Take Photo
+    r_cam = client.post("/api/chat", json={"message": "take photo"})
+    assert any(a.get("type") == "take_photo" for a in r_cam.json().get("client_actions", []))
+
+    r_cam_fa = client.post("/api/chat", json={"message": "عکس بگیر"})
+    assert any(a.get("type") == "take_photo" for a in r_cam_fa.json().get("client_actions", []))
+
+    # 2. Read Screen
+    r_scr = client.post("/api/chat", json={"message": "what is on my screen?"})
+    assert any(a.get("type") == "read_screen" for a in r_scr.json().get("client_actions", []))
+
+    # 3. Scrolling: scroll down & scroll up
+    r_sd = client.post("/api/chat", json={"message": "scroll down"})
+    assert any(a.get("type") == "scroll_down" for a in r_sd.json().get("client_actions", []))
+
+    r_su = client.post("/api/chat", json={"message": "scroll up"})
+    assert any(a.get("type") == "scroll_up" for a in r_su.json().get("client_actions", []))
+
+    # 4. Navigation & Global Actions
+    r_back = client.post("/api/chat", json={"message": "go back"})
+    assert any(a.get("type") == "go_back" for a in r_back.json().get("client_actions", []))
+
+    r_home = client.post("/api/chat", json={"message": "go home"})
+    assert any(a.get("type") == "go_home" for a in r_home.json().get("client_actions", []))
+
+    r_notif = client.post("/api/chat", json={"message": "open notifications"})
+    assert any(a.get("type") == "open_notifications" for a in r_notif.json().get("client_actions", []))
+
+    r_shot = client.post("/api/chat", json={"message": "take screenshot"})
+    assert any(a.get("type") == "take_screenshot" for a in r_shot.json().get("client_actions", []))
+
+
+def test_extended_communication_and_system_fast_paths():
+    """Verify v2.1.0-android extended communications, timers, and system controls."""
+    client = TestClient(app)
+
+    # 1. Send SMS
+    r_sms = client.post("/api/chat", json={"message": "send sms to Alex message I will be there soon"})
+    d_sms = r_sms.json()
+    assert any(a.get("type") == "send_sms" and a.get("contact_or_number", "").lower() == "alex" for a in d_sms.get("client_actions", []))
+
+    # 2. Send Email
+    r_mail = client.post("/api/chat", json={"message": "send email to boss@company.com subject Status Report body Everything is finished"})
+    d_mail = r_mail.json()
+    assert any(a.get("type") == "send_email" and a.get("recipient") == "boss@company.com" for a in d_mail.get("client_actions", []))
+
+    # 3. Send Messenger (Telegram / WhatsApp)
+    r_tg = client.post("/api/chat", json={"message": "send telegram message to @sarah hello there"})
+    d_tg = r_tg.json()
+    assert any(a.get("type") == "send_messenger" and a.get("app") == "telegram" and a.get("contact") == "@sarah" for a in d_tg.get("client_actions", []))
+
+    # 4. Set Timer
+    r_timer = client.post("/api/chat", json={"message": "set timer for 10 minutes"})
+    d_timer = r_timer.json()
+    assert any(a.get("type") == "set_timer" and a.get("seconds") == 600 for a in d_timer.get("client_actions", []))
+
+    # 5. Screen Brightness
+    r_bright = client.post("/api/chat", json={"message": "set brightness to 75%"})
+    d_bright = r_bright.json()
+    assert any(a.get("type") == "system_control" and a.get("action") == "brightness" for a in d_bright.get("client_actions", []))
+
+    # 6. Connectivity Panel
+    r_panel = client.post("/api/chat", json={"message": "open wifi"})
+    d_panel = r_panel.json()
+    assert any(a.get("type") == "system_control" and a.get("action") == "connectivity_panel" for a in d_panel.get("client_actions", []))
+
+
+def test_multi_turn_conversation_rolling_history():
+    """Verify rolling multi-turn conversation history in server.py."""
+    client = TestClient(app)
+
+    # Clear history first
+    r_clear = client.post("/api/chat/clear")
+    assert r_clear.status_code == 200
+    assert r_clear.json()["success"] is True
+
+    # Send a turn
+    r1 = client.post("/api/chat", json={"message": "ping"})
+    assert r1.status_code == 200
+
+    # Check history endpoint
+    r_hist = client.get("/api/chat/history")
+    assert r_hist.status_code == 200
+    hist = r_hist.json().get("history", [])
+    assert len(hist) >= 2
+    assert hist[-2]["role"] == "user"
+    assert hist[-2]["content"] == "ping"
+    assert hist[-1]["role"] == "assistant"
+
+
+
 
 
 

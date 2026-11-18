@@ -6,6 +6,7 @@ Provides REST endpoints for chat, tool execution, voice STT, and TTS.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import datetime
 import io
 import logging
@@ -60,6 +61,7 @@ class ChatRequest(BaseModel):
     tts: Optional[bool] = False
     device_battery: Optional[int] = None
     device_charging: Optional[bool] = None
+    screen_context: Optional[str] = None
 
 
 class TTSRequest(BaseModel):
@@ -97,6 +99,7 @@ class ConfigUpdateRequest(BaseModel):
 _cached_agent = None
 _cached_tools = None
 _device_apps: List[Dict[str, str]] = []
+_conversation_history: deque = deque(maxlen=20)
 
 
 def _get_or_create_agent():
@@ -354,6 +357,242 @@ def _handle_fast_path(
             "tool_calls": [{"name": "android_torch", "content": f"Flashlight {state}", "success": True}],
             "turns": 1,
             "client_actions": [{"type": "torch", "state": state}],
+            "fast_path": True,
+        }
+
+    # 2.5 Full Music & Media Playback Control
+    # Transport: Pause / Stop
+    if re.search(r"\b(?:pause\s+(?:music|song|playback|track|audio)|stop\s+(?:music|song|playback|audio)|قطع\s*(?:موزیک|آهنگ)|موزیک\s*(?:رو|را)?\s*قطع\s*کن|آهنگ\s*(?:رو|را)?\s*(?:قطع|متوقف)\s*کن|متوقف\s*کن)\b", norm) or cleaned in {"pause music", "stop music", "pause"}:
+        reply = "موزیک متوقف شد قربان." if is_persian else "Music paused, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "music_control", "content": "Media playback paused", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "pause_music"}],
+            "fast_path": True,
+        }
+
+    # Transport: Play / Resume
+    if re.search(r"\b(?:play\s+music|resume\s+music|play\s+songs?|resume\s+playback|پخش\s*موزیک|موزیک\s*(?:رو|را)?\s*پخش\s*کن|آهنگ\s*(?:رو|را)?\s*پخش\s*کن|موزیک\s*بذار|آهنگ\s*بذار)\b", norm) or cleaned in {"play music", "resume music"}:
+        reply = "در حال پخش موزیک قربان." if is_persian else "Playing music, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "music_control", "content": "Media playback started", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "play_music"}],
+            "fast_path": True,
+        }
+
+    # Transport: Next Track
+    if re.search(r"\b(?:next\s+(?:track|song|music)|skip\s+(?:track|song)|موزیک\s*بعدی|آهنگ\s*بعدی|ترک\s*بعدی|برو\s*آهنگ\s*بعدی)\b", norm):
+        reply = "در حال رفتن به آهنگ بعدی قربان." if is_persian else "Skipping to the next track, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "music_control", "content": "Skipped to next track", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "next_track"}],
+            "fast_path": True,
+        }
+
+    # Transport: Previous Track
+    if re.search(r"\b(?:previous\s+(?:track|song|music)|last\s+(?:track|song)|آهنگ\s*قبلی|موزیک\s*قبلی|ترک\s*قبلی|برو\s*آهنگ\s*قبلی)\b", norm):
+        reply = "در حال بازگشت به آهنگ قبلی قربان." if is_persian else "Going back to previous track, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "music_control", "content": "Returning to previous track", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "previous_track"}],
+            "fast_path": True,
+        }
+
+    # Play Specific Song or Artist
+    m_song_en = re.match(r"^play\s+(?:the\s+song\s+|song\s+|track\s+)?(.+?)[.!?]*$", raw_cleaned, re.IGNORECASE)
+    m_song_fa = re.match(r"^(?:آهنگ|ترک|موزیک)\s+(.+?)\s*(?:رو|را)?\s*(?:پخش\s*کن|بذار)$", raw_cleaned)
+    if m_song_en or m_song_fa:
+        t_song = (m_song_en.group(1) if m_song_en else m_song_fa.group(1)).strip()
+        app_names = {a.get("label", "").lower() for a in _device_apps if a.get("label")}
+        if t_song and t_song.lower() not in app_names and t_song.lower() not in ("music", "game", "camera", "store", "app", "apps"):
+            song_query = t_song
+            reply = f"چشم قربان، در حال پخش {song_query}." if is_persian else f"Playing '{song_query}', sir."
+            return {
+                "response": reply,
+                "tool_calls": [{"name": "play_song", "content": f"Playing {song_query}", "success": True}],
+                "turns": 1,
+                "client_actions": [{"type": "play_song", "query": song_query}],
+                "fast_path": True,
+            }
+
+    # 2.6 Deep In-App Automation & Accessibility Actions
+    # Take Photo with Automated Shutter
+    if re.search(r"\b(?:take\s+(?:a\s+)?photo|take\s+(?:a\s+)?picture|capture\s+(?:a\s+)?photo|عکس\s*بگیر|یه\s*عکس\s*بگیر|عکسبرداری\s*کن)\b", norm):
+        reply = "چشم قربان، در حال ثبت عکس با دوربین." if is_persian else "Taking photo now, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "take_photo", "content": "Camera shutter click triggered", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "take_photo"}],
+            "fast_path": True,
+        }
+
+    # Read Screen / Screen Summary
+    if re.search(r"\b(?:read\s+(?:my\s+)?screen|what(?:'s|\s+is)\s+on\s+my\s+screen|summarize\s+(?:this\s+)?(?:page|screen)|read\s+this|صفحه\s*(?:رو|را)?\s*بخون|چی\s*توی\s*صفحه‌ست|خلاصه\s*صفحه)\b", norm):
+        reply = "در حال خواندن محتوای صفحه شما قربان." if is_persian else "Reading screen content for you, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "read_screen", "content": "Extracting visible screen text", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "read_screen"}],
+            "fast_path": True,
+        }
+
+    # Scrolling: Scroll Down / Scroll Up
+    if re.search(r"\b(?:scroll\s+down|scroll\s+down\s+the\s+page|اسکرول\s*(?:به\s*)?پایین|برو\s*پایین)\b", norm):
+        reply = "صفحه به پایین اسکرول شد قربان." if is_persian else "Scrolling down, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "accessibility_scroll", "content": "Scrolled down", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "scroll_down"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:scroll\s+up|scroll\s+up\s+the\s+page|اسکرول\s*(?:به\s*)?بالا|برو\s*بالا)\b", norm):
+        reply = "صفحه به بالا اسکرول شد قربان." if is_persian else "Scrolling up, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "accessibility_scroll", "content": "Scrolled up", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "scroll_up"}],
+            "fast_path": True,
+        }
+
+    # Navigation: Go Back, Go Home, Notifications, Screenshot
+    if norm in ("go back", "back", "برگرد", "برو عقب"):
+        reply = "بازگشت به صفحه قبل انجام شد قربان." if is_persian else "Navigating back, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "accessibility_back", "content": "Navigated back", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "go_back"}],
+            "fast_path": True,
+        }
+    if norm in ("go home", "home", "home screen", "برو صفحه اصلی", "صفحه اصلی"):
+        reply = "به صفحه اصلی بازگشتیم قربان." if is_persian else "Navigating to home screen, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "accessibility_home", "content": "Navigated to home", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "go_home"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:open\s+notifications|show\s+notifications|نوتیفیکیشن(?:‌ها)?|اعلانات)\b", norm):
+        reply = "پنل اعلانات باز شد قربان." if is_persian else "Opening notifications panel, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "accessibility_notifications", "content": "Notifications opened", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "open_notifications"}],
+            "fast_path": True,
+        }
+    if re.search(r"\b(?:take\s+(?:a\s+)?screenshot|capture\s+screen|اسکرین\s*شات|اسکرین‌شات\s*بگیر)\b", norm):
+        reply = "اسکرین شات گرفته شد قربان." if is_persian else "Screenshot captured, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "accessibility_screenshot", "content": "Screenshot captured", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "take_screenshot"}],
+            "fast_path": True,
+        }
+
+    # 2.7 Extended Communications, Timers & Hardware Systems
+    # Send SMS
+    m_sms_en = re.search(r"\b(?:send\s+(?:an?\s+)?sms|send\s+(?:a\s+)?text|text)\s+(?:to\s+)?([a-zA-Z0-9_+ -]+?)\s+(?:saying|message|that|text|\:)\s*(.+)$", raw_cleaned, re.IGNORECASE)
+    if not m_sms_en:
+        m_sms_en = re.search(r"\b(?:send\s+(?:an?\s+)?sms|send\s+(?:a\s+)?text|text)\s+(?:to\s+)?([a-zA-Z0-9_+]+)\s+(.+)$", raw_cleaned, re.IGNORECASE)
+    m_sms_fa = re.search(r"\b(?:پیامک\s+به|اس ام اس\s+به|پیام\s+بده\s+به)\s+(.+?)\s*(?:متن|که|پیام)?\s*(.+)$", raw_cleaned)
+    if m_sms_en or m_sms_fa:
+        t_contact = (m_sms_en.group(1) if m_sms_en else m_sms_fa.group(1)).strip()
+        t_msg = (m_sms_en.group(2) if m_sms_en else m_sms_fa.group(2)).strip()
+        reply = f"پیامک به {t_contact} ارسال شد قربان." if is_persian else f"Sending SMS to {t_contact}, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "send_sms", "content": f"SMS to {t_contact}", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "send_sms", "contact_or_number": t_contact, "message": t_msg}],
+            "fast_path": True,
+        }
+
+    # Send Email
+    m_email = re.search(r"\b(?:send\s+(?:an?\s+)?email|email)\s+(?:to\s+)?([^\s@]+@[^\s@]+\.[^\s@]+|[a-zA-Z0-9_\-]+)\s*(?:with\s+)?(?:subject\s+([^,.]+?))?\s*(?:body\s+|message\s+)?(.+)?$", norm)
+    if m_email and ("@" in norm or "email" in norm):
+        recipient = (m_email.group(1) or "").strip()
+        subject = (m_email.group(2) or "Jarvis Message").strip()
+        body = (m_email.group(3) or "").strip()
+        reply = f"Opening email composer for {recipient}, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "send_email", "content": f"Emailing {recipient}", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "send_email", "recipient": recipient, "subject": subject, "body": body}],
+            "fast_path": True,
+        }
+
+    # Send Messenger (Telegram / WhatsApp)
+    m_msg_en = re.search(r"\b(?:send\s+)?(telegram|whatsapp)\s+(?:message\s+)?(?:to\s+)?([a-zA-Z0-9_@+ -]+?)\s+(?:saying|message|that)?\s*(.+)$", norm)
+    if m_msg_en:
+        app_name = m_msg_en.group(1).lower()
+        contact = m_msg_en.group(2).strip()
+        message = m_msg_en.group(3).strip()
+        reply = f"Sending {app_name.capitalize()} message to {contact}, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "send_messenger", "content": f"{app_name} message to {contact}", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "send_messenger", "app": app_name, "contact": contact, "message": message}],
+            "fast_path": True,
+        }
+
+    # Set Timer
+    m_timer_en = re.search(r"\b(?:set\s+(?:a\s+)?timer\s+(?:for\s+)?|timer\s+)(\d+)\s*(minute|min|second|sec|hour|hr)s?\b", norm)
+    m_timer_fa = re.search(r"\b(?:تایمر\s*)(\d+)\s*(دقیقه|ثانیه|ساعت)", norm)
+    if m_timer_en or m_timer_fa:
+        val = int(m_timer_en.group(1) if m_timer_en else m_timer_fa.group(1))
+        unit = (m_timer_en.group(2) if m_timer_en else m_timer_fa.group(2)).lower()
+        seconds = val * 60
+        if "sec" in unit or "ثانیه" in unit:
+            seconds = val
+        elif "hour" in unit or "hr" in unit or "ساعت" in unit:
+            seconds = val * 3600
+        reply = f"تایمر {val} {unit} تنظیم شد قربان." if is_persian else f"Timer set for {val} {unit}, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "set_timer", "content": f"Timer set for {seconds}s", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "set_timer", "seconds": seconds, "message": "Jarvis Timer"}],
+            "fast_path": True,
+        }
+
+    # Screen Brightness
+    m_bright = re.search(r"\b(?:brightness|set\s+brightness\s+(?:to\s+)?|نور\s*صفحه(?:\s*رو)?(?:\s*بذار\s*روی)?)\s*(\d{1,3})%?\b", norm)
+    if m_bright:
+        pct = int(m_bright.group(1))
+        level = int((pct / 100.0) * 255)
+        reply = f"روشنایی صفحه روی {pct}% تنظیم شد قربان." if is_persian else f"Brightness adjusted to {pct}%, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "system_control", "content": f"Brightness set to {pct}%", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "system_control", "action": "brightness", "level": level}],
+            "fast_path": True,
+        }
+
+    # Connectivity Panels
+    if re.search(r"\b(?:open\s+wifi|wifi\s+settings|open\s+bluetooth|bluetooth\s+settings|وای‌فای\s*(?:رو|را)?\s*باز\s*کن|تنظیمات\s*وای‌فای|بلوتوث\s*(?:رو|را)?\s*باز\s*کن)\b", norm):
+        reply = "پنل اتصالات باز شد قربان." if is_persian else "Opening connectivity panel, sir."
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "system_control", "content": "Connectivity panel opened", "success": True}],
+            "turns": 1,
+            "client_actions": [{"type": "system_control", "action": "connectivity_panel"}],
             "fast_path": True,
         }
 
@@ -803,6 +1042,19 @@ async def get_device_apps():
     return {"status": "ok", "apps": _device_apps, "count": len(_device_apps)}
 
 
+@app.get("/api/chat/history")
+async def get_chat_history():
+    """Return current server-side multi-turn conversation history."""
+    return {"history": list(_conversation_history)}
+
+
+@app.post("/api/chat/clear")
+async def clear_chat_history():
+    """Clear server-side multi-turn conversation history."""
+    _conversation_history.clear()
+    return {"success": True, "message": "Conversation history cleared."}
+
+
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest, request: Request = None):
     global _last_device_battery, _last_device_charging
@@ -826,6 +1078,9 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
     if fast_res is not None:
         if req.tts and fast_res.get("response"):
             _speak_async(fast_res["response"])
+        _conversation_history.append({"role": "user", "content": req.message})
+        if fast_res.get("response"):
+            _conversation_history.append({"role": "assistant", "content": fast_res["response"]})
         return fast_res
 
     try:
@@ -834,17 +1089,22 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         return {"error": str(exc), "response": f"Failed to initialize engine: {exc}"}
 
     context = None
-    if req.history:
+    hist = req.history if req.history else list(_conversation_history)
+    if hist:
         conv = Conversation()
-        for item in req.history:
+        for item in hist:
             role = Role.USER if item.get("role") == "user" else Role.ASSISTANT
             conv.messages.append(Message(role=role, content=item.get("content", "")))
         from openjarvis.agents._stubs import AgentContext
         context = AgentContext(conversation=conv)
 
+    input_text = req.message
+    if req.screen_context:
+        input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{req.message}"
+
     try:
         # Run agent in background thread so async event loop and ping checks are never blocked!
-        result = await asyncio.to_thread(agent.run, input=req.message, context=context)
+        result = await asyncio.to_thread(agent.run, input=input_text, context=context)
         tool_calls = [
             {
                 "name": tr.tool_name,
@@ -858,11 +1118,11 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         for tr in result.tool_results:
             meta = getattr(tr, "metadata", {}) or {}
             if "client_action" in meta:
-                client_actions.append({
-                    "type": meta["client_action"],
-                    "target": meta.get("target") or meta.get("package") or "",
-                    "package": meta.get("package", ""),
-                })
+                act = {"type": meta["client_action"]}
+                for k, v in meta.items():
+                    if k != "client_action":
+                        act[k] = v
+                client_actions.append(act)
             elif tr.tool_name == "android_launch_app":
                 client_actions.append({
                     "type": "launch_app",
@@ -872,6 +1132,9 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         clean_content = _clean_tts_response(result.content) if result.content else ""
         if req.tts and clean_content:
             _speak_async(clean_content)
+
+        _conversation_history.append({"role": "user", "content": req.message})
+        _conversation_history.append({"role": "assistant", "content": clean_content or result.content or ""})
 
         return {
             "response": clean_content or result.content,

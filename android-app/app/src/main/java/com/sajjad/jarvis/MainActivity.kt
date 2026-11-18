@@ -264,6 +264,9 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                                 },
                                 onBatterySetup = {
                                     openBatteryOptimizationSettings()
+                                },
+                                onAccessibilitySetup = {
+                                    openAccessibilitySettings()
                                 }
                             )
                         }
@@ -552,26 +555,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     private fun executeClientAction(act: JSONObject) {
         try {
-            when (act.optString("type")) {
-                "launch_app" -> {
-                    val target = act.optString("target") ?: act.optString("package") ?: ""
-                    if (target.isNotBlank()) AppLauncher.launchApp(applicationContext, target)
-                }
-                "torch" -> {
-                    val state = act.optString("state", "toggle")
-                    val turnOn = state == "on" || state == "true"
-                    JarvisVoiceService.instance?.setTorchState(turnOn)
-                }
-                "open_url" -> {
-                    val urlStr = act.optString("url", "")
-                    if (urlStr.isNotBlank()) {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(urlStr)).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        AppLauncher.launchWithOverlayFallback(this, intent)
-                    }
-                }
-            }
+            DeviceController.executeClientAction(applicationContext, act)
         } catch (_: Exception) {}
     }
 
@@ -633,6 +617,17 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                     startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                 } catch (_: Exception) {}
             }
+        }
+    }
+
+    private fun openAccessibilitySettings() {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Open Settings -> Accessibility -> Jarvis", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1114,7 +1109,8 @@ private fun JarvisSettingsDialog(
     onSave: (String, String, String) -> Unit,
     onAssistantSetup: () -> Unit,
     onOverlaySetup: () -> Unit,
-    onBatterySetup: () -> Unit
+    onBatterySetup: () -> Unit,
+    onAccessibilitySetup: () -> Unit
 ) {
     var urlText by remember { mutableStateOf(currentUrl) }
     var modelText by remember { mutableStateOf(currentModel) }
@@ -1425,6 +1421,16 @@ private fun JarvisSettingsDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(text = "Disable Battery Optimization", color = CyanNeon, fontSize = 12.sp)
+                }
+
+                Button(
+                    onClick = onAccessibilitySetup,
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(0.6.dp, CyanNeon.copy(alpha = 0.4f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "Enable Deep App Control (Accessibility)", color = CyanNeon, fontSize = 12.sp)
                 }
 
                 // Save Button

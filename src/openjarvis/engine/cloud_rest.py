@@ -184,7 +184,7 @@ def generate_gemini_rest(
     model: str,
     messages: Sequence[Message],
     temperature: float = 0.7,
-    max_tokens: int = 1024,
+    max_tokens: int = 2500,
     thought_sigs: Optional[Dict[str, bytes]] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
@@ -276,7 +276,7 @@ async def stream_full_gemini_rest(
     model: str,
     messages: Sequence[Message],
     temperature: float = 0.7,
-    max_tokens: int = 1024,
+    max_tokens: int = 2500,
     thought_sigs: Optional[Dict[str, bytes]] = None,
     **kwargs: Any,
 ) -> AsyncIterator[StreamChunk]:
@@ -510,7 +510,7 @@ def generate_openai_compat_rest(
     model: str,
     messages: Sequence[Message],
     temperature: float = 0.7,
-    max_tokens: int = 1024,
+    max_tokens: int = 2500,
     extra_headers: Optional[Dict[str, str]] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
@@ -574,8 +574,8 @@ def generate_openai_compat_rest(
         if "openrouter" in base_url.lower() or any(k in cand_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
             if "reasoning" not in cand_payload:
                 cand_payload["reasoning"] = {"effort": "low", "exclude": True}
-            if cand_payload.get("max_tokens", 1024) < 1500:
-                cand_payload["max_tokens"] = 1500
+            if cand_payload.get("max_tokens", 2500) < 2500:
+                cand_payload["max_tokens"] = 2500
         else:
             cand_payload.pop("reasoning", None)
 
@@ -688,7 +688,7 @@ async def stream_full_openai_compat_rest(
     model: str,
     messages: Sequence[Message],
     temperature: float = 0.7,
-    max_tokens: int = 1024,
+    max_tokens: int = 2500,
     extra_headers: Optional[Dict[str, str]] = None,
     **kwargs: Any,
 ) -> AsyncIterator[StreamChunk]:
@@ -713,8 +713,8 @@ async def stream_full_openai_compat_rest(
     if "openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
         if "reasoning" not in payload:
             payload["reasoning"] = {"effort": "low", "exclude": True}
-        if payload.get("max_tokens", 1024) < 1500:
-            payload["max_tokens"] = 1500
+        if payload.get("max_tokens", 2500) < 2500:
+            payload["max_tokens"] = 2500
     if raw_tools:
         norm_tools = normalize_openai_tools(raw_tools)
         if norm_tools:
@@ -755,8 +755,8 @@ async def stream_full_openai_compat_rest(
         if "openrouter" in base_url.lower() or any(k in cand_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
             if "reasoning" not in cand_payload:
                 cand_payload["reasoning"] = {"effort": "low", "exclude": True}
-            if cand_payload.get("max_tokens", 1024) < 1500:
-                cand_payload["max_tokens"] = 1500
+            if cand_payload.get("max_tokens", 2500) < 2500:
+                cand_payload["max_tokens"] = 2500
         else:
             cand_payload.pop("reasoning", None)
 

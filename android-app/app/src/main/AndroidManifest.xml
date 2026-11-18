@@ -33,6 +33,7 @@
 
     <!-- Hardware Feedback & Vibration -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions" />
 
     <!-- Background Persistence & Notifications -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -127,6 +128,19 @@
             android:name=".JarvisVoiceInteractionSessionService"
             android:permission="android.permission.BIND_VOICE_INTERACTION"
             android:exported="true" />
+
+        <!-- Deep In-App Automation & Screen Control Accessibility Service -->
+        <service
+            android:name=".JarvisAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/jarvis_accessibility_service_config" />
+        </service>
 
         <receiver
             android:name=".ServiceRestartReceiver"

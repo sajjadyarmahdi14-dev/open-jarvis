@@ -19,6 +19,9 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.ToneGenerator
@@ -89,8 +92,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
         private const val SAMPLE_RATE = 16000
         private const val STANDBY_SILENCE_WINDOW_MS = 800L  // Fast wake word cutoff
-        private const val COMMAND_SILENCE_WINDOW_MS = 1200L // 1.2s silence cutoff (Pillar 3)
-        private const val MAX_COMMAND_DURATION_MS = 6000L   // Hard 6.0s max recording duration (Pillar 3)
+        private const val COMMAND_SILENCE_WINDOW_MS = 2200L // 2.2s silence cutoff (patient pause detection)
+        private const val MAX_COMMAND_DURATION_MS = 45000L  // Hard 45.0s max recording duration for long-form speech
         private const val PRE_ROLL_DURATION_MS = 400
         private const val CHUNK_SAMPLES = 1600 // 100ms at 16kHz
         private const val MIN_SPEECH_RMS = 300.0
@@ -220,6 +223,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     private val audioPlayMutex = Mutex()
 
     private var audioRecord: AudioRecord? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var acousticEchoCanceler: AcousticEchoCanceler? = null
+    private var automaticGainControl: AutomaticGainControl? = null
     private var recordingJob: Job? = null
     @Volatile private var isRecordingLoopActive = false
     @Volatile private var isUtteranceActive = false
@@ -427,7 +433,59 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     }
 
     // -----------------------------------------------------------------------
-    // Continuous AudioRecord + Two-Stage RMS VAD Loop
+    // Hardware Acoustic Audio Processors
+    // -----------------------------------------------------------------------
+
+    private fun attachAudioProcessors(audioSessionId: Int) {
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
+                    enabled = true
+                    Log.i(TAG, "Hardware NoiseSuppressor attached and enabled.")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed attaching NoiseSuppressor: ${e.message}")
+        }
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                acousticEchoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply {
+                    enabled = true
+                    Log.i(TAG, "Hardware AcousticEchoCanceler attached and enabled.")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed attaching AcousticEchoCanceler: ${e.message}")
+        }
+        try {
+            if (AutomaticGainControl.isAvailable()) {
+                automaticGainControl = AutomaticGainControl.create(audioSessionId)?.apply {
+                    enabled = true
+                    Log.i(TAG, "Hardware AutomaticGainControl attached and enabled.")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed attaching AutomaticGainControl: ${e.message}")
+        }
+    }
+
+    private fun releaseAudioProcessors() {
+        try {
+            noiseSuppressor?.release()
+            noiseSuppressor = null
+        } catch (_: Exception) {}
+        try {
+            acousticEchoCanceler?.release()
+            acousticEchoCanceler = null
+        } catch (_: Exception) {}
+        try {
+            automaticGainControl?.release()
+            automaticGainControl = null
+        } catch (_: Exception) {}
+    }
+
+    // -----------------------------------------------------------------------
+    // Continuous AudioRecord + Adaptive SNR Voice Gate Loop
     // -----------------------------------------------------------------------
 
     @SuppressLint("MissingPermission")
@@ -449,10 +507,10 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
                 var record: AudioRecord? = null
                 try {
-                    // Try VOICE_RECOGNITION source first, fallback to MIC
+                    // 1. Try VOICE_COMMUNICATION for hardware beamforming noise suppression, fallback to VOICE_RECOGNITION, then MIC
                     record = try {
                         AudioRecord(
-                            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                             SAMPLE_RATE,
                             AudioFormat.CHANNEL_IN_MONO,
                             AudioFormat.ENCODING_PCM_16BIT,
@@ -461,14 +519,24 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     } catch (_: Exception) {
                         try {
                             AudioRecord(
-                                MediaRecorder.AudioSource.MIC,
+                                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                                 SAMPLE_RATE,
                                 AudioFormat.CHANNEL_IN_MONO,
                                 AudioFormat.ENCODING_PCM_16BIT,
                                 bufferSize
                             )
                         } catch (_: Exception) {
-                            null
+                            try {
+                                AudioRecord(
+                                    MediaRecorder.AudioSource.MIC,
+                                    SAMPLE_RATE,
+                                    AudioFormat.CHANNEL_IN_MONO,
+                                    AudioFormat.ENCODING_PCM_16BIT,
+                                    bufferSize
+                                )
+                            } catch (_: Exception) {
+                                null
+                            }
                         }
                     }
 
@@ -481,16 +549,18 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     audioRecord = activeRecord
+                    // Attach Android native hardware audio processors (NoiseSuppressor, EchoCanceler, AGC)
+                    attachAudioProcessors(activeRecord.audioSessionId)
                     activeRecord.startRecording()
                     isRecordingLoopActive = true
-                    Log.i(TAG, "Continuous AudioRecord running (zero beeps, persistent mic in background)")
+                    Log.i(TAG, "Continuous AudioRecord running with hardware acoustic filtering & adaptive SNR gate")
 
                     val readBuffer = ShortArray(CHUNK_SAMPLES)
                     val preRollSamples = (SAMPLE_RATE * PRE_ROLL_DURATION_MS) / 1000 // 6400 samples
                     val preRoll = ShortRingBuffer(preRollSamples)
                     val utteranceStream = ByteArrayOutputStream()
 
-                    var ambientRms = 180.0
+                    var ambientFloor = 180.0
                     var lastSpeechTimestamp = 0L
                     var utteranceStartTime = 0L
                     var consecutiveZeroReads = 0
@@ -526,8 +596,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
                         val now = System.currentTimeMillis()
 
-                        // Revert ACTIVE_COMMAND to STANDBY_WAKE_WORD after 15s awake timeout
-                        if (currentVadMode == VadMode.ACTIVE_COMMAND && now > awakeUntilTimestamp) {
+                        // Revert ACTIVE_COMMAND to STANDBY_WAKE_WORD after awake timeout, but NEVER interrupt an ongoing speech utterance!
+                        if (currentVadMode == VadMode.ACTIVE_COMMAND && !isUtteranceActive && now > awakeUntilTimestamp) {
                             currentVadMode = VadMode.STANDBY_WAKE_WORD
                             withContext(Dispatchers.Main) {
                                 val st = if (isServiceMuted) "paused" else "listening_wake"
@@ -539,20 +609,26 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                         val silenceCutoffMs = if (currentVadMode == VadMode.STANDBY_WAKE_WORD) {
                             STANDBY_SILENCE_WINDOW_MS // Fast 800ms for wake word
                         } else {
-                            COMMAND_SILENCE_WINDOW_MS // Deterministic 1.2s for questions
+                            COMMAND_SILENCE_WINDOW_MS // 2.2s patient silence cutoff allowing natural pauses
                         }
 
-                        // Calculate RMS of audio chunk
+                        // Calculate RMS energy and zero-crossing count for human vocal frequency gate
                         var sum = 0.0
+                        var zcCount = 0
                         for (i in 0 until readCount) {
                             val s = readBuffer[i].toDouble()
                             sum += s * s
+                            if (i > 0 && ((readBuffer[i - 1] >= 0 && readBuffer[i] < 0) || (readBuffer[i - 1] < 0 && readBuffer[i] >= 0))) {
+                                zcCount++
+                            }
                         }
                         val chunkRms = Math.sqrt(sum / readCount)
-                        val speechThreshold = maxOf(ambientRms * 2.1, MIN_SPEECH_RMS)
+                        // Adaptive SNR Voice Gate: Trigger only when energy exceeds ambient noise floor by 2.4x in vocal frequency band
+                        val speechThreshold = maxOf(ambientFloor * 2.4, MIN_SPEECH_RMS)
+                        val isHumanVocalBand = zcCount in 15..320
 
-                        // Compute normalized amplitude 0f..1f and broadcast live for glowing orb
-                        val normAmp = ((chunkRms - ambientRms) / 2000.0).coerceIn(0.0, 1.0).toFloat()
+                        // Compute normalized amplitude 0f..1f and broadcast live for UI glowing orb
+                        val normAmp = ((chunkRms - ambientFloor) / 2000.0).coerceIn(0.0, 1.0).toFloat()
                         if (normAmp > 0.05f) {
                             broadcastUiUpdate(amplitude = normAmp)
                             withContext(Dispatchers.Main) {
@@ -560,11 +636,12 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             }
                         }
 
-                        if (chunkRms >= speechThreshold) {
+                        if (chunkRms >= speechThreshold && isHumanVocalBand) {
                             lastSpeechTimestamp = now
                             if (!isUtteranceActive) {
                                 isUtteranceActive = true
                                 utteranceStartTime = now
+                                awakeUntilTimestamp = now + MAX_COMMAND_DURATION_MS // Keep awake while dictating
                                 utteranceStream.reset()
                                 utteranceStream.write(preRoll.toByteArray())
                                 withContext(Dispatchers.Main) {
@@ -579,16 +656,19 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             if (isUtteranceActive) {
                                 utteranceStream.write(shortsToBytes(readBuffer, readCount))
                             } else {
-                                ambientRms = ambientRms * 0.95 + chunkRms * 0.05
+                                // Continuously track ambient room noise floor when idle, ignoring transient peaks
+                                if (chunkRms < ambientFloor * 1.5) {
+                                    ambientFloor = (ambientFloor * 0.96 + chunkRms * 0.04).coerceIn(60.0, 1000.0)
+                                }
                                 preRoll.write(readBuffer, readCount)
                             }
                         }
 
-                        // Deterministic Non-Hanging Guarantee (Hard 6s Max & 1.2s Silence Cutoff)
+                        // Long-Form Patient Listening (45s max command duration & 2.2s patient trailing silence)
                         if (isUtteranceActive) {
                             val sessionDuration = now - utteranceStartTime
                             val silenceDuration = now - lastSpeechTimestamp
-                            val maxDuration = if (currentVadMode == VadMode.ACTIVE_COMMAND) MAX_COMMAND_DURATION_MS else 3000L
+                            val maxDuration = if (currentVadMode == VadMode.ACTIVE_COMMAND) MAX_COMMAND_DURATION_MS else 3500L
                             val shouldStop = (sessionDuration >= maxDuration) || (silenceDuration >= silenceCutoffMs)
 
                             if (shouldStop) {
@@ -618,6 +698,7 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 } catch (e: Exception) {
                     Log.e(TAG, "AudioRecord loop exception: ${e.message}", e)
                 } finally {
+                    releaseAudioProcessors()
                     try {
                         record?.stop()
                         record?.release()
@@ -877,91 +958,51 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun executeNativeClientAction(act: JSONObject) {
+        DeviceController.executeClientAction(applicationContext, act) { screenText ->
+            scope.launch(Dispatchers.IO) {
+                sendScreenSummaryRequest(screenText)
+            }
+        }
+    }
+
+    private fun sendScreenSummaryRequest(screenText: String) {
         try {
-            when (act.optString("type")) {
-                "launch_app" -> {
-                    val target = act.optString("target") ?: act.optString("package") ?: ""
-                    if (target.isNotBlank()) {
-                        AppLauncher.launchApp(applicationContext, target)
-                    }
-                }
-                "torch" -> {
-                    val state = act.optString("state", "toggle")
-                    val turnOn = when (state) {
-                        "on" -> true
-                        "off" -> false
-                        else -> !isTorchOn
-                    }
-                    setTorchState(turnOn)
-                }
-                "alarm" -> {
-                    val h = act.optInt("hour", 7)
-                    val m = act.optInt("minute", 0)
-                    val msg = act.optString("message", "Jarvis Alarm")
-                    val alarmIntent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
-                        putExtra(AlarmClock.EXTRA_HOUR, h)
-                        putExtra(AlarmClock.EXTRA_MINUTES, m)
-                        putExtra(AlarmClock.EXTRA_MESSAGE, msg)
-                        putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    AppLauncher.launchWithOverlayFallback(this, alarmIntent)
-                }
-                "call" -> {
-                    var num = act.optString("number", "").trim()
-                    val name = act.optString("name", "").trim()
-                    if (num.isBlank() && name.isNotBlank()) {
-                        num = findContactNumber(name) ?: ""
-                    }
-                    if (num.isNotBlank()) {
-                        val cleanPhone = num.replace(" ", "").replace("-", "")
-                        val callIntent = if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
-                            Intent(Intent.ACTION_CALL, Uri.parse("tel:$cleanPhone"))
-                        } else {
-                            Intent(Intent.ACTION_DIAL, Uri.parse("tel:$cleanPhone"))
-                        }.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-                        AppLauncher.launchWithOverlayFallback(this, callIntent)
-                    } else {
-                        val dialerIntent = Intent(Intent.ACTION_DIAL).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        AppLauncher.launchWithOverlayFallback(this, dialerIntent)
-                        val isFa = name.any { it in '\u0600'..'\u06FF' }
-                        val dialerMsg = if (isFa) "صفحه تماس برای $name باز شد قربان." else "Opening dialer for $name, sir."
-                        serviceListener?.onAssistantResponse(dialerMsg)
-                        speakBritish(dialerMsg)
-                    }
-                }
-                "sms" -> {
-                    val num = act.optString("number", "").trim()
-                    val body = act.optString("message", "").trim()
-                    val smsIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$num")).apply {
-                        putExtra("sms_body", body)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    AppLauncher.launchWithOverlayFallback(this, smsIntent)
-                }
-                "volume" -> {
-                    val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                    when (act.optString("action")) {
-                        "up" -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
-                        "down" -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
-                        "mute" -> am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, AudioManager.FLAG_SHOW_UI)
-                        "set" -> am.setStreamVolume(AudioManager.STREAM_MUSIC, act.optInt("level", 10), AudioManager.FLAG_SHOW_UI)
-                    }
-                }
-                "open_url" -> {
-                    val urlStr = act.optString("url", "").trim()
-                    if (urlStr.isNotBlank()) {
-                        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(urlStr)).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        AppLauncher.launchWithOverlayFallback(this, viewIntent)
+            val server = getServerUrl()
+            val url = URL("$server/api/chat")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            conn.setRequestProperty("Accept", "application/json")
+            val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+            val apiKey = prefs.getString("api_key", "") ?: ""
+            if (apiKey.isNotBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            }
+            conn.connectTimeout = 8000
+            conn.readTimeout = 20000
+            conn.doOutput = true
+
+            val body = JSONObject().apply {
+                put("message", "Screen Content Analysis:\n$screenText\nPlease summarize what is currently on the screen or answer based on it.")
+                put("tts", true)
+            }
+            java.io.OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(body.toString()) }
+
+            val code = conn.responseCode
+            if (code in 200..299) {
+                val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val json = JSONObject(respStr)
+                val reply = json.optString("response", "")
+                if (reply.isNotBlank()) {
+                    withContext(Dispatchers.Main) {
+                        serviceListener?.onAssistantResponse(reply)
+                        broadcastUiUpdate(assistantReply = reply)
+                        speakBritish(reply)
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "executeNativeClientAction error: ${e.message}")
+            Log.w(TAG, "sendScreenSummaryRequest failed: ${e.message}")
         }
     }
 
