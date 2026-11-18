@@ -99,10 +99,18 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         private const val CHUNK_SAMPLES = 1600 // 100ms at 16kHz
         private const val MIN_SPEECH_RMS = 300.0
 
-        fun createSpeechRecognizerIntent(language: String = "fa-IR"): Intent {
+        fun isPersianOrArabic(text: String): Boolean {
+            val regex = Regex("[\\u0600-\\u06FF]")
+            return regex.containsMatchIn(text)
+        }
+
+        fun createSpeechRecognizerIntent(language: String? = null): Intent {
             return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+                val targetLang = if (!language.isNullOrBlank()) language else Locale.getDefault().toLanguageTag()
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, targetLang)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, targetLang)
+                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60000L)
@@ -1132,7 +1140,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 updateNotification("Speaking...")
 
                 val summaryText = getSpokenSummary(text)
-                val hasPersian = summaryText.any { it in '\u0600'..'\u06FF' }
+                val replyText = summaryText
+                val hasPersian = isPersianOrArabic(replyText)
 
                 // Check local pre-cache first (<10ms instant playback)
                 val cacheFolder = File(cacheDir, "jarvis_voice_cache")
@@ -1306,25 +1315,36 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun isPersianOrArabic(text: String): Boolean {
+        val regex = Regex("[\\u0600-\\u06FF]")
+        return regex.containsMatchIn(text)
+    }
+
     private fun speakViaUkMaleTTS(text: String, isPersian: Boolean, onFinished: (() -> Unit)?) {
-        if (textToSpeech == null || !isTtsReady) {
+        val tts = textToSpeech
+        if (tts == null || !isTtsReady) {
             scope.launch { finishSpeaking(onFinished) }
             return
         }
 
         try {
-            if (isPersian) {
-                val res = textToSpeech?.setLanguage(Locale("fa", "IR"))
-                if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    textToSpeech?.language = Locale.UK
+            val replyText = text
+            if (isPersianOrArabic(replyText)) {
+                val persianLocale = Locale("fa", "IR")
+                if (tts.isLanguageAvailable(persianLocale) >= TextToSpeech.LANG_AVAILABLE) {
+                    tts.language = persianLocale
+                } else {
+                    // Fallback if the specific device lacks Persian TTS (inform user via Toast/Log)
+                    Log.w(TAG, "Persian TTS language is not available on this device")
+                    Toast.makeText(applicationContext, "Persian TTS not supported on device", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                textToSpeech?.language = Locale.UK
-                textToSpeech?.setPitch(0.90f)
-                textToSpeech?.setSpeechRate(1.05f)
+                tts.language = Locale.UK // Or Locale.US
+                tts.setPitch(0.90f)
+                tts.setSpeechRate(1.05f)
             }
 
-            textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {}
                 override fun onDone(utteranceId: String?) {
                     scope.launch { finishSpeaking(onFinished) }
@@ -1333,8 +1353,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     scope.launch { finishSpeaking(onFinished) }
                 }
             })
-            val utteranceId = "JARVIS_UK_" + System.currentTimeMillis()
-            textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            val utteranceId = "JARVIS_VOICE_" + System.currentTimeMillis()
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
         } catch (e: Exception) {
             Log.e(TAG, "speakViaUkMaleTTS error: ${e.message}")
             scope.launch { finishSpeaking(onFinished) }

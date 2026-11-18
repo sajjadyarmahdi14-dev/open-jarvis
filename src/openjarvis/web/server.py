@@ -221,10 +221,17 @@ async def run_creator_lore_engine(prompt: str, is_persian: bool) -> str:
     return generate_creator_story(language="fa" if is_persian else "en", genre=chosen_genre)
 
 
+CORE_SYSTEM_PROMPT = """\
+You are J.A.R.V.I.S., the hyper-intelligent British AI assistant inspired by Iron Man, running natively on Android with direct hardware and OS omni-control.
+LANGUAGE RULE: You are fully multilingual. You MUST automatically detect the language of the user's input and respond in the EXACT same language. If the user speaks Persian, reply entirely in Persian. If the user speaks English, reply entirely in English.
+LANGUAGE OVERRIDE: If the user explicitly commands you to change your language (e.g., 'From now on speak English', 'فارسی حرف بزن'), you must acknowledge the command in the requested language and use that language for all future responses until instructed otherwise.
+"""
+
 _cached_agent = None
 _cached_tools = None
 _device_apps: List[Dict[str, str]] = []
 _conversation_history: deque = deque(maxlen=20)
+_active_language_override: Optional[str] = None
 
 
 def _get_or_create_agent():
@@ -397,6 +404,43 @@ def _handle_fast_path(
             "fast_path": True,
             "status": "sleep",
         }
+
+    # -0.5. Dynamic Language Override Commands (Enforce & Switch on the fly)
+    global _active_language_override
+    en_override_patterns = [
+        r"^(?:from now on\s+)?(?:speak|talk|reply|switch to)\s+english\b",
+        r"^(?:speak|talk|reply)\s+in\s+english\b",
+        r"^english\s+please\b",
+        r"^(?:انگلیسی|به انگلیسی)\s+(?:صحبت کن|حرف بزن|بگو|پاسخ بده)\b",
+        r"^از این به بعد انگلیسی\s+(?:صحبت کن|حرف بزن|بگو|پاسخ بده)\b",
+    ]
+    fa_override_patterns = [
+        r"^(?:from now on\s+)?(?:speak|talk|reply|switch to)\s+(?:persian|farsi)\b",
+        r"^(?:speak|talk|reply)\s+in\s+(?:persian|farsi)\b",
+        r"^(?:persian|farsi)\s+please\b",
+        r"^(?:فارسی|به فارسی)\s+(?:صحبت کن|حرف بزن|بگو|پاسخ بده)\b",
+        r"^از این به بعد فارسی\s+(?:صحبت کن|حرف بزن|بگو|پاسخ بده)\b",
+    ]
+    for pat in en_override_patterns:
+        if re.search(pat, raw_cleaned, re.IGNORECASE) or re.search(pat, norm, re.IGNORECASE):
+            _active_language_override = "en"
+            return {
+                "response": "Understood, sir. I will communicate in English from now on.",
+                "tool_calls": [{"name": "set_language", "content": "Language overridden to English", "success": True}],
+                "turns": 1,
+                "client_actions": [],
+                "fast_path": True,
+            }
+    for pat in fa_override_patterns:
+        if re.search(pat, raw_cleaned, re.IGNORECASE) or re.search(pat, norm, re.IGNORECASE):
+            _active_language_override = "fa"
+            return {
+                "response": "چشم قربان، از این پس تمام پاسخ‌ها را به زبان فارسی ارائه خواهم داد.",
+                "tool_calls": [{"name": "set_language", "content": "Language overridden to Persian", "success": True}],
+                "turns": 1,
+                "client_actions": [],
+                "fast_path": True,
+            }
 
     # 0. Conversational greetings and wake checks (<5ms)
     greetings_en = {
@@ -1594,8 +1638,12 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         context = AgentContext(conversation=conv)
 
     input_text = req.message
+    if _active_language_override == "en":
+        input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
+    elif _active_language_override == "fa":
+        input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak Persian. Respond entirely in Persian.]\n\n{input_text}"
     if req.screen_context:
-        input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{req.message}"
+        input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{input_text}"
 
     try:
         # Run agent in background thread so async event loop and ping checks are never blocked!
@@ -1810,6 +1858,24 @@ async def voice_vad_utterance_endpoint(request: Request):
                 pass
             except Exception as e:
                 logger.debug("Google STT fa-IR error: %s", e)
+            # Fallback to Whisper backend transcription if Google STT fails to capture language shift
+            try:
+                txt = r.recognize_whisper(audio)
+                if txt and txt.strip():
+                    return txt.strip()
+            except Exception as e:
+                logger.debug("Whisper fallback transcription error: %s", e)
+            try:
+                from openjarvis.core.config import load_config
+                from openjarvis.speech._discovery import discover_speech_backend
+                cfg = load_config()
+                backend = discover_speech_backend(cfg)
+                if backend:
+                    res = backend.transcribe(data)
+                    if res and res.strip():
+                        return res.strip()
+            except Exception as e:
+                logger.debug("SpeechBackend fallback error: %s", e)
         except Exception as exc:
             logger.warning("VAD transcription exception: %s", exc)
         return ""
