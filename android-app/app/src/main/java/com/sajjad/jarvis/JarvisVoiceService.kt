@@ -229,6 +229,15 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     private var textToSpeech: TextToSpeech? = null
     private var isTtsReady = false
 
+    enum class AcousticState {
+        IDLE,
+        LISTENING,
+        PROCESSING,
+        SPEAKING
+    }
+
+    @Volatile private var acousticState = AcousticState.IDLE
+    @Volatile private var isProcessing = false
     @Volatile private var isTtsSpeaking = false
     @Volatile private var activeMediaPlayer: MediaPlayer? = null
     private val audioPlayMutex = Mutex()
@@ -519,7 +528,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
                 var record: AudioRecord? = null
                 try {
-                    // 1. Try VOICE_COMMUNICATION for hardware beamforming noise suppression, fallback to VOICE_RECOGNITION, then MIC
+                    // 1. Hardware Noise Isolation (Beamforming):
+                    // MUST use VOICE_COMMUNICATION for hardware dual-mic beamforming noise suppression
                     record = try {
                         AudioRecord(
                             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -528,28 +538,9 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             AudioFormat.ENCODING_PCM_16BIT,
                             bufferSize
                         )
-                    } catch (_: Exception) {
-                        try {
-                            AudioRecord(
-                                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                                SAMPLE_RATE,
-                                AudioFormat.CHANNEL_IN_MONO,
-                                AudioFormat.ENCODING_PCM_16BIT,
-                                bufferSize
-                            )
-                        } catch (_: Exception) {
-                            try {
-                                AudioRecord(
-                                    MediaRecorder.AudioSource.MIC,
-                                    SAMPLE_RATE,
-                                    AudioFormat.CHANNEL_IN_MONO,
-                                    AudioFormat.ENCODING_PCM_16BIT,
-                                    bufferSize
-                                )
-                            } catch (_: Exception) {
-                                null
-                            }
-                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "AudioRecord initialization error: ${e.message}", e)
+                        null
                     }
 
                     val activeRecord = record
@@ -561,18 +552,18 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     audioRecord = activeRecord
-                    // Attach Android native hardware audio processors (NoiseSuppressor, EchoCanceler, AGC)
+                    // Attach Android native hardware audio processors directly to AudioRecord session
                     attachAudioProcessors(activeRecord.audioSessionId)
                     activeRecord.startRecording()
                     isRecordingLoopActive = true
-                    Log.i(TAG, "Continuous AudioRecord running with hardware acoustic filtering & adaptive SNR gate")
+                    Log.i(TAG, "Hardware beamforming active (VOICE_COMMUNICATION, session=${activeRecord.audioSessionId})")
 
                     val readBuffer = ShortArray(CHUNK_SAMPLES)
                     val preRollSamples = (SAMPLE_RATE * PRE_ROLL_DURATION_MS) / 1000 // 6400 samples
                     val preRoll = ShortRingBuffer(preRollSamples)
                     val utteranceStream = ByteArrayOutputStream()
 
-                    var ambientFloor = 180.0
+                    var ambientNoiseFloor = 180.0
                     var lastSpeechTimestamp = 0L
                     var utteranceStartTime = 0L
                     var consecutiveZeroReads = 0
@@ -584,8 +575,11 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     while (isActive && isRecordingLoopActive) {
-                        if (isServiceMuted || isTtsSpeaking) {
-                            // Drain hardware audio buffer to prevent room echo accumulation
+                        // 4. The "Deaf Lock" (Ignore Post-Command Crowd Noise):
+                        // During PROCESSING and SPEAKING, immediately discard and flush all incoming audio bytes.
+                        // The system becomes entirely "deaf" to crowd and TV noise while sending to server,
+                        // awaiting response, and reading it out loud.
+                        if (isServiceMuted || isProcessing || isTtsSpeaking || acousticState == AcousticState.PROCESSING || acousticState == AcousticState.SPEAKING) {
                             activeRecord.read(readBuffer, 0, CHUNK_SAMPLES)
                             preRoll.clear()
                             utteranceStream.reset()
@@ -618,29 +612,17 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             }
                         }
 
-                        val silenceCutoffMs = if (accumulatedTranscript.isNotBlank() && UtteranceStitcher.hasIncompleteClause(accumulatedTranscript)) {
-                            COMMAND_SILENCE_WINDOW_MS + 1500L // Extended silence wait for trailing conjunctions/prepositions (5000ms)
-                        } else {
-                            COMMAND_SILENCE_WINDOW_MS // Full 3.5s (3500ms) patient silence cutoff before stopping
-                        }
-
-                        // Calculate RMS energy and zero-crossing count for human vocal frequency gate
+                        // 2. Dynamic SNR Voice Activity Detection (VAD):
+                        // Continuously calculate the Root Mean Square (RMS) of the audio chunks
                         var sum = 0.0
-                        var zcCount = 0
                         for (i in 0 until readCount) {
                             val s = readBuffer[i].toDouble()
                             sum += s * s
-                            if (i > 0 && ((readBuffer[i - 1] >= 0 && readBuffer[i] < 0) || (readBuffer[i - 1] < 0 && readBuffer[i] >= 0))) {
-                                zcCount++
-                            }
                         }
-                        val chunkRms = Math.sqrt(sum / readCount)
-                        // Adaptive SNR Voice Gate: Trigger only when energy exceeds ambient noise floor by 2.4x in vocal frequency band
-                        val speechThreshold = maxOf(ambientFloor * 2.4, MIN_SPEECH_RMS)
-                        val isHumanVocalBand = zcCount in 15..320
+                        val currentRms = Math.sqrt(sum / readCount)
 
-                        // Compute normalized amplitude 0f..1f and broadcast live for UI glowing orb
-                        val normAmp = ((chunkRms - ambientFloor) / 2000.0).coerceIn(0.0, 1.0).toFloat()
+                        // Compute normalized amplitude 0f..1f and broadcast live for glowing UI orb
+                        val normAmp = ((currentRms - ambientNoiseFloor) / 2000.0).coerceIn(0.0, 1.0).toFloat()
                         if (normAmp > 0.05f) {
                             broadcastUiUpdate(amplitude = normAmp)
                             withContext(Dispatchers.Main) {
@@ -648,56 +630,76 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                             }
                         }
 
-                        if (chunkRms >= speechThreshold && isHumanVocalBand) {
-                            lastSpeechTimestamp = now
-                            if (!isUtteranceActive) {
+                        // Speech Trigger: Speech is ONLY detected when current_rms > (ambient_noise_floor * 1.8)
+                        val isSpeechDetected = currentRms > (ambientNoiseFloor * 1.8)
+
+                        if (!isUtteranceActive) {
+                            if (isSpeechDetected) {
                                 isUtteranceActive = true
+                                acousticState = AcousticState.LISTENING
                                 utteranceStartTime = now
-                                awakeUntilTimestamp = now + MAX_COMMAND_DURATION_MS // Keep awake while dictating
+                                lastSpeechTimestamp = now
+                                awakeUntilTimestamp = now + 60000L
                                 utteranceStream.reset()
                                 utteranceStream.write(preRoll.toByteArray())
+                                utteranceStream.write(shortsToBytes(readBuffer, readCount))
                                 withContext(Dispatchers.Main) {
                                     serviceListener?.onSpeechStarted()
                                     val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
                                     serviceListener?.onWakeStateChanged(st)
                                     updateNotification("Listening...")
                                 }
-                            }
-                            utteranceStream.write(shortsToBytes(readBuffer, readCount))
-                        } else {
-                            if (isUtteranceActive) {
-                                utteranceStream.write(shortsToBytes(readBuffer, readCount))
                             } else {
-                                // Continuously track ambient room noise floor when idle, ignoring transient peaks
-                                if (chunkRms < ambientFloor * 1.5) {
-                                    ambientFloor = (ambientFloor * 0.96 + chunkRms * 0.04).coerceIn(60.0, 1000.0)
+                                // Calculate Ambient Floor: When idle, continuously calculate RMS to establish ambient_noise_floor
+                                if (currentRms < ambientNoiseFloor * 1.5) {
+                                    ambientNoiseFloor = ambientNoiseFloor * 0.95 + currentRms * 0.05
+                                } else {
+                                    ambientNoiseFloor = ambientNoiseFloor * 0.99 + currentRms * 0.01
                                 }
+                                ambientNoiseFloor = ambientNoiseFloor.coerceIn(30.0, 3000.0)
                                 preRoll.write(readBuffer, readCount)
                             }
-                        }
+                        } else {
+                            // 3. Smart End-of-Speech Detection (The 3.5s Rule):
+                            // Once speech has triggered, continuously buffer the audio.
+                            utteranceStream.write(shortsToBytes(readBuffer, readCount))
 
-                        // Long-Form Patient Listening (45s max command duration & 2.2s patient trailing silence)
-                        if (isUtteranceActive) {
+                            if (isSpeechDetected) {
+                                // User actively speaking: reset silence timer
+                                lastSpeechTimestamp = now
+                            }
+
+                            // If current_rms drops back down to the ambient_noise_floor range and stays there
+                            // for exactly 3500ms (3.5 seconds) OR hard fallback MAX_DURATION of 60 seconds is reached:
                             val sessionDuration = now - utteranceStartTime
                             val silenceDuration = now - lastSpeechTimestamp
-                            val maxDuration = MAX_COMMAND_DURATION_MS // Full 60s max duration, never 3.5s!
-                            val shouldStop = (sessionDuration >= maxDuration) || (silenceDuration >= silenceCutoffMs)
+                            val shouldStop = (silenceDuration >= 3500L) || (sessionDuration >= 60000L)
 
                             if (shouldStop) {
+                                // 4. The "Deaf Lock" (Ignore Post-Command Crowd Noise):
+                                // The exact millisecond the 3.5s silence triggers (or 60s max is hit),
+                                // transition the state to PROCESSING immediately!
                                 isUtteranceActive = false
+                                isProcessing = true
+                                acousticState = AcousticState.PROCESSING
+
                                 val pcmData = utteranceStream.toByteArray()
                                 utteranceStream.reset()
                                 preRoll.clear()
 
                                 withContext(Dispatchers.Main) {
                                     serviceListener?.onSpeechEnded()
+                                    serviceListener?.onWakeStateChanged("processing")
+                                    broadcastUiUpdate(wakeStatus = "processing")
+                                    updateNotification("Processing speech...")
                                 }
 
-                                val minBytes = if (currentVadMode == VadMode.STANDBY_WAKE_WORD) 9600 else 14400
-                                if (pcmData.size >= minBytes) {
+                                if (pcmData.size >= 9600) {
                                     val wavBytes = pcmToWav(pcmData, SAMPLE_RATE)
                                     dispatchVadUtterance(wavBytes)
                                 } else {
+                                    isProcessing = false
+                                    acousticState = AcousticState.IDLE
                                     withContext(Dispatchers.Main) {
                                         val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
                                         serviceListener?.onWakeStateChanged(st)
@@ -724,11 +726,12 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun triggerForceListen() {
-        if (isServiceMuted || isTtsSpeaking) return
+        if (isServiceMuted || isTtsSpeaking || isProcessing) return
         playActivationChime()
         currentVadMode = VadMode.ACTIVE_COMMAND
         awakeUntilTimestamp = System.currentTimeMillis() + 15000L
         isUtteranceActive = true
+        acousticState = AcousticState.LISTENING
         scope.launch(Dispatchers.Main) {
             serviceListener?.onWakeStateChanged("listening_cmd")
             serviceListener?.onSpeechStarted()
@@ -798,119 +801,133 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     private fun dispatchVadUtterance(wavBytes: ByteArray) {
         scope.launch {
-            serviceListener?.onWakeStateChanged("processing")
-            broadcastUiUpdate(wakeStatus = "processing")
-            updateNotification("Processing speech...")
+            try {
+                serviceListener?.onWakeStateChanged("processing")
+                broadcastUiUpdate(wakeStatus = "processing")
+                updateNotification("Processing speech...")
 
-            val (batPct, isCharging) = getBatteryTelemetry()
+                val (batPct, isCharging) = getBatteryTelemetry()
 
-            val result = withContext(Dispatchers.IO) {
-                sendVadUtterance(wavBytes, batPct, isCharging)
-            }
-
-            if (result != null) {
-                val status = result.optString("status", "")
-                val action = result.optString("action", "")
-                var transcript = result.optString("transcription", "")
-                val response = result.optString("response", "")
-                val clientActions = result.optJSONArray("client_actions")
-
-                // Multi-Clause Utterance Accumulator: stitch partial chunks
-                if (accumulatedTranscript.isNotBlank() && transcript.isNotBlank()) {
-                    transcript = UtteranceStitcher.stitchUtterances(accumulatedTranscript, transcript)
+                val result = withContext(Dispatchers.IO) {
+                    sendVadUtterance(wavBytes, batPct, isCharging)
                 }
 
-                if (transcript.isNotBlank()) {
-                    serviceListener?.onFinalSpeech(transcript)
-                    broadcastUiUpdate(userText = transcript)
-                }
+                if (result != null) {
+                    val status = result.optString("status", "")
+                    val action = result.optString("action", "")
+                    var transcript = result.optString("transcription", "")
+                    val response = result.optString("response", "")
+                    val clientActions = result.optJSONArray("client_actions")
 
-                // If server ignored the speech (ambient room noise in standby without wake word), discard silently!
-                if (status == "ignored" || status == "no_speech") {
-                    val st = "active"
-                    serviceListener?.onWakeStateChanged(st)
-                    broadcastUiUpdate(wakeStatus = st)
-                    updateNotification("J.A.R.V.I.S. Standby — Say 'Jarvis' anytime")
-                    return@launch
-                }
-
-                // Incomplete-Clause Guard: if trailing conjunction/preposition, buffer and keep listening
-                if (status != "sleep" && transcript.isNotBlank() && UtteranceStitcher.hasIncompleteClause(transcript)) {
-                    Log.i(TAG, "Incomplete clause guard tripped for '$transcript'. Buffering and extending pause wait.")
-                    accumulatedTranscript = transcript
-                    currentVadMode = VadMode.ACTIVE_COMMAND
-                    awakeUntilTimestamp = System.currentTimeMillis() + 15000L
-                    val st = "listening_cmd"
-                    serviceListener?.onWakeStateChanged(st)
-                    broadcastUiUpdate(wakeStatus = st)
-                    updateNotification("Listening for completion...")
-                    return@launch
-                }
-
-                accumulatedTranscript = ""
-
-                val cleanT = transcript.trim().lowercase(Locale.ROOT)
-                val sleepTriggers = listOf(
-                    "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
-                    "jarvis sleep", "sleep mode", "standby", "that's all jarvis", "mute yourself",
-                    "دیگه گوش نده", "گوش نده", "خداحافظ جارویس", "فعلا جارویس", "جارویس بخواب",
-                    "بخواب", "استندبای", "خداحافظ"
-                )
-                val isSleep = status == "sleep" || action == "sleep" || sleepTriggers.any { cleanT.contains(it) }
-
-                // Sleep / Standby Mode Transition (Pillar 4)
-                if (isSleep) {
-                    currentVadMode = VadMode.SLEEP_WAKEWORD_ONLY
-                    awakeUntilTimestamp = 0L
-                    updateNotification("J.A.R.V.I.S. Sleeping — Say 'Jarvis' to wake")
-                    serviceListener?.onWakeStateChanged("paused")
-                    val isFa = cleanT.any { it in '\u0600'..'\u06FF' }
-                    val sleepMsg = if (response.isNotBlank()) response
-                                  else if (isFa) "به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید."
-                                  else "Going into standby mode, sir. Say Jarvis whenever you need me."
-                    serviceListener?.onAssistantResponse(sleepMsg)
-                    broadcastUiUpdate(assistantReply = sleepMsg, wakeStatus = "paused")
-                    speakBritish(sleepMsg)
-                    return@launch
-                } else if (status == "awake" || action == "wake_alone") {
-                    currentVadMode = VadMode.ACTIVE_COMMAND
-                    awakeUntilTimestamp = System.currentTimeMillis() + 15000L
-                } else if (status == "executed") {
-                    currentVadMode = VadMode.STANDBY_WAKE_WORD
-                    awakeUntilTimestamp = 0L
-                }
-
-                // Native Kotlin Fast-Path for Flashlight / Torch
-                val torchTerms = listOf("flashlight", "torch", "چراغ قوه", "فلش")
-                if (torchTerms.any { cleanT.contains(it) }) {
-                    val offTerms = listOf("off", "خاموش", "ببند", "قطع", "disable", "stop")
-                    val shouldTurnOn = !offTerms.any { cleanT.contains(it) }
-                    setTorchState(shouldTurnOn)
-                }
-
-                // 100% Native execution of client actions (App, Torch, Alarm, Call, SMS, Volume)
-                if (clientActions != null) {
-                    for (i in 0 until clientActions.length()) {
-                        val act = clientActions.optJSONObject(i) ?: continue
-                        executeNativeClientAction(act)
+                    // Multi-Clause Utterance Accumulator: stitch partial chunks
+                    if (accumulatedTranscript.isNotBlank() && transcript.isNotBlank()) {
+                        transcript = UtteranceStitcher.stitchUtterances(accumulatedTranscript, transcript)
                     }
-                }
 
-                if (response.isNotBlank()) {
-                    serviceListener?.onAssistantResponse(response)
-                    broadcastUiUpdate(assistantReply = response)
-                    speakBritish(response)
+                    if (transcript.isNotBlank()) {
+                        serviceListener?.onFinalSpeech(transcript)
+                        broadcastUiUpdate(userText = transcript)
+                    }
+
+                    // If server ignored the speech (ambient room noise in standby without wake word), discard silently!
+                    if (status == "ignored" || status == "no_speech") {
+                        isProcessing = false
+                        acousticState = AcousticState.IDLE
+                        val st = "active"
+                        serviceListener?.onWakeStateChanged(st)
+                        broadcastUiUpdate(wakeStatus = st)
+                        updateNotification("J.A.R.V.I.S. Standby — Say 'Jarvis' anytime")
+                        return@launch
+                    }
+
+                    // Incomplete-Clause Guard: if trailing conjunction/preposition, buffer and keep listening
+                    if (status != "sleep" && transcript.isNotBlank() && UtteranceStitcher.hasIncompleteClause(transcript)) {
+                        Log.i(TAG, "Incomplete clause guard tripped for '$transcript'. Buffering and extending pause wait.")
+                        accumulatedTranscript = transcript
+                        currentVadMode = VadMode.ACTIVE_COMMAND
+                        awakeUntilTimestamp = System.currentTimeMillis() + 15000L
+                        isProcessing = false
+                        acousticState = AcousticState.IDLE
+                        val st = "listening_cmd"
+                        serviceListener?.onWakeStateChanged(st)
+                        broadcastUiUpdate(wakeStatus = st)
+                        updateNotification("Listening for completion...")
+                        return@launch
+                    }
+
+                    accumulatedTranscript = ""
+
+                    val cleanT = transcript.trim().lowercase(Locale.ROOT)
+                    val sleepTriggers = listOf(
+                        "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
+                        "jarvis sleep", "sleep mode", "standby", "that's all jarvis", "mute yourself",
+                        "دیگه گوش نده", "گوش نده", "خداحافظ جارویس", "فعلا جارویس", "جارویس بخواب",
+                        "بخواب", "استندبای", "خداحافظ"
+                    )
+                    val isSleep = status == "sleep" || action == "sleep" || sleepTriggers.any { cleanT.contains(it) }
+
+                    // Sleep / Standby Mode Transition (Pillar 4)
+                    if (isSleep) {
+                        currentVadMode = VadMode.SLEEP_WAKEWORD_ONLY
+                        awakeUntilTimestamp = 0L
+                        updateNotification("J.A.R.V.I.S. Sleeping — Say 'Jarvis' to wake")
+                        serviceListener?.onWakeStateChanged("paused")
+                        val isFa = cleanT.any { it in '\u0600'..'\u06FF' }
+                        val sleepMsg = if (response.isNotBlank()) response
+                                      else if (isFa) "به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید."
+                                      else "Going into standby mode, sir. Say Jarvis whenever you need me."
+                        serviceListener?.onAssistantResponse(sleepMsg)
+                        broadcastUiUpdate(assistantReply = sleepMsg, wakeStatus = "paused")
+                        speakBritish(sleepMsg)
+                        return@launch
+                    } else if (status == "awake" || action == "wake_alone") {
+                        currentVadMode = VadMode.ACTIVE_COMMAND
+                        awakeUntilTimestamp = System.currentTimeMillis() + 15000L
+                    } else if (status == "executed") {
+                        currentVadMode = VadMode.STANDBY_WAKE_WORD
+                        awakeUntilTimestamp = 0L
+                    }
+
+                    // Native Kotlin Fast-Path for Flashlight / Torch
+                    val torchTerms = listOf("flashlight", "torch", "چراغ قوه", "فلش")
+                    if (torchTerms.any { cleanT.contains(it) }) {
+                        val offTerms = listOf("off", "خاموش", "ببند", "قطع", "disable", "stop")
+                        val shouldTurnOn = !offTerms.any { cleanT.contains(it) }
+                        setTorchState(shouldTurnOn)
+                    }
+
+                    // 100% Native execution of client actions (App, Torch, Alarm, Call, SMS, Volume)
+                    if (clientActions != null) {
+                        for (i in 0 until clientActions.length()) {
+                            val act = clientActions.optJSONObject(i) ?: continue
+                            executeNativeClientAction(act)
+                        }
+                    }
+
+                    if (response.isNotBlank()) {
+                        serviceListener?.onAssistantResponse(response)
+                        broadcastUiUpdate(assistantReply = response)
+                        speakBritish(response)
+                    } else {
+                        isProcessing = false
+                        acousticState = AcousticState.IDLE
+                        val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "active"
+                        serviceListener?.onWakeStateChanged(st)
+                        broadcastUiUpdate(wakeStatus = st)
+                        updateNotification()
+                    }
                 } else {
+                    isProcessing = false
+                    acousticState = AcousticState.IDLE
                     val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "active"
                     serviceListener?.onWakeStateChanged(st)
                     broadcastUiUpdate(wakeStatus = st)
                     updateNotification()
                 }
-            } else {
-                val st = if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "active"
-                serviceListener?.onWakeStateChanged(st)
-                broadcastUiUpdate(wakeStatus = st)
-                updateNotification()
+            } catch (e: Exception) {
+                Log.e(TAG, "dispatchVadUtterance error: ${e.message}", e)
+                isProcessing = false
+                acousticState = AcousticState.IDLE
             }
         }
     }
@@ -1091,6 +1108,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
 
     fun speakBritish(text: String, onFinished: (() -> Unit)? = null) {
         if (text.isBlank()) {
+            isProcessing = false
+            acousticState = AcousticState.IDLE
             onFinished?.invoke()
             return
         }
@@ -1101,6 +1120,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
                 stopCurrentPlayback()
 
                 isTtsSpeaking = true
+                isProcessing = false
+                acousticState = AcousticState.SPEAKING
                 serviceListener?.onTtsStarted()
                 updateNotification("Speaking...")
 
@@ -1152,6 +1173,8 @@ class JarvisVoiceService : Service(), TextToSpeech.OnInitListener {
         // Echo decay delay (600ms) before reopening mic
         delay(600)
         isTtsSpeaking = false
+        isProcessing = false
+        acousticState = AcousticState.IDLE
         serviceListener?.onTtsFinished()
         val st = if (isServiceMuted) "paused" else if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
         serviceListener?.onWakeStateChanged(st)
