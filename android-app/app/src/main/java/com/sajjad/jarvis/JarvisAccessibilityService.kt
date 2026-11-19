@@ -20,7 +20,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.OutputStreamWriter
@@ -449,6 +451,12 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
+    suspend fun captureScreenBase64Suspend(): String? = suspendCancellableCoroutine { cont ->
+        captureScreenBase64 { b64 ->
+            if (cont.isActive) cont.resume(b64)
+        }
+    }
+
     fun scrollDown(): Boolean = performScrollGesture(scrollDown = true)
 
     fun scrollUp(): Boolean = performScrollGesture(scrollDown = false)
@@ -582,6 +590,18 @@ class JarvisAccessibilityService : AccessibilityService() {
                     DeviceController.playSong(this, query)
                 }
                 true
+            }
+            "tap_coords", "tap_coordinates", "click_coords" -> {
+                val displayMetrics = resources.displayMetrics
+                val xNorm = params.optDouble("x_norm", params.optDouble("x", -1.0)).toFloat()
+                val yNorm = params.optDouble("y_norm", params.optDouble("y", -1.0)).toFloat()
+                if (xNorm >= 0f && yNorm >= 0f) {
+                    val px = if (xNorm <= 1.0f) xNorm * displayMetrics.widthPixels else xNorm
+                    val py = if (yNorm <= 1.0f) yNorm * displayMetrics.heightPixels else yNorm
+                    tapAtCoordinates(px, py)
+                } else {
+                    false
+                }
             }
             "back" -> goBack()
             "home" -> goHome()
@@ -948,6 +968,18 @@ class JarvisAccessibilityService : AccessibilityService() {
                 true
             }
             "done" -> true
+            "tap_coords", "tap_coordinates", "click_coords" -> {
+                val displayMetrics = resources.displayMetrics
+                val xNorm = actionPayload.optDouble("x_norm", actionPayload.optDouble("x", -1.0)).toFloat()
+                val yNorm = actionPayload.optDouble("y_norm", actionPayload.optDouble("y", -1.0)).toFloat()
+                if (xNorm >= 0f && yNorm >= 0f) {
+                    val px = if (xNorm <= 1.0f) xNorm * displayMetrics.widthPixels else xNorm
+                    val py = if (yNorm <= 1.0f) yNorm * displayMetrics.heightPixels else yNorm
+                    tapAtCoordinates(px, py)
+                } else {
+                    false
+                }
+            }
             else -> {
                 val map = if (nodeMap.isNotEmpty()) nodeMap else lastDumpedNodeMap
                 val intMap = mutableMapOf<Int, AccessibilityNodeInfo>()
@@ -1001,13 +1033,29 @@ class JarvisAccessibilityService : AccessibilityService() {
                 val jsonArray = JSONArray()
                 serializedNodes.forEach { jsonArray.put(it) }
 
+                val uiNodesArray = try { JSONArray(uiTreeJsonStr) } catch (_: Exception) { JSONArray() }
+                var clickableCount = 0
+                for (i in 0 until uiNodesArray.length()) {
+                    val n = uiNodesArray.optJSONObject(i)
+                    if (n?.optBoolean("clickable") == true) clickableCount++
+                }
+
+                var screenshotBase64: String? = null
+                if (clickableCount < 5 || isCameraGoal) {
+                    Log.i(TAG, "UI tree has $clickableCount < 5 clickable nodes. Capturing silent screenshot fallback...")
+                    screenshotBase64 = captureScreenBase64Suspend()
+                }
+
                 val payload = JSONObject().apply {
                     put("goal", goal)
                     put("package", currentPkg)
                     put("step", currentStep)
                     put("ui_tree", jsonArray)
-                    put("ui_nodes", JSONArray(uiTreeJsonStr))
+                    put("ui_nodes", uiNodesArray)
                     put("ui_tree_json", uiTreeJsonStr)
+                    if (!screenshotBase64.isNullOrBlank()) {
+                        put("screenshot_base64", screenshotBase64)
+                    }
                 }
 
                 val stepResponse = postAgentStep(serverUrl, payload)

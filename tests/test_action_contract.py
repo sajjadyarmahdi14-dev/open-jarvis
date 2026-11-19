@@ -200,3 +200,76 @@ def test_schema_contract_action_dispatcher_coverage():
             missing_handlers.append(action)
 
     assert not missing_handlers, f"ActionDispatcher.kt is missing handlers for actions: {missing_handlers}"
+
+
+def test_camera_control_tool_and_fastpath():
+    """Verify AndroidCameraControlTool schema and server fast-path handling."""
+    from openjarvis.tools.android_tools import AndroidCameraControlTool
+    tool = AndroidCameraControlTool()
+    res = tool.execute(mode="photo", timer_seconds=3, zoom=2.0, capture=True, effect="vivid")
+    assert res.success is True
+    meta = res.metadata
+    assert meta.get("client_action") == "camera_control"
+    assert meta.get("mode") == "photo"
+    assert meta.get("timer_seconds") == 3
+    assert meta.get("zoom") == 2.0
+    assert meta.get("capture") is True
+    assert meta.get("effect") == "vivid"
+
+    # Fast path test on /api/chat
+    client = TestClient(app)
+    r_cam = client.post("/api/chat", json={"message": "take a photo with 3 second timer"})
+    assert r_cam.status_code == 200
+    d_cam = r_cam.json()
+    assert d_cam.get("fast_path") is True
+    actions = d_cam.get("client_actions", [])
+    assert len(actions) > 0
+    assert actions[0].get("type") == "camera_control"
+    assert actions[0].get("timer_seconds") == 3
+
+
+def test_agent_step_visual_coordinate_fallback():
+    """Verify /api/agent/step fallback to tap_coords at (0.50, 0.88) when UI tree is minimal."""
+    client = TestClient(app)
+    payload = {
+        "goal": "take photo",
+        "package": "com.android.camera",
+        "step": 0,
+        "ui_tree": [],
+        "ui_nodes": [],
+        "screenshot_base64": "dummy_base64_data",
+    }
+    resp = client.post("/api/agent/step", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("action") == "tap_coords"
+    assert data.get("x_norm") == 0.50
+    assert data.get("y_norm") == 0.88
+
+
+def test_stt_bilingual_detection(monkeypatch):
+    """Verify /api/stt returns language='fa' or 'en' based on transcription."""
+    import base64
+    client = TestClient(app)
+    dummy_b64 = base64.b64encode(b"RIFF1234WAVEfmt 1234data1234").decode("utf-8")
+
+    # 1. Persian transcription
+    monkeypatch.setattr(
+        "openjarvis.web.server._do_transcribe",
+        lambda data: "سلام جارویس حالت چطوره"
+    )
+    r_fa = client.post("/api/stt", json={"audio_base64": dummy_b64})
+    assert r_fa.status_code == 200
+    assert r_fa.json().get("language") == "fa"
+    assert r_fa.json().get("transcript") == "سلام جارویس حالت چطوره"
+
+    # 2. English transcription
+    monkeypatch.setattr(
+        "openjarvis.web.server._do_transcribe",
+        lambda data: "Hello Jarvis, what is the status?"
+    )
+    r_en = client.post("/api/stt", json={"audio_base64": dummy_b64})
+    assert r_en.status_code == 200
+    assert r_en.json().get("language") == "en"
+    assert r_en.json().get("transcript") == "Hello Jarvis, what is the status?"
+

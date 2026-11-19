@@ -21,22 +21,19 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
- * Part A: Floating Sci-Fi HUD Overlay
+ * Pillar 3: Rock-Solid Floating Live HUD Overlay
  *
- * A non-intrusive, floating dark-cyan pill HUD using Android WindowManager (TYPE_APPLICATION_OVERLAY)
- * that appears just below the status bar over any app without intercepting touches from background apps.
+ * Main-thread serialized, persistent WindowManager overlay with zero animation/timer race conditions.
+ * Attached ONCE to WindowManager and toggled via View.VISIBLE / View.GONE.
+ * Remains visible throughout LISTENING, ACTIVE_CONVERSATION, THINKING, SPEAKING, and AGENT_WORKING.
  */
 class JarvisOverlayManager(private val context: Context) {
 
     companion object {
         private const val TAG = "JarvisOverlayManager"
+        const val PREF_PIN_HUD = "pin_floating_hud"
 
         @Volatile
         var instance: JarvisOverlayManager? = null
@@ -53,15 +50,17 @@ class JarvisOverlayManager(private val context: Context) {
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(Dispatchers.Main)
 
     private var overlayView: LinearLayout? = null
     private var orbView: MiniVoiceOrbView? = null
     private var subtitleText: TextView? = null
 
     private var isAttached = false
-    private var isTemporarilyHidden = false
-    private var autoHideJob: Job? = null
+    private var currentLayoutFlags: Int = 0
+
+    private val hideRunnable = Runnable {
+        performAutoHide()
+    }
 
     init {
         instance = this
@@ -118,16 +117,22 @@ class JarvisOverlayManager(private val context: Context) {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Window Attachment & View Construction
-    // -------------------------------------------------------------------------
-
     private fun canDraw(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Settings.canDrawOverlays(context)
         } else {
             true
         }
+    }
+
+    private fun isPinned(): Boolean {
+        val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        return prefs.getBoolean(PREF_PIN_HUD, false)
+    }
+
+    private fun getStatusBarHeight(): Int {
+        val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (resourceId > 0) context.resources.getDimensionPixelSize(resourceId) else (28 * context.resources.displayMetrics.density).toInt()
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -148,8 +153,8 @@ class JarvisOverlayManager(private val context: Context) {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = 24f * density
-                setColor(Color.parseColor("#E6091420")) // Translucent gunmetal
-                setStroke((1.5f * density).toInt(), Color.parseColor("#8000E5FF")) // Neon cyan glow border
+                setColor(Color.parseColor("#EB08131F")) // Dark translucent gunmetal
+                setStroke((1.5f * density).toInt(), Color.parseColor("#9900E5FF")) // Neon cyan glow border
             }
 
             // Click handling: Tap HUD pill triggers instant Barge-In or dismiss
@@ -180,7 +185,7 @@ class JarvisOverlayManager(private val context: Context) {
             setTextColor(Color.parseColor("#E0F7FA"))
             textSize = 12f
             typeface = Typeface.SANS_SERIF
-            text = "J.A.R.V.I.S. Standby"
+            text = "J.A.R.V.I.S. Online"
         }
         val textParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -194,7 +199,7 @@ class JarvisOverlayManager(private val context: Context) {
         return container
     }
 
-    private fun getLayoutParams(): WindowManager.LayoutParams {
+    private fun getLayoutParams(isTouchable: Boolean): WindowManager.LayoutParams {
         val density = context.resources.displayMetrics.density
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -203,9 +208,17 @@ class JarvisOverlayManager(private val context: Context) {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+
+        if (!isTouchable) {
+            flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+
+        currentLayoutFlags = flags
+
+        val topMargin = getStatusBarHeight() + (12 * density).toInt()
 
         return WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -215,99 +228,130 @@ class JarvisOverlayManager(private val context: Context) {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = (42 * density).toInt() // Positioned neatly just below the status bar
+            y = topMargin
         }
     }
 
     // -------------------------------------------------------------------------
-    // Public State Management API
+    // Public State Management API (All Main-Thread Serialized)
     // -------------------------------------------------------------------------
 
     fun showOverlay() {
         if (!canDraw() || windowManager == null) return
         mainHandler.post {
-            autoHideJob?.cancel()
+            // Cancel any pending auto-hide or fade-out
+            mainHandler.removeCallbacks(hideRunnable)
+
+            val view = overlayView ?: createOverlayView().also { overlayView = it }
+
+            // Ensure attached to WindowManager once
             if (!isAttached) {
                 try {
-                    val view = overlayView ?: createOverlayView().also { overlayView = it }
+                    view.visibility = View.VISIBLE
                     view.alpha = 0f
                     view.scaleX = 0.85f
                     view.scaleY = 0.85f
-                    windowManager.addView(view, getLayoutParams())
+                    windowManager.addView(view, getLayoutParams(isTouchable = true))
                     isAttached = true
-
-                    view.animate()
-                        .alpha(1f)
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .setDuration(220)
-                        .start()
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed adding overlay to WindowManager: ${e.message}")
+                    return@post
                 }
             } else {
-                overlayView?.animate()?.alpha(1f)?.scaleX(1f)?.scaleY(1f)?.setDuration(150)?.start()
+                // If view was GONE or animating, update layout flags to touchable
+                if (view.visibility != View.VISIBLE) {
+                    view.visibility = View.VISIBLE
+                    try {
+                        windowManager.updateViewLayout(view, getLayoutParams(isTouchable = true))
+                    } catch (_: Exception) {}
+                }
             }
+
+            // Cleanly cancel previous animations and animate to full opacity
+            view.animate().cancel()
+            view.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(180)
+                .setListener(null)
+                .start()
         }
     }
 
     fun hideOverlay() {
         mainHandler.post {
-            if (isAttached && overlayView != null) {
-                overlayView?.animate()
-                    ?.alpha(0f)
-                    ?.scaleX(0.85f)
-                    ?.scaleY(0.85f)
-                    ?.setDuration(250)
-                    ?.setListener(object : AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: Animator) {
-                            try {
-                                if (isAttached && overlayView != null) {
-                                    windowManager?.removeView(overlayView)
-                                    isAttached = false
-                                }
-                            } catch (_: Exception) {}
-                        }
-                    })
-                    ?.start()
-            }
+            if (isPinned()) return@post
+            mainHandler.removeCallbacks(hideRunnable)
+            val view = overlayView ?: return@post
+            if (!isAttached || view.visibility != View.VISIBLE) return@post
+
+            view.animate().cancel()
+            view.animate()
+                .alpha(0f)
+                .scaleX(0.85f)
+                .scaleY(0.85f)
+                .setDuration(220)
+                .setListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        view.visibility = View.GONE
+                        try {
+                            if (isAttached) {
+                                windowManager?.updateViewLayout(view, getLayoutParams(isTouchable = false))
+                            }
+                        } catch (_: Exception) {}
+                    }
+                })
+                .start()
         }
     }
 
-    fun scheduleAutoHide(delayMs: Long = 2500L) {
-        autoHideJob?.cancel()
-        autoHideJob = scope.launch(Dispatchers.Main) {
-            delay(delayMs)
-            hideOverlay()
+    private fun performAutoHide() {
+        if (isPinned()) return
+        hideOverlay()
+    }
+
+    fun scheduleAutoHide(delayMs: Long = 4500L) {
+        if (isPinned()) return
+        mainHandler.post {
+            mainHandler.removeCallbacks(hideRunnable)
+            mainHandler.postDelayed(hideRunnable, delayMs)
         }
     }
 
     /**
-     * Temporarily hide HUD before zero-popup screen capture so the HUD pill itself is not captured.
+     * Temporarily hide HUD during zero-popup screen capture so the HUD pill itself is not captured.
+     * Alpha set to 0f for 150ms and restored without destroying view.
      */
     fun setTemporarilyHidden(hidden: Boolean) {
-        isTemporarilyHidden = hidden
         mainHandler.post {
-            overlayView?.visibility = if (hidden) View.INVISIBLE else View.VISIBLE
+            val view = overlayView ?: return@post
+            if (hidden) {
+                view.alpha = 0f
+            } else {
+                view.alpha = 1f
+            }
         }
     }
 
     /**
      * Update state and auto-show / schedule auto-hide accordingly.
+     * Keeps HUD continuously visible throughout LISTENING, ACTIVE_CONVERSATION, THINKING, SPEAKING, and AGENT_WORKING.
+     * Only schedules auto-hide after settling back into STANDBY or SLEEPING.
      */
     fun updateState(state: String) {
         mainHandler.post {
             when (state.lowercase()) {
-                "listening", "listening_wake", "listening_cmd" -> {
+                "listening", "listening_wake", "listening_cmd", "active_conversation" -> {
                     orbView?.setStateColor(Color.parseColor("#00E5FF")) // Cyan = Listening
                     showOverlay()
                 }
                 "thinking", "processing", "vision", "vision_camera", "vision_screen" -> {
-                    orbView?.setStateColor(Color.parseColor("#FFB300")) // Amber/Blue = Thinking/Vision
+                    orbView?.setStateColor(Color.parseColor("#FFB300")) // Amber = Thinking/Vision
                     showOverlay()
                 }
                 "speaking" -> {
-                    orbView?.setStateColor(Color.parseColor("#00E676")) // Bright Teal = Speaking
+                    orbView?.setStateColor(Color.parseColor("#00E676")) // Neon Green = Speaking
                     showOverlay()
                 }
                 "agent_working" -> {
@@ -315,7 +359,8 @@ class JarvisOverlayManager(private val context: Context) {
                     showOverlay()
                 }
                 "standby", "paused", "sleep", "sleeping", "idle", "active" -> {
-                    scheduleAutoHide(2500L)
+                    // Only start auto-hide after settling back to idle!
+                    scheduleAutoHide(4500L)
                 }
             }
         }
@@ -338,7 +383,7 @@ class JarvisOverlayManager(private val context: Context) {
 
     fun destroy() {
         mainHandler.post {
-            autoHideJob?.cancel()
+            mainHandler.removeCallbacks(hideRunnable)
             try {
                 if (isAttached && overlayView != null) {
                     windowManager?.removeView(overlayView)

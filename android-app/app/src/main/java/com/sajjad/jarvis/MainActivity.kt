@@ -152,8 +152,11 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    ) { perms ->
         startVoiceService()
+        if (perms[Manifest.permission.RECORD_AUDIO] == true) {
+            JarvisVoiceService.startRecordingIfPermitted(applicationContext)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -982,6 +985,54 @@ private fun JarvisVoiceOrbSection(
             label = "OrbColor"
         )
 
+        // Live MIC LIVE indicator row + dynamic dB bars
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(bottom = 12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(Color(0xFF00FF88), CircleShape)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "MIC LIVE",
+                color = Color(0xFF00FF88),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                val clampedAmp = amplitude.coerceIn(0f, 1f)
+                val bars = listOf(0.15f, 0.35f, 0.60f, 0.85f)
+                bars.forEach { threshold ->
+                    val isActive = clampedAmp >= threshold
+                    val barHeight = when (threshold) {
+                        0.15f -> 6.dp
+                        0.35f -> 10.dp
+                        0.60f -> 14.dp
+                        else -> 18.dp
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(3.dp)
+                            .height(barHeight)
+                            .background(
+                                if (isActive) Color(0xFF00FF88) else Color(0xFF00FF88).copy(alpha = 0.25f),
+                                RoundedCornerShape(1.dp)
+                            )
+                    )
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .size(140.dp)
@@ -1284,6 +1335,9 @@ private fun JarvisSettingsDialog(
     val prefs = remember { context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE) }
     var proactiveAlertsEnabled by remember {
         mutableStateOf(prefs.getBoolean("proactive_alerts_enabled", true))
+    }
+    var pinFloatingHud by remember {
+        mutableStateOf(prefs.getBoolean(JarvisOverlayManager.PREF_PIN_HUD, false))
     }
 
     val coroutineScope = rememberCoroutineScope()
@@ -1604,6 +1658,43 @@ private fun JarvisSettingsDialog(
                         onCheckedChange = { checked ->
                             proactiveAlertsEnabled = checked
                             prefs.edit().putBoolean("proactive_alerts_enabled", checked).apply()
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
+                // Pin Floating HUD Toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Pin Floating HUD",
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Keep Iron Man HUD overlay permanently visible on top of screen",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = pinFloatingHud,
+                        onCheckedChange = { checked ->
+                            pinFloatingHud = checked
+                            prefs.edit().putBoolean(JarvisOverlayManager.PREF_PIN_HUD, checked).apply()
+                            if (checked) {
+                                JarvisOverlayManager.instance?.showOverlay()
+                            }
                         },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = CyanNeon,

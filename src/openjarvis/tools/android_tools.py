@@ -1669,6 +1669,84 @@ class AndroidCameraCaptureTool(BaseTool):
         )
 
 
+@ToolRegistry.register("android_camera_control")
+class AndroidCameraControlTool(BaseTool):
+    """Full-control camera engine for photo, video, timer, zoom, flash, lens, and effects."""
+
+    tool_id = "android_camera_control"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="android_camera_control",
+            description=(
+                "Control the Android Pro Camera engine to capture photos or videos with full settings. "
+                "Supports lens switching (front/back), timer (0, 3, 5, 10s), zoom (1.0..8.0, zoom_in, zoom_out), "
+                "flash (on, off, auto, torch), exposure, and photo/video modes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["photo", "video", "stop_video", "close"],
+                        "description": "Camera mode",
+                    },
+                    "lens": {
+                        "type": "string",
+                        "enum": ["back", "front", "keep"],
+                        "description": "Camera lens facing",
+                    },
+                    "timer_seconds": {
+                        "type": "integer",
+                        "description": "Countdown timer in seconds (0, 3, 5, 10)",
+                    },
+                    "zoom": {
+                        "type": ["number", "string"],
+                        "description": "Zoom ratio (1.0 to 8.0) or 'zoom_in', 'zoom_out', 'reset'",
+                    },
+                    "flash": {
+                        "type": "string",
+                        "enum": ["on", "off", "auto", "torch", "keep"],
+                        "description": "Flash mode",
+                    },
+                    "capture": {
+                        "type": "boolean",
+                        "description": "Whether to trigger immediate capture or timer capture",
+                    },
+                },
+            },
+            category="android",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        mode = str(params.get("mode", "photo")).lower()
+        lens = str(params.get("lens", "keep")).lower()
+        timer = int(params.get("timer_seconds", 0))
+        zoom = params.get("zoom", "keep")
+        flash = str(params.get("flash", "keep")).lower()
+        effect = str(params.get("effect", params.get("filter", "normal"))).lower()
+        capture = bool(params.get("capture", True))
+
+        action_payload = {
+            "type": "camera_control",
+            "mode": mode,
+            "lens": lens,
+            "timer_seconds": timer,
+            "zoom": zoom,
+            "flash": flash,
+            "effect": effect,
+            "capture": capture,
+        }
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Camera control dispatched: mode={mode}, lens={lens}, timer={timer}s, capture={capture}",
+            success=True,
+            metadata={"client_action": "camera_control", "client_actions": [action_payload], **action_payload},
+            data={"client_actions": [action_payload]},
+        )
+
+
 @ToolRegistry.register("android_gps_location")
 class AndroidGpsLocationTool(BaseTool):
     """Retrieve live GPS coordinates and location information."""

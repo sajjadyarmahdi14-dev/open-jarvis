@@ -246,18 +246,10 @@ object ActionDispatcher {
                 }
 
                 // -----------------------------------------------------------------
-                // 7. Live Multimodal Vision & Camera
+                // 7. Live Multimodal Vision & Camera Pro Engine
                 // -----------------------------------------------------------------
-                "android_camera_capture", "camera", "open_camera" -> {
-                    DeviceController.openCamera(context)
-                    lastActionResult = "Camera launched"
-                    true
-                }
-                "take_photo" -> {
-                    DeviceController.openCamera(context)
-                    JarvisAccessibilityService.instance?.takePhoto(context)
-                    lastActionResult = "Camera opened and shutter triggered"
-                    true
+                "camera_control", "camera", "open_camera", "take_photo", "record_video", "android_camera_capture" -> {
+                    handleCameraControl(context, act, isFa, onFeedback)
                 }
                 "vision_camera" -> {
                     val prompt = act.optString("prompt", "What do you see?")
@@ -569,5 +561,47 @@ object ActionDispatcher {
             lastActionResult = if (verifiedOpen) "Verified open: ${resolved.label}" else "Background launch blocked for ${resolved.label}"
             if (verifyAndSpeak) onFeedback?.invoke(confirmationMsg)
         }
+    }
+
+    private fun handleCameraControl(
+        context: Context,
+        act: JSONObject,
+        isFa: Boolean,
+        onFeedback: ((String) -> Unit)?
+    ): Boolean {
+        val hasCam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (!hasCam) {
+            val missingMsg = if (isFa) "مجوز دوربین به جارویس داده نشده است." else "Camera permission is not granted for Jarvis."
+            onFeedback?.invoke(missingMsg)
+            lastActionResult = "Camera permission missing"
+            return false
+        }
+
+        // If user explicitly asks for "stock" camera app, open OEM Camera
+        if (act.optString("app", "").lowercase(Locale.ROOT) == "stock") {
+            DeviceController.openCamera(context)
+            if (act.optBoolean("capture", false)) {
+                JarvisAccessibilityService.instance?.takePhoto(context)
+            }
+            lastActionResult = "Stock camera launched"
+            return true
+        }
+
+        // If JarvisCameraActivity is already running in foreground, apply action directly
+        val existingActivity = JarvisCameraActivity.instance
+        if (existingActivity != null && !existingActivity.isFinishing) {
+            existingActivity.applyCameraControl(act)
+            lastActionResult = "CameraControl applied to active session: ${act.optString("mode", "photo")}"
+            return true
+        }
+
+        // Launch JarvisCameraActivity with action payload
+        val intent = Intent(context, JarvisCameraActivity::class.java).apply {
+            putExtra(JarvisCameraActivity.EXTRA_CAMERA_ACTION, act.toString())
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        AppLauncher.launchWithOverlayFallback(context, intent)
+        lastActionResult = "JarvisCameraActivity launched: ${act.optString("mode", "photo")}"
+        return true
     }
 }

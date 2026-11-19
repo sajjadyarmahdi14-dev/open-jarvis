@@ -421,6 +421,21 @@ async def get_market_price(symbol: str) -> Dict[str, Any]:
         except Exception as e:
             logger.debug(f"CoinGecko lookup skipped: {e}")
 
+    if coin_id and coin_id in CRYPTO_FALLBACK_PRICES:
+        fallback_usd = CRYPTO_FALLBACK_PRICES[coin_id]
+        sym_upper = clean_sym.upper()
+        summary_en = f"{sym_upper} price: ~${fallback_usd:,.2f} USD."
+        summary_fa = f"قیمت {symbol}: حدود {fallback_usd:,.2f} دلار (USD)."
+        return {
+            "symbol": clean_sym,
+            "coin_id": coin_id,
+            "price_usd": fallback_usd,
+            "change_24h": 0.0,
+            "summary_en": summary_en,
+            "summary_fa": summary_fa,
+            "success": True,
+        }
+
     search_q = f"{symbol} price today"
     search_res = await web_search(search_q, max_results=3)
     if search_res:
@@ -434,10 +449,6 @@ async def get_market_price(symbol: str) -> Dict[str, Any]:
             "sources": search_res,
             "success": True,
         }
-
-    if coin_id and coin_id in CRYPTO_FALLBACK_PRICES:
-        fallback_usd = CRYPTO_FALLBACK_PRICES[coin_id]
-        sym_upper = clean_sym.upper()
         return {
             "symbol": clean_sym,
             "coin_id": coin_id,

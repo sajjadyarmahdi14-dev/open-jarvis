@@ -712,7 +712,7 @@ async def stream_full_openai_compat_rest(
     model_lower = model.lower()
     if "openrouter" in base_url.lower() or any(k in model_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
         if "reasoning" not in payload:
-            payload["reasoning"] = {"effort": "low", "exclude": True}
+            payload["reasoning"] = {"effort": "none", "exclude": True}
         if payload.get("max_tokens", 2500) < 2500:
             payload["max_tokens"] = 2500
     if raw_tools:
@@ -754,14 +754,14 @@ async def stream_full_openai_compat_rest(
         cand_lower = candidate.lower()
         if "openrouter" in base_url.lower() or any(k in cand_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
             if "reasoning" not in cand_payload:
-                cand_payload["reasoning"] = {"effort": "low", "exclude": True}
+                cand_payload["reasoning"] = {"effort": "none", "exclude": True}
             if cand_payload.get("max_tokens", 2500) < 2500:
                 cand_payload["max_tokens"] = 2500
         else:
             cand_payload.pop("reasoning", None)
 
         try:
-            async with async_client.stream("POST", url, json=cand_payload, headers=headers) as resp:
+            async with async_client.stream("POST", url, json=cand_payload, headers=headers, timeout=6.0) as resp:
                 if not resp.is_success:
                     await resp.aread()
                     err_text = resp.text

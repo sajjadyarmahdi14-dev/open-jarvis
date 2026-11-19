@@ -6,6 +6,7 @@ Provides REST endpoints for chat, tool execution, voice STT, and TTS.
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import deque
 from datetime import datetime
 import io
@@ -105,6 +106,7 @@ class AgentStepRequest(BaseModel):
     step: int = 0
     ui_tree: List[Any] = []
     ui_nodes: Optional[List[Dict[str, Any]]] = None
+    screenshot_base64: Optional[str] = None
     history: Optional[List[Dict[str, Any]]] = None
 
 
@@ -1037,6 +1039,82 @@ def _handle_fast_path(
                 ],
                 "fast_path": True,
             }
+
+    # 2.5.5 True Full-Control Camera Engine (Pro Photo / Video / Settings)
+    camera_control_patterns = (
+        r"\b(?:take\s+(?:a\s+)?(?:photo|picture|selfie|shot|video)|snap\s+(?:a\s+)?(?:photo|picture)|record\s+(?:a\s+)?video|stop\s+(?:video|recording)|zoom\s+(?:in|out))\b|"
+        r"\b(?:عکس\s*بگیر|یه\s*عکس\s*بگیر|عکس\s*بنداز|سلفی\s*بگیر|فیلم\s*بگیر|فیلمبرداری\s*کن|ویدیو\s*(?:بگیر|ضبط\s*کن)|فیلمبرداری\s*رو\s*(?:قطع|متوقف)\s*کن|زوم\s*کن)\b"
+    )
+    if re.search(camera_control_patterns, norm, re.IGNORECASE):
+        mode = "photo"
+        if any(w in norm for w in ("video", "فیلم", "فیلمبرداری", "ویدیو", "record")):
+            if any(w in norm for w in ("stop", "قطع", "متوقف", "ببند", "disable")):
+                mode = "stop_video"
+            else:
+                mode = "video"
+
+        lens = "front" if any(w in norm for w in ("selfie", "front", "سلفی", "جلو")) else ("back" if any(w in norm for w in ("back", "عقب", "پشت")) else "keep")
+
+        timer = 0
+        m_t = re.search(r"(\d+)\s*(?:sec|second|ثانیه)", norm)
+        if m_t:
+            timer = int(m_t.group(1))
+        elif "۳" in norm or ("3" in norm and any(w in norm for w in ("timer", "تایمر"))):
+            timer = 3
+        elif "۵" in norm or ("5" in norm and any(w in norm for w in ("timer", "تایمر"))):
+            timer = 5
+        elif "۱۰" in norm or ("10" in norm and any(w in norm for w in ("timer", "تایمر"))):
+            timer = 10
+
+        zoom = "keep"
+        if "zoom in" in norm or "زوم کن" in norm:
+            zoom = "zoom_in"
+        elif "zoom out" in norm:
+            zoom = "zoom_out"
+
+        flash = "keep"
+        if any(w in norm for w in ("flash on", "فلش روشن")):
+            flash = "on"
+        elif any(w in norm for w in ("flash off", "فلش خاموش")):
+            flash = "off"
+
+        capture = mode in ("photo", "video") and not any(w in norm for w in ("just open", "فقط باز کن", "نمیخواد عکس بگیری"))
+
+        if mode == "stop_video":
+            reply = "فیلمبرداری متوقف شد قربان." if is_persian else "Video recording stopped, sir."
+        elif mode == "video":
+            reply = "شروع به فیلمبرداری می‌کنم قربان." if is_persian else "Starting video recording, sir."
+        elif timer > 0:
+            reply = f"با تایمر {timer} ثانیه عکس می‌گیرم قربان." if is_persian else f"Taking a photo with a {timer} second timer, sir."
+        elif lens == "front":
+            reply = "در حال گرفتن عکس سلفی هستم قربان." if is_persian else "Taking a selfie now, sir."
+        elif capture:
+            reply = "در حال ثبت عکس هستم قربان." if is_persian else "Capturing photo now, sir."
+        else:
+            reply = "دوربین پیشرفته جارویس باز شد قربان." if is_persian else "Opening Jarvis Pro Camera, sir."
+
+        cam_action = {
+            "type": "camera_control",
+            "mode": mode,
+            "lens": lens,
+            "timer_seconds": timer,
+            "zoom": zoom,
+            "flash": flash,
+            "capture": capture,
+        }
+        client_actions = [cam_action]
+        if mode == "photo":
+            client_actions.append({"type": "take_photo"})
+        elif mode == "video":
+            client_actions.append({"type": "record_video"})
+
+        return {
+            "response": reply,
+            "tool_calls": [{"name": "camera_control", "content": f"Camera control mode={mode} lens={lens} timer={timer}", "success": True}],
+            "turns": 1,
+            "client_actions": client_actions,
+            "fast_path": True,
+        }
 
     # 2.6 Deep In-App Automation & Accessibility Actions
     # 2.6.0 Multimodal Live Vision Triggers (Silent Camera & Zero-Popup Screen)
@@ -1989,6 +2067,13 @@ async def agent_step_endpoint(req: AgentStepRequest):
                 "delay_ms": 1500,
                 "countdown_speech": True,
             }
+        elif step == 0:
+            return {
+                "action": "tap_coords",
+                "x_norm": 0.50,
+                "y_norm": 0.88,
+                "reply": "عکس با موفقیت ثبت شد قربان." if is_persian else "Photo captured successfully, sir.",
+            }
         else:
             reply = "عکس با موفقیت ثبت شد قربان." if is_persian else "Photo captured successfully, sir."
             return {"action": "done", "reply": reply}
@@ -2795,25 +2880,34 @@ def _do_transcribe(data: bytes) -> str:
 async def stt_endpoint(request: Request):
     """Transcribe raw audio WAV or multipart form data to text with bilingual support."""
     content_type = request.headers.get("content-type", "")
+    audio_bytes = b""
     if "multipart/form-data" in content_type:
         form = await request.form()
         audio_file = form.get("audio") or form.get("file")
         if audio_file and hasattr(audio_file, "read"):
             audio_bytes = await audio_file.read()
-        else:
-            audio_bytes = b""
+    elif "application/json" in content_type:
+        try:
+            body_json = await request.json()
+            b64_str = body_json.get("audio_base64") or body_json.get("audio") or body_json.get("data") or ""
+            if b64_str:
+                audio_bytes = base64.b64decode(b64_str)
+        except Exception:
+            pass
     else:
         audio_bytes = await request.body()
 
-    if not audio_bytes or len(audio_bytes) < 44:
-        return {"success": False, "transcript": "", "text": "", "error": "Received empty or invalid WAV audio data"}
+    if not audio_bytes or len(audio_bytes) < 4:
+        return {"success": False, "transcript": "", "text": "", "language": "en", "error": "Received empty or invalid audio data"}
 
     transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
     transcript = (transcript or "").strip()
+    is_fa = any("\u0600" <= c <= "\u06FF" for c in transcript)
     return {
         "success": bool(transcript),
         "transcript": transcript,
         "text": transcript,
+        "language": "fa" if is_fa else "en",
     }
 
 

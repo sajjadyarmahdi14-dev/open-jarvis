@@ -132,6 +132,14 @@ class ToolResult:
     cost_usd: float = 0.0
     latency_seconds: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    data: Any = None
+
+    def __post_init__(self):
+        if self.data is not None:
+            if isinstance(self.data, dict) and not self.metadata:
+                self.metadata = dict(self.data)
+            elif not self.metadata:
+                self.metadata = {"data": self.data}
 
 
 # Bump when token-counting methodology changes so the leaderboard can

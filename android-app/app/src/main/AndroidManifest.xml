@@ -107,13 +107,21 @@
             </intent-filter>
         </activity>
 
+        <!-- Native CameraX Pro HUD Activity -->
+        <activity
+            android:name=".JarvisCameraActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Jarvis"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize" />
+
         <!-- 24/7 Always-On Native Voice Foreground Service -->
         <service
             android:name=".JarvisVoiceService"
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|mediaPlayback" />
 
         <!-- System Digital Voice Interaction Services -->
         <service
