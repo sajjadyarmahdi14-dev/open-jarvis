@@ -11,7 +11,7 @@ android {
         applicationId = "com.sajjad.jarvis"
         minSdk = 24
         targetSdk = 35
-        versionCode = 22
+        versionCode = 23
         versionName = "2.3.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

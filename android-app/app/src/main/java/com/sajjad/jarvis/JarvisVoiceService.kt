@@ -1107,8 +1107,9 @@ class JarvisVoiceService : Service() {
                             DeviceController.openCamera(applicationContext)
                         }
 
-                        // 100% Native execution of client actions (App, Torch, Alarm, Call, SMS, Volume, Media)
-                        if (clientActions != null) {
+                        // 100% Native execution of client actions via ActionDispatcher
+                        val hasClientActions = clientActions != null && clientActions.length() > 0
+                        if (hasClientActions) {
                             var deferredMediaAction: JSONObject? = null
                             for (i in 0 until clientActions.length()) {
                                 val act = clientActions.optJSONObject(i) ?: continue
@@ -1116,7 +1117,9 @@ class JarvisVoiceService : Service() {
                                 if (type in listOf("media_play", "play_song", "play_music")) {
                                     deferredMediaAction = act
                                 } else {
-                                    executeNativeClientAction(act)
+                                    ActionDispatcher.dispatchAction(applicationContext, act) { feedback ->
+                                        speakBritish(feedback)
+                                    }
                                 }
                             }
 
@@ -1126,10 +1129,10 @@ class JarvisVoiceService : Service() {
                                     serviceListener?.onAssistantResponse(response, turnId, false)
                                     broadcastUiUpdate(assistantReply = response, turnId = turnId, isAppend = false)
                                     speakBritish(response) {
-                                        executeNativeClientAction(deferredMediaAction)
+                                        ActionDispatcher.dispatchAction(applicationContext, deferredMediaAction)
                                     }
                                 } else {
-                                    executeNativeClientAction(deferredMediaAction)
+                                    ActionDispatcher.dispatchAction(applicationContext, deferredMediaAction)
                                 }
                                 return@withTimeout
                             }
@@ -1139,7 +1142,7 @@ class JarvisVoiceService : Service() {
                             serviceListener?.onAssistantResponse(response, turnId, false)
                             broadcastUiUpdate(assistantReply = response, turnId = turnId, isAppend = false)
                             speakBritish(response)
-                        } else if (transcript.isNotBlank() && status == "executed") {
+                        } else if (transcript.isNotBlank() && status == "executed" && !hasClientActions) {
                             streamChatAndPlay(transcript, turnId)
                         } else {
                             isProcessing = false
@@ -1283,37 +1286,8 @@ class JarvisVoiceService : Service() {
     private var lastSpokenIsPersian: Boolean = false
 
     private fun executeNativeClientAction(act: JSONObject) {
-        val type = act.optString("type", "")
-        if (type == "launch_app") {
-            val pkgName = act.optString("package_name", act.optString("package", ""))
-            val appQuery = act.optString("app_query", act.optString("target", ""))
-            val verifyAndSpeak = act.optBoolean("verify_and_speak", true)
-            launchAndVerify(pkgName, appQuery, verifyAndSpeak)
-            return
-        } else if (type == "vision_camera") {
-            val prompt = act.optString("prompt", "What do you see?")
-            handleVisionAction("camera", prompt)
-            return
-        } else if (type == "vision_screen") {
-            val prompt = act.optString("prompt", "What is on the screen?")
-            handleVisionAction("screen", prompt)
-            return
-        } else if (type == "summarize_notifications") {
-            handleSummarizeNotificationsAction()
-            return
-        } else if (type == "morning_briefing") {
-            ProactiveMonitor.generateMorningBriefing(applicationContext, getServerUrl()) { briefing ->
-                serviceListener?.onAssistantResponse(briefing)
-                broadcastUiUpdate(assistantReply = briefing)
-                speakBritish(briefing)
-            }
-            return
-        }
-
-        DeviceController.executeClientAction(applicationContext, act) { screenText ->
-            scope.launch {
-                sendScreenSummaryRequest(screenText)
-            }
+        ActionDispatcher.dispatchAction(applicationContext, act) { feedback ->
+            speakBritish(feedback)
         }
     }
 
@@ -1658,9 +1632,8 @@ class JarvisVoiceService : Service() {
                                         val actions = chunkObj.optJSONArray("client_actions")
                                         if (actions != null) {
                                             withContext(Dispatchers.Main) {
-                                                for (i in 0 until actions.length()) {
-                                                    val act = actions.optJSONObject(i) ?: continue
-                                                    executeNativeClientAction(act)
+                                                ActionDispatcher.dispatchActions(applicationContext, actions) { feedback ->
+                                                    enqueueSpeech(feedback)
                                                 }
                                             }
                                         }
@@ -1741,9 +1714,8 @@ class JarvisVoiceService : Service() {
                 val clientActions = json.optJSONArray("client_actions")
                 if (clientActions != null) {
                     withContext(Dispatchers.Main) {
-                        for (i in 0 until clientActions.length()) {
-                            val act = clientActions.optJSONObject(i) ?: continue
-                            executeNativeClientAction(act)
+                        ActionDispatcher.dispatchActions(applicationContext, clientActions) { feedback ->
+                            enqueueSpeech(feedback)
                         }
                     }
                 }
@@ -2010,7 +1982,13 @@ class JarvisVoiceService : Service() {
     private suspend fun playLocalMp3File(file: File): Boolean = withContext(Dispatchers.Main) {
         val completed = CompletableDeferred<Boolean>()
         try {
-            stopCurrentPlayback()
+            try {
+                activeMediaPlayer?.let {
+                    if (it.isPlaying) it.stop()
+                    it.release()
+                }
+            } catch (_: Exception) {}
+            activeMediaPlayer = null
             val mp = MediaPlayer().apply {
                 setDataSource(file.absolutePath)
                 setAudioAttributes(

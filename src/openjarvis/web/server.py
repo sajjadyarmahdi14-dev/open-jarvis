@@ -562,10 +562,10 @@ def _handle_fast_path(
 
     # Memory: Recall Fact
     m_rec_fa = re.search(r"\b(?:یادت\s*(?:هست|میاد|هستش)|چی\s*گفته\s*بودم|درباره\s*(.+?)\s*چی\s*(?:میدونی|یادته)|اسم\s*(?:اون|آن)\s*(.+?)\s*چی\s*بود)\b", msg, re.IGNORECASE)
-    m_rec_en = re.search(r"\b(?:what\s+did\s+i\s+tell\s+you\s+about|do\s+you\s+remember|recall\s+what|what\s+was\s+(?:my|the))\s+(.+)$", msg, re.IGNORECASE)
+    m_rec_en = re.search(r"\b(?:what\s+did\s+i\s+tell\s+you\s+about|do\s+you\s+remember|recall\s+what|what\s+(?:is|was)\s+(?:my|the))\s+(.+)$", msg, re.IGNORECASE)
     if m_rec_fa or m_rec_en:
         q_target = (m_rec_fa.group(1) or m_rec_fa.group(2) if m_rec_fa and (m_rec_fa.group(1) or m_rec_fa.group(2)) else (m_rec_en.group(1) if m_rec_en else msg)).strip()
-        q_clean = re.sub(r"\b(?:یادت\s*(?:هست|میاد|هستش)|چی\s*(?:بود|بودش|چیه|چیست)|do\s+you\s+remember|what\s+was)\b", " ", q_target, flags=re.IGNORECASE).strip()
+        q_clean = re.sub(r"\b(?:یادت\s*(?:هست|میاد|هستش)|چی\s*(?:بود|بودش|چیه|چیست)|do\s+you\s+remember|what\s+(?:is|was))\b", " ", q_target, flags=re.IGNORECASE).strip()
         from openjarvis.memory_store import get_memory_store
         matches = get_memory_store().recall(q_clean or q_target or msg, limit=3)
         if matches:
@@ -1523,7 +1523,8 @@ async def health_check():
 @app.get("/api/ping")
 async def ping_endpoint():
     """Ultra-lightweight ping (<5ms) for connection status check without blocking."""
-    return {"status": "ok", "time": time.time()}
+    t = time.time()
+    return {"status": "ok", "time": t, "timestamp": t}
 
 
 @app.get("/api/config")
@@ -1872,8 +1873,15 @@ async def agent_step_endpoint(req: AgentStepRequest):
             raw_c = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", raw_c).strip()
             match = re.search(r"\{[\s\S]*\}", raw_c)
             if match:
-                parsed_json = json.loads(match.group(0))
-                if parsed_json.get("action") in ("click", "tap", "type", "input_text", "swipe", "pinch", "scroll", "done", "wait_and_tap"):
+                try:
+                    parsed_json = json.loads(match.group(0))
+                except Exception:
+                    cleaned_json = re.sub(r",\s*([\}\]])", r"\1", match.group(0))
+                    try:
+                        parsed_json = json.loads(cleaned_json)
+                    except Exception:
+                        parsed_json = None
+                if parsed_json and parsed_json.get("action") in ("click", "tap", "type", "input_text", "swipe", "pinch", "scroll", "done", "wait_and_tap"):
                     return _finalize_step(parsed_json)
     except Exception as exc:
         logger.debug("LLM UI step generation fallback: %s", exc)

@@ -464,6 +464,17 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
             val wakeStatus = intent?.getStringExtra("wake_status")
             val amp = intent?.getFloatExtra("amplitude", -1f) ?: -1f
 
+            // Avoid double delivery when MainActivity is active and attached as direct serviceListener
+            if (JarvisVoiceService.serviceListener === this@MainActivity) {
+                if (!wakeStatus.isNullOrBlank()) {
+                    onWakeStateChanged(wakeStatus)
+                }
+                if (amp >= 0f) {
+                    audioAmplitudeState.floatValue = amp
+                }
+                return
+            }
+
             if (!userText.isNullOrBlank()) {
                 handleUserMessage(userText, turnId)
             }
@@ -597,11 +608,16 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                         voiceStateText.value = "STANDBY: Say \"Jarvis\""
                     }
 
-                    // Execute client actions
+                    // Execute client actions via Unified ActionDispatcher
                     if (clientActions != null) {
-                        for (i in 0 until clientActions.length()) {
-                            val act = clientActions.optJSONObject(i) ?: continue
-                            executeClientAction(act)
+                        ActionDispatcher.dispatchActions(applicationContext, clientActions) { feedback ->
+                            handleAssistantMessage(feedback, turnId, true)
+                            if (!isTtsMutedState.value) {
+                                val svc = JarvisVoiceService.instance
+                                if (svc != null) {
+                                    svc.speakBritish(feedback)
+                                }
+                            }
                         }
                     }
 
@@ -639,7 +655,9 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     private fun executeClientAction(act: JSONObject) {
         try {
-            DeviceController.executeClientAction(applicationContext, act)
+            ActionDispatcher.dispatchAction(applicationContext, act) { feedback ->
+                handleAssistantMessage(feedback, "", true)
+            }
         } catch (_: Exception) {}
     }
 
@@ -1277,6 +1295,7 @@ private fun JarvisSettingsDialog(
     var isFetchingModels by remember { mutableStateOf(false) }
     var showModelSelectionDialog by remember { mutableStateOf(false) }
     var showMemoryDialog by remember { mutableStateOf(false) }
+    var showHealthCheckDialog by remember { mutableStateOf(false) }
     var availableModels by remember { mutableStateOf(CuratedFreeModels) }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -1533,6 +1552,30 @@ private fun JarvisSettingsDialog(
                     } else {
                         Text(text = "⚡ Test AI Connection", color = CyanNeon, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
+                }
+
+                // 🩺 Run System Health Check Button
+                Button(
+                    onClick = { showHealthCheckDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(1.dp, GreenActive),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "🩺 Run System Health Check",
+                        color = GreenActive,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (showHealthCheckDialog) {
+                    SystemHealthCheckDialog(
+                        serverUrl = urlText,
+                        apiKey = apiKeyText,
+                        onDismiss = { showHealthCheckDialog = false }
+                    )
                 }
 
                 HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
@@ -2255,6 +2298,230 @@ fun InstalledAppsDialog(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SystemHealthCheckDialog(
+    serverUrl: String,
+    apiKey: String,
+    onDismiss: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var isChecking by remember { mutableStateOf(true) }
+
+    var pingResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var ttsResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var accessibilityResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var overlayResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var notifListenerResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var mediaPermissionResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var micPermissionResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var appsIndexResult by remember { mutableStateOf<Pair<Boolean, String>>(Pair(false, "Checking...")) }
+    var lastActionResult by remember { mutableStateOf("Checking...") }
+
+    LaunchedEffect(Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            // 1. Accessibility Service
+            val isAccRunning = JarvisAccessibilityService.isServiceRunning()
+            accessibilityResult = if (isAccRunning) {
+                Pair(true, "Active (Deep In-App Automation Ready)")
+            } else {
+                Pair(false, "Disabled (Enable in Settings -> Accessibility)")
+            }
+
+            // 2. Overlay Permission
+            val hasOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+            overlayResult = if (hasOverlay) {
+                Pair(true, "Granted (Background Pop-ups Allowed)")
+            } else {
+                Pair(false, "Missing (Enable 'Display over other apps')")
+            }
+
+            // 3. Notification Listener
+            val isNotifConnected = JarvisNotificationListener.isConnected()
+            notifListenerResult = if (isNotifConnected) {
+                Pair(true, "Active (Silent RemoteInput & Summary Ready)")
+            } else {
+                Pair(false, "Disabled (Enable Notification Listener Access)")
+            }
+
+            // 4. Permissions
+            val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            micPermissionResult = if (micGranted) Pair(true, "Granted") else Pair(false, "Denied")
+
+            val audioPermGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED
+            } else {
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            }
+            mediaPermissionResult = if (audioPermGranted) Pair(true, "Granted (Local Music Engine Active)") else Pair(false, "Denied")
+
+            // 5. Apps Indexer
+            val appsCount = AppLauncher.dynamicAppIndex.size
+            appsIndexResult = if (appsCount > 0) {
+                Pair(true, "$appsCount apps indexed and launchable")
+            } else {
+                Pair(false, "0 apps indexed (Rescan in Settings)")
+            }
+
+            // 6. Last Dispatched Action & Result
+            val lastAct = ActionDispatcher.lastDispatchedAction
+            val lastRes = ActionDispatcher.lastActionResult
+            val timeAgo = if (ActionDispatcher.lastActionTimestamp > 0L) {
+                val secAgo = (System.currentTimeMillis() - ActionDispatcher.lastActionTimestamp) / 1000L
+                "${secAgo}s ago"
+            } else "None yet"
+            lastActionResult = "$lastAct -> $lastRes ($timeAgo)"
+
+            // 7. VPS /api/ping
+            try {
+                val s = serverUrl.trim().removeSuffix("/")
+                val startMs = System.currentTimeMillis()
+                val conn = (URL("$s/api/ping").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                }
+                val code = conn.responseCode
+                val latency = System.currentTimeMillis() - startMs
+                if (code in 200..299) {
+                    pingResult = Pair(true, "Online (${latency}ms)")
+                } else {
+                    pingResult = Pair(false, "HTTP $code")
+                }
+            } catch (e: Exception) {
+                pingResult = Pair(false, "Unreachable: ${e.message}")
+            }
+
+            // 8. TTS /api/tts
+            try {
+                val s = serverUrl.trim().removeSuffix("/")
+                val conn = (URL("$s/api/tts").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                    connectTimeout = 5000
+                    readTimeout = 8000
+                    doOutput = true
+                }
+                if (apiKey.isNotBlank()) conn.setRequestProperty("Authorization", "Bearer $apiKey")
+                val testJson = JSONObject().apply {
+                    put("text", "ping")
+                    put("voice", "en-GB-RyanNeural")
+                }
+                OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(testJson.toString()) }
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    ttsResult = Pair(true, "Edge-TTS Male Voice Active")
+                } else {
+                    ttsResult = Pair(false, "HTTP $code")
+                }
+            } catch (e: Exception) {
+                ttsResult = Pair(false, "Unavailable: ${e.message}")
+            }
+
+            isChecking = false
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = DarkCard,
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, CyanNeon.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth().padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "🩺 SYSTEM HEALTH CHECK",
+                        color = CyanNeon,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                    }
+                }
+
+                if (isChecking) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = CyanNeon, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(text = "Running full diagnostics...", color = TextSecondary, fontSize = 13.sp)
+                    }
+                }
+
+                HealthItemRow("VPS Server (/api/ping)", pingResult.first, pingResult.second)
+                HealthItemRow("Edge-TTS Engine (/api/tts)", ttsResult.first, ttsResult.second)
+                HealthItemRow("Accessibility Service", accessibilityResult.first, accessibilityResult.second)
+                HealthItemRow("Overlay / Background Pop-up", overlayResult.first, overlayResult.second)
+                HealthItemRow("Notification Listener", notifListenerResult.first, notifListenerResult.second)
+                HealthItemRow("Microphone Access", micPermissionResult.first, micPermissionResult.second)
+                HealthItemRow("Media / Music Access", mediaPermissionResult.first, mediaPermissionResult.second)
+                HealthItemRow("Dynamic Apps Indexer", appsIndexResult.first, appsIndexResult.second)
+
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.2f))
+
+                Text(
+                    text = "Last Action Telemetry:",
+                    color = CyanDim,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = lastActionResult,
+                    color = TextPrimary,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanNeon),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "Close Diagnostics", color = DarkBackground, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HealthItemRow(title: String, isOk: Boolean, detail: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = if (isOk) "✓" else "✗",
+            color = if (isOk) GreenActive else RedOffline,
+            fontWeight = FontWeight.Bold,
+            fontSize = 16.sp,
+            modifier = Modifier.width(22.dp)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = detail, color = if (isOk) TextSecondary else RedOffline.copy(alpha = 0.85f), fontSize = 10.sp)
         }
     }
 }

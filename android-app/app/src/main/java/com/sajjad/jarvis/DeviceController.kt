@@ -25,7 +25,7 @@ import java.util.Locale
 object DeviceController {
 
     private const val TAG = "DeviceController"
-    private var isTorchOn: Boolean = false
+    @Volatile var isTorchOn: Boolean = false
 
     // -------------------------------------------------------------------------
     // 1. Music & Media Playback Control (delegated to MediaEngine)
@@ -266,18 +266,27 @@ object DeviceController {
     // 5. System Hardware Controls (Torch, Brightness, Volume, Clipboard)
     // -------------------------------------------------------------------------
 
-    fun setTorchState(context: Context, turnOn: Boolean) {
+    fun setTorchState(context: Context, turnOn: Boolean): Boolean {
         try {
             val camMgr = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val cameraId = camMgr.cameraIdList.firstOrNull()
-            if (cameraId != null) {
-                camMgr.setTorchMode(cameraId, turnOn)
+            val flashCameraId = camMgr.cameraIdList.firstOrNull { id ->
+                try {
+                    val chars = camMgr.getCameraCharacteristics(id)
+                    chars.get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                } catch (_: Exception) {
+                    false
+                }
+            } ?: camMgr.cameraIdList.firstOrNull()
+            if (flashCameraId != null) {
+                camMgr.setTorchMode(flashCameraId, turnOn)
                 isTorchOn = turnOn
-                Log.i(TAG, "Torch state set to: $turnOn")
+                Log.i(TAG, "Torch state set to: $turnOn (camera: $flashCameraId)")
+                return true
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed setting torch state: ${e.message}")
         }
+        return false
     }
 
     fun setBrightness(context: Context, level: Int) {
@@ -344,7 +353,7 @@ object DeviceController {
     }
 
     // -------------------------------------------------------------------------
-    // 5. Unified Client Action Dispatcher
+    // 5. Unified Client Action Dispatcher (Delegated to ActionDispatcher)
     // -------------------------------------------------------------------------
 
     fun executeClientAction(
@@ -352,205 +361,8 @@ object DeviceController {
         act: JSONObject,
         onScreenRead: ((String) -> Unit)? = null
     ) {
-        try {
-            val type = act.optString("type", "")
-            when (type) {
-                // Universal Media & Audio Engine Controls
-                "media_play" -> {
-                    val mediaType = act.optString("media_type", "audio")
-                    val query = act.optString("query", "")
-                    val artist = act.optString("artist", "")
-                    val app = act.optString("app", "")
-                    val shuffle = act.optBoolean("shuffle", false)
-                    MediaEngine.handleMediaPlay(context, mediaType, query, artist, app, shuffle)
-                }
-                "media_control" -> {
-                    val command = act.optString("command", "play")
-                    val seconds = act.optInt("seconds", 30)
-                    MediaEngine.handleMediaControl(context, command, seconds)
-                }
-                "volume_control" -> {
-                    val action = act.optString("action", "up")
-                    val percent = if (act.has("percent")) act.optInt("percent") else null
-                    val stream = act.optString("stream", "media")
-                    MediaEngine.handleVolumeControl(context, action, percent, stream)
-                }
-                "play_music" -> MediaEngine.handleMediaPlay(context, "audio", "", null, "local", false)
-                "pause_music" -> MediaEngine.handleMediaControl(context, "pause")
-                "next_track" -> MediaEngine.handleMediaControl(context, "next")
-                "previous_track" -> MediaEngine.handleMediaControl(context, "previous")
-                "play_song" -> {
-                    val query = act.optString("query") ?: act.optString("song") ?: ""
-                    MediaEngine.handleMediaPlay(context, "audio", query, null, null, false)
-                }
-
-                // In-App Accessibility Automation & Closed-Loop Agent
-                "autonomous_agent", "agent_goal", "in_app_task", "operate_device_ui", "android_operate_ui" -> {
-                    val goal = act.optString("goal", act.optString("objective", ""))
-                    val targetApp = act.optString("target_app", act.optString("target", act.optString("package", "")))
-                    val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
-                    val serverUrl = prefs.getString("server_url", "http://104.252.175.159:8765") ?: "http://104.252.175.159:8765"
-
-                    if (targetApp.isNotBlank()) {
-                        AppLauncher.launchApp(context, targetApp)
-                    }
-                    JarvisAccessibilityService.instance?.runAgentLoop(goal, serverUrl) { reply ->
-                        Log.i(TAG, "Autonomous agent completed: $reply")
-                    }
-                }
-                "execute_ui_action" -> {
-                    JarvisAccessibilityService.instance?.executeUiAction(act)
-                }
-                "type_text" -> {
-                    val text = act.optString("text", "")
-                    val autoSend = act.optBoolean("auto_send", false)
-                    JarvisAccessibilityService.instance?.typeText(text, autoSend)
-                }
-                "click_element" -> {
-                    val target = act.optString("target_text") ?: act.optString("target") ?: ""
-                    JarvisAccessibilityService.instance?.clickElement(target)
-                }
-                "vision_camera" -> {
-                    val prompt = act.optString("prompt", "What do you see?")
-                    JarvisVoiceService.instance?.handleVisionAction("camera", prompt)
-                }
-                "vision_screen" -> {
-                    val prompt = act.optString("prompt", "What is on the screen?")
-                    JarvisVoiceService.instance?.handleVisionAction("screen", prompt)
-                }
-
-                // Step 8: Iron Man Protocols & Proactive Notification Actions
-                "protocol" -> {
-                    val proto = act.optString("protocol", "").lowercase()
-                    val isFa = act.optBoolean("is_fa", false)
-                    when (proto) {
-                        "sleep" -> ProtocolEngine.executeSleepProtocol(context, isFa)
-                        "walk" -> ProtocolEngine.executeWalkProtocol(context, isFa)
-                        "focus" -> {
-                            val duration = act.optInt("duration", 45)
-                            ProtocolEngine.executeFocusProtocol(context, duration, isFa)
-                        }
-                        "ghost" -> ProtocolEngine.executeGhostProtocol(context)
-                    }
-                }
-                "reply_notification" -> {
-                    val target = act.optString("target", "")
-                    val msg = act.optString("message", "")
-                    val (ok, sender) = JarvisNotificationListener.replyToNotification(context, target, msg)
-                    val replyAck = if (ok) {
-                        if (JarvisVoiceService.isPersianOrArabic(msg)) "پاسخ به ${sender ?: target} ارسال شد."
-                        else "Replied to ${sender ?: target}."
-                    } else {
-                        if (JarvisVoiceService.isPersianOrArabic(msg)) "اعلان فعالی برای پاسخ یافت نشد."
-                        else "No active notification found to reply to."
-                    }
-                    JarvisVoiceService.instance?.speakBritish(replyAck)
-                }
-                "summarize_notifications" -> {
-                    JarvisVoiceService.instance?.handleSummarizeNotificationsAction()
-                }
-                "morning_briefing" -> {
-                    val sUrl = JarvisVoiceService.instance?.getServerUrl() ?: ""
-                    ProactiveMonitor.generateMorningBriefing(context, sUrl) { briefing ->
-                        JarvisVoiceService.instance?.speakBritish(briefing)
-                    }
-                }
-                "open_camera", "camera" -> {
-                    openCamera(context)
-                }
-                "take_photo" -> {
-                    openCamera(context)
-                    JarvisAccessibilityService.instance?.takePhoto(context)
-                }
-                "read_screen" -> {
-                    val screenText = JarvisAccessibilityService.instance?.readScreen() ?: "Accessibility service not active."
-                    onScreenRead?.invoke(screenText)
-                }
-                "scroll_down" -> JarvisAccessibilityService.instance?.scrollDown()
-                "scroll_up" -> JarvisAccessibilityService.instance?.scrollUp()
-                "go_back" -> JarvisAccessibilityService.instance?.goBack()
-                "go_home" -> JarvisAccessibilityService.instance?.goHome()
-                "open_notifications" -> JarvisAccessibilityService.instance?.openNotifications()
-                "take_screenshot" -> JarvisAccessibilityService.instance?.takeScreenshot()
-
-                // System & Communication
-                "send_sms" -> {
-                    val target = act.optString("contact_or_number") ?: act.optString("number") ?: ""
-                    val msg = act.optString("message", "")
-                    sendSms(context, target, msg)
-                }
-                "send_email" -> {
-                    val recipient = act.optString("recipient") ?: act.optString("to") ?: ""
-                    val subject = act.optString("subject", "")
-                    val body = act.optString("body", "")
-                    sendEmail(context, recipient, subject, body)
-                }
-                "send_messenger" -> {
-                    val app = act.optString("app", "telegram")
-                    val contact = act.optString("contact", "")
-                    val msg = act.optString("message", "")
-                    sendMessenger(context, app, contact, msg)
-                }
-                "set_alarm", "alarm" -> {
-                    val h = act.optInt("hour", 7)
-                    val m = act.optInt("minute", 0)
-                    val msg = act.optString("message", "Jarvis Alarm")
-                    setAlarm(context, h, m, msg)
-                }
-                "set_timer" -> {
-                    val seconds = act.optInt("seconds", 60)
-                    val msg = act.optString("message", "Jarvis Timer")
-                    setTimer(context, seconds, msg)
-                }
-                "system_control" -> {
-                    when (act.optString("action")) {
-                        "brightness" -> setBrightness(context, act.optInt("level", 128))
-                        "connectivity_panel" -> openConnectivityPanel(context)
-                        "clipboard_set" -> setClipboard(context, act.optString("text", ""))
-                        "volume" -> setVolume(context, act.optString("sub_action", "up"), act.optInt("level", -1))
-                    }
-                }
-
-                // App Launching & Legacy
-                "launch_app" -> {
-                    val target = act.optString("target") ?: act.optString("package") ?: ""
-                    if (target.isNotBlank()) AppLauncher.launchApp(context, target)
-                }
-                "call" -> {
-                    val target = act.optString("number") ?: act.optString("name") ?: ""
-                    makeCall(context, target)
-                }
-                "sms" -> {
-                    val num = act.optString("number", "")
-                    val msg = act.optString("message", "")
-                    sendSms(context, num, msg)
-                }
-                "torch" -> {
-                    val state = act.optString("state", "toggle")
-                    val turnOn = when (state) {
-                        "on" -> true
-                        "off" -> false
-                        else -> !isTorchOn
-                    }
-                    setTorchState(context, turnOn)
-                }
-                "volume" -> {
-                    val actStr = act.optString("action", "up")
-                    val level = act.optInt("level", -1)
-                    setVolume(context, actStr, level)
-                }
-                "open_url" -> {
-                    val urlStr = act.optString("url", "").trim()
-                    if (urlStr.isNotBlank()) {
-                        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(urlStr)).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        AppLauncher.launchWithOverlayFallback(context, viewIntent)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error executing client action: ${e.message}")
+        ActionDispatcher.dispatchAction(context, act) { feedback ->
+            onScreenRead?.invoke(feedback)
         }
     }
 }

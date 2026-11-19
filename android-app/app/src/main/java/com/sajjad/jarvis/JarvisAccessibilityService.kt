@@ -93,6 +93,13 @@ class JarvisAccessibilityService : AccessibilityService() {
         Log.w(TAG, "JarvisAccessibilityService interrupted")
     }
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        if (instance == this) {
+            instance = null
+        }
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         if (isReceiverRegistered) {
             try {
@@ -235,16 +242,42 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
+    fun tapAtCoordinates(x: Float, y: Float): Boolean {
+        val path = Path().apply { moveTo(x, y) }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 100)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val dispatched = dispatchGesture(gesture, null, null)
+        Log.i(TAG, "tapAtCoordinates ($x, $y) dispatched=$dispatched")
+        return dispatched
+    }
+
     fun clickNodeOrParent(node: AccessibilityNodeInfo?): Boolean {
         var current = node
         while (current != null) {
             if (current.isClickable) {
-                return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                val ok = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (ok) return true
+                // Fallback: If performAction returned false on a clickable node, dispatch gesture tap at center
+                val rect = Rect()
+                current.getBoundsInScreen(rect)
+                if (rect.width() > 0 && rect.height() > 0) {
+                    val tapped = tapAtCoordinates(rect.centerX().toFloat(), rect.centerY().toFloat())
+                    if (tapped) return true
+                }
             }
             current = current.parent
         }
-        // If not clickable flag, try clicking direct node as fallback
-        return node?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+        // If not clickable flag, try direct click then center tap as fallback
+        val directOk = node?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+        if (directOk) return true
+        if (node != null) {
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (rect.width() > 0 && rect.height() > 0) {
+                return tapAtCoordinates(rect.centerX().toFloat(), rect.centerY().toFloat())
+            }
+        }
+        return false
     }
 
     fun findNodeByPredicate(
@@ -483,17 +516,17 @@ class JarvisAccessibilityService : AccessibilityService() {
     ): Boolean {
         Log.i(TAG, "executeAtomicAction: type=$actionType, params=$params")
         return when (actionType.lowercase(Locale.ROOT)) {
-            "tap" -> {
+            "tap", "click" -> {
                 val nodeId = params.optInt("node_id", -1)
                 val node = if (nodeId >= 0) nodeMap[nodeId] else null
                 if (node != null) {
                     clickNodeOrParent(node)
                 } else {
-                    val targetText = params.optString("target_text", "")
+                    val targetText = params.optString("target_text", params.optString("target", ""))
                     if (targetText.isNotBlank()) clickElement(targetText) else false
                 }
             }
-            "input_text" -> {
+            "input_text", "type" -> {
                 val rawText = params.optString("text", "")
                 val cleanText = UtteranceStitcher.sanitizeLiteralText(rawText)
                 val submit = params.optBoolean("submit", true)
