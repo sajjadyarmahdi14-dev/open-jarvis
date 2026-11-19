@@ -1529,7 +1529,7 @@ class JarvisVoiceService : Service() {
     }
 
     fun handleReadScreenAction(screenText: String) {
-        serviceScope.launch {
+        scope.launch {
             sendScreenSummaryRequest(screenText)
         }
     }
