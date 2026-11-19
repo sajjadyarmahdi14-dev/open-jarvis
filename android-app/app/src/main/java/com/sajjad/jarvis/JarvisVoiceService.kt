@@ -700,7 +700,7 @@ class JarvisVoiceService : Service() {
                         return@withTimeout
                     }
 
-                    if (result == null) {
+                    if (result == null || result.optString("status") == "ignored") {
                         val reply = withContext(Dispatchers.IO) {
                             sendChatPrompt(transcript)
                         }
@@ -1090,7 +1090,26 @@ class JarvisVoiceService : Service() {
         }
     }
 
-    private fun triggerForceListen() {
+    fun isListeningOrRecording(): Boolean {
+        return proVoiceEngine?.isRecordingUtterance == true ||
+               acousticState == AcousticState.LISTENING ||
+               isUtteranceActive
+    }
+
+    fun toggleTapToTalk() {
+        if (isListeningOrRecording()) {
+            Log.i(TAG, "Toggling Tap-to-Talk: stopping current recording and committing")
+            proVoiceEngine?.stopTapToTalkAndCommit()
+            isUtteranceActive = false
+            acousticState = AcousticState.PROCESSING
+            serviceListener?.onSpeechEnded()
+            broadcastUiUpdate(wakeStatus = "processing")
+        } else {
+            triggerForceListen()
+        }
+    }
+
+    fun triggerForceListen() {
         if (isServiceMuted) return
         if (isTtsSpeaking || acousticState == AcousticState.SPEAKING) {
             triggerBargeInAbort()
@@ -1485,11 +1504,12 @@ class JarvisVoiceService : Service() {
     private fun sendVadUtterance(wavData: ByteArray, batteryPct: Int, isCharging: Boolean): JSONObject? {
         return try {
             val server = getServerUrl()
-            val url = URL("$server/api/voice/vad_utterance?battery=$batteryPct&charging=$isCharging")
+            val url = URL("$server/api/voice/vad_utterance?battery=$batteryPct&charging=$isCharging&direct=true")
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "audio/wav")
             conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("X-Direct-Command", "true")
             conn.setRequestProperty("X-Device-Battery", batteryPct.toString())
             conn.setRequestProperty("X-Device-Charging", isCharging.toString())
             val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)

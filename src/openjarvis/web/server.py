@@ -374,6 +374,102 @@ def _run_sync(coro: Any) -> Any:
         return asyncio.run(coro)
 
 
+def parse_camera_intent(message: str, is_persian: Optional[bool] = None) -> Optional[Dict[str, Any]]:
+    """Deterministic parser for camera capture and control intents across Persian and English."""
+    if not message:
+        return None
+    norm = message.lower().strip()
+    if is_persian is None:
+        is_persian = any("\u0600" <= c <= "\u06FF" for c in message)
+
+    camera_control_patterns = (
+        r"\b(?:take\s+(?:a\s+|an\s+|my\s+|our\s+)?(?:photo|picture|pic|selfie|shot|video)|"
+        r"snap\s+(?:a\s+|an\s+|my\s+|our\s+)?(?:photo|picture|pic)|"
+        r"capture\s+(?:a\s+|an\s+)?(?:photo|picture|pic|video)|"
+        r"shoot\s+(?:a\s+|an\s+)?(?:photo|picture|video)|"
+        r"record\s+(?:a\s+)?video|stop\s+(?:video|recording)|zoom\s+(?:in|out))\b|"
+        r"(?:عکس\s*بگیر|یه\s*عکس\s*بگیر|عکس\s*بنداز|یه\s*عکس\s*بنداز|از\s*من\s*عکس\s*بگیر|سلفی\s*بگیر|فیلم\s*بگیر|فیلمبرداری\s*(?:کن|شروع\s*کن)|ویدیو\s*(?:بگیر|ضبط\s*کن)|فیلمبرداری\s*رو\s*(?:قطع|متوقف)\s*کن|زوم\s*کن|عکس\s*برداری\s*کن|عکس\s*ثبت\s*کن)|"
+        r"(?:(?:عکس|تصویر).*(?:بگیر|بنداز|ثبت کن|بردار))|"
+        r"(?:(?:take|snap|capture).*(?:photo|picture|pic|selfie|video))"
+    )
+
+    if not re.search(camera_control_patterns, norm, re.IGNORECASE):
+        return None
+
+    if any(w in norm for w in ("don't take", "do not take", "نمیخواد عکس", "عکس نگیر")):
+        return None
+
+    mode = "photo"
+    if any(w in norm for w in ("video", "فیلم", "فیلمبرداری", "ویدیو", "record")):
+        if any(w in norm for w in ("stop", "قطع", "متوقف", "ببند", "disable")):
+            mode = "stop_video"
+        else:
+            mode = "video"
+
+    lens = "front" if any(w in norm for w in ("selfie", "front", "سلفی", "جلو")) else ("back" if any(w in norm for w in ("back", "عقب", "پشت")) else "keep")
+
+    timer = 0
+    m_t = re.search(r"(\d+)\s*(?:sec|second|ثانیه)", norm)
+    if m_t:
+        timer = int(m_t.group(1))
+    elif "۳" in norm or ("3" in norm and any(w in norm for w in ("timer", "تایمر"))):
+        timer = 3
+    elif "۵" in norm or ("5" in norm and any(w in norm for w in ("timer", "تایمر"))):
+        timer = 5
+    elif "۱۰" in norm or ("10" in norm and any(w in norm for w in ("timer", "تایمر"))):
+        timer = 10
+
+    zoom = "keep"
+    if "zoom in" in norm or "زوم کن" in norm:
+        zoom = "zoom_in"
+    elif "zoom out" in norm:
+        zoom = "zoom_out"
+
+    flash = "keep"
+    if any(w in norm for w in ("flash on", "فلش روشن")):
+        flash = "on"
+    elif any(w in norm for w in ("flash off", "فلش خاموش")):
+        flash = "off"
+
+    capture = mode in ("photo", "video") and not any(w in norm for w in ("just open", "فقط باز کن", "نمیخواد عکس بگیری"))
+
+    if mode == "stop_video":
+        reply = "فیلمبرداری متوقف شد قربان." if is_persian else "Video recording stopped, sir."
+    elif mode == "video":
+        reply = "شروع به فیلمبرداری می‌کنم قربان." if is_persian else "Starting video recording, sir."
+    elif timer > 0:
+        reply = f"با تایمر {timer} ثانیه عکس می‌گیرم قربان." if is_persian else f"Taking a photo with a {timer} second timer, sir."
+    elif lens == "front":
+        reply = "در حال گرفتن عکس سلفی هستم قربان." if is_persian else "Taking a selfie now, sir."
+    elif capture:
+        reply = "در حال ثبت عکس هستم قربان." if is_persian else "Capturing photo now, sir."
+    else:
+        reply = "دوربین پیشرفته جارویس باز شد قربان." if is_persian else "Opening Jarvis Pro Camera, sir."
+
+    cam_action = {
+        "type": "camera_control",
+        "mode": mode,
+        "lens": lens,
+        "timer_seconds": timer,
+        "zoom": zoom,
+        "flash": flash,
+        "capture": capture,
+    }
+    client_actions = [cam_action]
+    if mode == "photo":
+        client_actions.append({"type": "take_photo"})
+    elif mode == "video":
+        client_actions.append({"type": "record_video"})
+
+    return {
+        "response": reply,
+        "tool_calls": [{"name": "camera_control", "content": f"Camera control mode={mode} lens={lens} timer={timer}", "success": True}],
+        "turns": 1,
+        "client_actions": client_actions,
+        "fast_path": True,
+    }
+
+
 def _handle_fast_path(
     message: str,
     device_battery: Optional[int] = None,
@@ -1041,80 +1137,9 @@ def _handle_fast_path(
             }
 
     # 2.5.5 True Full-Control Camera Engine (Pro Photo / Video / Settings)
-    camera_control_patterns = (
-        r"\b(?:take\s+(?:a\s+)?(?:photo|picture|selfie|shot|video)|snap\s+(?:a\s+)?(?:photo|picture)|record\s+(?:a\s+)?video|stop\s+(?:video|recording)|zoom\s+(?:in|out))\b|"
-        r"\b(?:عکس\s*بگیر|یه\s*عکس\s*بگیر|عکس\s*بنداز|سلفی\s*بگیر|فیلم\s*بگیر|فیلمبرداری\s*کن|ویدیو\s*(?:بگیر|ضبط\s*کن)|فیلمبرداری\s*رو\s*(?:قطع|متوقف)\s*کن|زوم\s*کن)\b"
-    )
-    if re.search(camera_control_patterns, norm, re.IGNORECASE):
-        mode = "photo"
-        if any(w in norm for w in ("video", "فیلم", "فیلمبرداری", "ویدیو", "record")):
-            if any(w in norm for w in ("stop", "قطع", "متوقف", "ببند", "disable")):
-                mode = "stop_video"
-            else:
-                mode = "video"
-
-        lens = "front" if any(w in norm for w in ("selfie", "front", "سلفی", "جلو")) else ("back" if any(w in norm for w in ("back", "عقب", "پشت")) else "keep")
-
-        timer = 0
-        m_t = re.search(r"(\d+)\s*(?:sec|second|ثانیه)", norm)
-        if m_t:
-            timer = int(m_t.group(1))
-        elif "۳" in norm or ("3" in norm and any(w in norm for w in ("timer", "تایمر"))):
-            timer = 3
-        elif "۵" in norm or ("5" in norm and any(w in norm for w in ("timer", "تایمر"))):
-            timer = 5
-        elif "۱۰" in norm or ("10" in norm and any(w in norm for w in ("timer", "تایمر"))):
-            timer = 10
-
-        zoom = "keep"
-        if "zoom in" in norm or "زوم کن" in norm:
-            zoom = "zoom_in"
-        elif "zoom out" in norm:
-            zoom = "zoom_out"
-
-        flash = "keep"
-        if any(w in norm for w in ("flash on", "فلش روشن")):
-            flash = "on"
-        elif any(w in norm for w in ("flash off", "فلش خاموش")):
-            flash = "off"
-
-        capture = mode in ("photo", "video") and not any(w in norm for w in ("just open", "فقط باز کن", "نمیخواد عکس بگیری"))
-
-        if mode == "stop_video":
-            reply = "فیلمبرداری متوقف شد قربان." if is_persian else "Video recording stopped, sir."
-        elif mode == "video":
-            reply = "شروع به فیلمبرداری می‌کنم قربان." if is_persian else "Starting video recording, sir."
-        elif timer > 0:
-            reply = f"با تایمر {timer} ثانیه عکس می‌گیرم قربان." if is_persian else f"Taking a photo with a {timer} second timer, sir."
-        elif lens == "front":
-            reply = "در حال گرفتن عکس سلفی هستم قربان." if is_persian else "Taking a selfie now, sir."
-        elif capture:
-            reply = "در حال ثبت عکس هستم قربان." if is_persian else "Capturing photo now, sir."
-        else:
-            reply = "دوربین پیشرفته جارویس باز شد قربان." if is_persian else "Opening Jarvis Pro Camera, sir."
-
-        cam_action = {
-            "type": "camera_control",
-            "mode": mode,
-            "lens": lens,
-            "timer_seconds": timer,
-            "zoom": zoom,
-            "flash": flash,
-            "capture": capture,
-        }
-        client_actions = [cam_action]
-        if mode == "photo":
-            client_actions.append({"type": "take_photo"})
-        elif mode == "video":
-            client_actions.append({"type": "record_video"})
-
-        return {
-            "response": reply,
-            "tool_calls": [{"name": "camera_control", "content": f"Camera control mode={mode} lens={lens} timer={timer}", "success": True}],
-            "turns": 1,
-            "client_actions": client_actions,
-            "fast_path": True,
-        }
+    cam_fast = parse_camera_intent(norm, is_persian)
+    if cam_fast is not None:
+        return cam_fast
 
     # 2.6 Deep In-App Automation & Accessibility Actions
     # 2.6.0 Multimodal Live Vision Triggers (Silent Camera & Zero-Popup Screen)
@@ -2288,6 +2313,12 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
                 if "message" in act:
                     act["message"] = sanitize_literal_text(act["message"])
 
+        # Deterministic Camera Intent Fallback: ensure camera actions are attached
+        cam_intent = parse_camera_intent(req.message)
+        if cam_intent:
+            if not any(a.get("type") in ("camera_control", "take_photo", "record_video") for a in client_actions):
+                client_actions.extend(cam_intent.get("client_actions", []))
+
         has_verified_launch = any(a.get("type") == "launch_app" and a.get("verify_and_speak") for a in client_actions)
         clean_content = _clean_tts_response(result.content) if result.content else ""
         if has_verified_launch:
@@ -2513,6 +2544,12 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
                         act["text"] = sanitize_literal_text(act["text"])
                     if "message" in act:
                         act["message"] = sanitize_literal_text(act["message"])
+
+            # Deterministic Camera Intent Fallback for streaming
+            cam_intent = parse_camera_intent(req.message)
+            if cam_intent:
+                if not any(a.get("type") in ("camera_control", "take_photo", "record_video") for a in accumulated_client_actions):
+                    accumulated_client_actions.extend(cam_intent.get("client_actions", []))
 
             yield json.dumps({"type": "actions", "client_actions": accumulated_client_actions}) + "\n"
             yield json.dumps({"type": "done"}) + "\n"
@@ -2827,33 +2864,59 @@ _voice_session: Dict[str, Any] = {
 }
 
 
-def _do_transcribe(data: bytes) -> str:
-    """Transcribe audio WAV/PCM bytes with English first and Persian fallback."""
+def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
+    """Transcribe audio WAV/PCM bytes with smart concurrent bilingual (fa-IR + en-US) recognition."""
     try:
         import io
         import speech_recognition as sr
+        from concurrent.futures import ThreadPoolExecutor
+
         r = sr.Recognizer()
         with sr.AudioFile(io.BytesIO(data)) as source:
             audio = r.record(source)
-        # Try English first
-        try:
-            txt = r.recognize_google(audio, language="en-US")
-            if txt and txt.strip():
-                return txt.strip()
-        except sr.UnknownValueError:
-            pass
-        except Exception as e:
-            logger.debug("Google STT en-US error: %s", e)
-        # Try Persian fallback
-        try:
-            txt = r.recognize_google(audio, language="fa-IR")
-            if txt and txt.strip():
-                return txt.strip()
-        except sr.UnknownValueError:
-            pass
-        except Exception as e:
-            logger.debug("Google STT fa-IR error: %s", e)
-        # Fallback to Whisper backend transcription if Google STT fails to capture language shift
+
+        def _recognize(lang: str) -> str:
+            try:
+                res = r.recognize_google(audio, language=lang)
+                return (res or "").strip()
+            except (sr.UnknownValueError, Exception):
+                return ""
+
+        req_clean = (requested_lang or "auto").strip().lower()
+        if req_clean in ("fa", "fa-ir"):
+            txt_fa = _recognize("fa-IR")
+            if txt_fa:
+                return txt_fa
+            txt_en = _recognize("en-US")
+            if txt_en:
+                return txt_en
+        elif req_clean in ("en", "en-us"):
+            txt_en = _recognize("en-US")
+            if txt_en:
+                return txt_en
+            txt_fa = _recognize("fa-IR")
+            if txt_fa:
+                return txt_fa
+        else:
+            # "auto" mode: execute fa-IR and en-US concurrently in parallel
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                fut_fa = executor.submit(_recognize, "fa-IR")
+                fut_en = executor.submit(_recognize, "en-US")
+                txt_fa = fut_fa.result()
+                txt_en = fut_en.result()
+
+            # Smart Persian selection:
+            # Google STT en-US hallucinates English phonemes when fed Persian speech.
+            # But Google STT fa-IR accurately outputs Persian characters and rejects English.
+            has_fa_chars = any("\u0600" <= c <= "\u06FF" for c in txt_fa)
+            if txt_fa and has_fa_chars:
+                return txt_fa
+            if txt_en:
+                return txt_en
+            if txt_fa:
+                return txt_fa
+
+        # Fallback to local whisper or speech backend if configured
         try:
             txt = r.recognize_whisper(audio)
             if txt and txt.strip():
@@ -2880,18 +2943,25 @@ def _do_transcribe(data: bytes) -> str:
 async def stt_endpoint(request: Request):
     """Transcribe raw audio WAV or multipart form data to text with bilingual support."""
     content_type = request.headers.get("content-type", "")
+    req_lang = request.query_params.get("lang") or request.query_params.get("language") or "auto"
     audio_bytes = b""
     if "multipart/form-data" in content_type:
         form = await request.form()
         audio_file = form.get("audio") or form.get("file")
         if audio_file and hasattr(audio_file, "read"):
             audio_bytes = await audio_file.read()
+        lang_form = form.get("lang") or form.get("language")
+        if lang_form:
+            req_lang = str(lang_form).strip()
     elif "application/json" in content_type:
         try:
             body_json = await request.json()
             b64_str = body_json.get("audio_base64") or body_json.get("audio") or body_json.get("data") or ""
             if b64_str:
                 audio_bytes = base64.b64decode(b64_str)
+            lang_json = body_json.get("lang") or body_json.get("language")
+            if lang_json:
+                req_lang = str(lang_json).strip()
         except Exception:
             pass
     else:
@@ -2900,14 +2970,19 @@ async def stt_endpoint(request: Request):
     if not audio_bytes or len(audio_bytes) < 4:
         return {"success": False, "transcript": "", "text": "", "language": "en", "error": "Received empty or invalid audio data"}
 
-    transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
+    try:
+        transcript = await asyncio.to_thread(_do_transcribe, audio_bytes, req_lang)
+    except TypeError:
+        transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
     transcript = (transcript or "").strip()
     is_fa = any("\u0600" <= c <= "\u06FF" for c in transcript)
+    err = None if transcript else "No speech detected in audio"
     return {
         "success": bool(transcript),
         "transcript": transcript,
         "text": transcript,
         "language": "fa" if is_fa else "en",
+        "error": err,
     }
 
 
@@ -2922,6 +2997,7 @@ async def voice_vad_utterance_endpoint(request: Request):
 
     content_type = request.headers.get("content-type", "")
     tts_requested = True
+    req_lang = request.query_params.get("lang") or "auto"
     if "multipart/form-data" in content_type:
         form = await request.form()
         audio_file = form.get("audio")
@@ -2931,6 +3007,9 @@ async def voice_vad_utterance_endpoint(request: Request):
             audio_bytes = b""
         tts_val = form.get("tts", "true")
         tts_requested = str(tts_val).lower() in ("true", "1", "yes")
+        lang_form = form.get("lang") or form.get("language")
+        if lang_form:
+            req_lang = str(lang_form).strip()
     else:
         audio_bytes = await request.body()
         tts_val = request.query_params.get("tts", "true")
@@ -2939,7 +3018,17 @@ async def voice_vad_utterance_endpoint(request: Request):
     if not audio_bytes or len(audio_bytes) < 44:
         return {"error": "Received empty or invalid WAV audio data", "status": "ignored"}
 
-    transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
+    # Direct command bypass flag (from Tap-to-Talk or pre-stripped client wake word)
+    is_direct = (
+        request.query_params.get("direct", "false").lower() in ("true", "1", "yes")
+        or request.query_params.get("tap_to_talk", "false").lower() in ("true", "1", "yes")
+        or request.headers.get("x-direct-command", "false").lower() in ("true", "1", "yes")
+    )
+
+    try:
+        transcript = await asyncio.to_thread(_do_transcribe, audio_bytes, req_lang)
+    except TypeError:
+        transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
     transcript = transcript.strip()
     if not transcript:
         return {
@@ -2948,7 +3037,7 @@ async def voice_vad_utterance_endpoint(request: Request):
             "message": "No speech detected in audio utterance.",
         }
 
-    logger.info("VAD Utterance transcribed: '%s' (Session state: %s)", transcript, _voice_session.get("state"))
+    logger.info("VAD Utterance transcribed: '%s' (Session state: %s, Direct: %s)", transcript, _voice_session.get("state"), is_direct)
 
     import re
     now = time.time()
@@ -2990,13 +3079,21 @@ async def voice_vad_utterance_endpoint(request: Request):
 
     # Wake patterns (including phonetic variants: javis, travis, service, etc.)
     wake_regex = re.compile(
-        r"^(?:(?:hey|hi|ok|okay|dear)\s+)?(?:jarvis\s+jarvis|jarvis|javis|service|harvey|travis|چاویس|جارویس|جارویز)(?:[,\s]+(.*))?$",
+        r"^(?:(?:hey|hi|ok|okay|dear|hello)\s+)?(?:jarvis\s+jarvis|jarvis|javis|service|harvey|travis|چاویس|جارویس|جارویز|جرویس|سرویس|هی\s*جارویس|سلام\s*جارویس)(?:[,\s]+(.*))?$",
         re.IGNORECASE,
     )
     m_wake = wake_regex.match(transcript)
 
     command_to_run = None
-    if m_wake:
+    if is_direct:
+        # Direct command: bypass wake word check completely!
+        if m_wake:
+            command_to_run = (m_wake.group(1) or "").strip() or transcript
+        else:
+            command_to_run = transcript
+        _voice_session["state"] = "STANDBY"
+        _voice_session["awake_until"] = 0.0
+    elif m_wake:
         remainder = (m_wake.group(1) or "").strip()
         if not remainder:
             # User said "Jarvis" alone!

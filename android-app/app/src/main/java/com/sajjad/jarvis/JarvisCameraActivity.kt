@@ -107,6 +107,7 @@ class JarvisCameraActivity : ComponentActivity() {
     private val activeFilterState = mutableStateOf("normal")
 
     private var previewView: PreviewView? = null
+    @Volatile private var pendingAction: JSONObject? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -235,7 +236,12 @@ class JarvisCameraActivity : ComponentActivity() {
         if (!actionJson.isNullOrBlank()) {
             try {
                 val act = JSONObject(actionJson)
-                applyCameraControl(act)
+                if (cameraProvider == null || (imageCapture == null && videoCapture == null)) {
+                    Log.i(TAG, "Camera not bound yet. Storing pending command: $act")
+                    pendingAction = act
+                } else {
+                    applyCameraControl(act)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Error parsing incoming camera action: ${e.message}")
             }
@@ -274,12 +280,33 @@ class JarvisCameraActivity : ComponentActivity() {
                 imageCapture,
                 videoCapture
             )
-            camera?.cameraControl?.setZoomRatio(zoomRatioState.floatValue)
-            if (isTorchEnabledState.value) {
-                camera?.cameraControl?.enableTorch(true)
-            }
         } catch (exc: Exception) {
-            Log.e(TAG, "Use case binding failed: ${exc.message}", exc)
+            Log.w(TAG, "Simultaneous 3-usecase binding unsupported, falling back to 2 use cases: ${exc.message}")
+            provider.unbindAll()
+            try {
+                camera = if (isVideoModeState.value) {
+                    provider.bindToLifecycle(this, cameraSelector, preview, videoCapture)
+                } else {
+                    provider.bindToLifecycle(this, cameraSelector, preview, imageCapture)
+                }
+            } catch (e2: Exception) {
+                Log.e(TAG, "Camera fallback binding failed: ${e2.message}", e2)
+            }
+        }
+
+        camera?.cameraControl?.setZoomRatio(zoomRatioState.floatValue)
+        if (isTorchEnabledState.value) {
+            camera?.cameraControl?.enableTorch(true)
+        }
+
+        // Check and execute pending action once camera hardware is warm and active
+        val pending = pendingAction
+        if (pending != null) {
+            pendingAction = null
+            lifecycleScope.launch {
+                delay(400)
+                applyCameraControl(pending)
+            }
         }
     }
 
@@ -377,7 +404,13 @@ class JarvisCameraActivity : ComponentActivity() {
     }
 
     private fun takePhotoToGallery() {
-        val capture = imageCapture ?: return
+        val capture = imageCapture
+        if (capture == null) {
+            Log.e(TAG, "Photo capture aborted: imageCapture is null")
+            Toast.makeText(this, "Camera not ready yet", Toast.LENGTH_SHORT).show()
+            JarvisVoiceService.speakBritishDirect(this, "Camera is not ready yet, sir.")
+            return
+        }
 
         // Sci-Fi flash animation & sound
         showShutterFlash.value = true
@@ -449,13 +482,26 @@ class JarvisCameraActivity : ComponentActivity() {
 
                 override fun onError(exception: ImageCaptureException) {
                     Log.e(TAG, "Photo capture failed: ${exception.message}", exception)
+                    lifecycleScope.launch {
+                        Toast.makeText(this@JarvisCameraActivity, "Photo error: ${exception.message}", Toast.LENGTH_LONG).show()
+                        JarvisVoiceService.speakBritishDirect(
+                            this@JarvisCameraActivity,
+                            "Photo capture failed: ${exception.message}"
+                        )
+                    }
                 }
             }
         )
     }
 
     private fun startVideoRecording() {
-        val videoCap = videoCapture ?: return
+        val videoCap = videoCapture
+        if (videoCap == null) {
+            Log.e(TAG, "Video recording aborted: videoCapture is null")
+            Toast.makeText(this, "Video recording not ready yet", Toast.LENGTH_SHORT).show()
+            JarvisVoiceService.speakBritishDirect(this, "Video recording is not ready yet, sir.")
+            return
+        }
         if (isRecordingState.value) return
 
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())

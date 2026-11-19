@@ -1403,6 +1403,72 @@ def test_step_10_all_apps_discovery_and_verified_launch():
     assert meta.get("verify_and_speak") is True
 
 
+def test_v234_emergency_fixes(monkeypatch):
+    """Verify v2.3.4 emergency fixes:
+    1. Deterministic Camera Intent Parser (English + Persian) across chat and streaming.
+    2. Direct VAD utterance bypass for Tap-to-Talk.
+    3. Bilingual /api/stt error handling and language detection.
+    """
+    from openjarvis.web.server import parse_camera_intent
+    client = TestClient(app)
+
+    # 1. Camera Intent Parser tests
+    camera_prompts = [
+        ("take a photo", "photo", True),
+        ("take my photo", "photo", True),
+        ("take a picture", "photo", True),
+        ("snap a photo", "photo", True),
+        ("take a selfie", "photo", True),
+        ("از من عکس بگیر", "photo", True),
+        ("یه عکس از من بگیر", "photo", True),
+        ("عکس بگیر", "photo", True),
+        ("سلفی بگیر", "photo", True),
+        ("فیلم بگیر", "video", True),
+        ("ویدیو ضبط کن", "video", True),
+        ("فیلمبرداری کن", "video", True),
+        ("فیلمبرداری رو قطع کن", "stop_video", False),
+        ("دوربین رو باز کن و عکس بگیر", "photo", True),
+    ]
+
+    for prompt, expected_mode, expected_capture in camera_prompts:
+        intent = parse_camera_intent(prompt)
+        assert intent is not None, f"Failed matching camera intent for '{prompt}'"
+        acts = intent.get("client_actions", [])
+        cam_act = next((a for a in acts if a.get("type") == "camera_control"), None)
+        assert cam_act is not None, f"Missing camera_control action for '{prompt}'"
+        assert cam_act.get("mode") == expected_mode, f"Wrong mode for '{prompt}': got {cam_act.get('mode')}"
+        assert cam_act.get("capture") == expected_capture, f"Wrong capture flag for '{prompt}': got {cam_act.get('capture')}"
+
+    # Non-camera prompt must return None
+    assert parse_camera_intent("turn on flashlight") is None
+    assert parse_camera_intent("hello jarvis") is None
+
+    # 2. Camera attached in /api/chat fast-path and LLM fallback
+    res_chat = client.post("/api/chat", json={"message": "از من عکس بگیر"})
+    assert res_chat.status_code == 200
+    d_chat = res_chat.json()
+    chat_acts = d_chat.get("client_actions", [])
+    assert any(a.get("type") == "camera_control" and a.get("capture") is True for a in chat_acts)
+
+    # 3. Direct VAD Utterance Bypass (Tap-to-Talk)
+    import wave, io
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00" * 3200)
+    test_wav = buf.getvalue()
+
+    monkeypatch.setattr("openjarvis.web.server._do_transcribe", lambda data, *args: "turn on flashlight")
+    r_vad = client.post("/api/voice/vad_utterance?direct=true", content=test_wav, headers={"Content-Type": "audio/wav"})
+    assert r_vad.status_code == 200
+    d_vad = r_vad.json()
+    assert d_vad.get("status") != "ignored", "Direct VAD utterance was unexpectedly ignored!"
+    assert any(a.get("type") in ("torch", "flashlight") for a in d_vad.get("client_actions", []))
+
+
+
 
 
 

@@ -8,14 +8,21 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -134,6 +141,34 @@ private val CuratedFreeModels = listOf(
         "Efficient low-latency multimodal reasoning"
     )
 )
+
+private fun pcmToWavBytes(pcmData: ByteArray, sampleRate: Int = 16000): ByteArray {
+    val totalDataLen = pcmData.size + 36
+    val byteRate = sampleRate * 1 * 16 / 8
+    val blockAlign: Short = 2
+    val bitsPerSample: Short = 16
+    val channels: Short = 1
+
+    val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+    header.put("RIFF".toByteArray(Charsets.US_ASCII))
+    header.putInt(totalDataLen)
+    header.put("WAVE".toByteArray(Charsets.US_ASCII))
+    header.put("fmt ".toByteArray(Charsets.US_ASCII))
+    header.putInt(16)
+    header.putShort(1.toShort())
+    header.putShort(channels)
+    header.putInt(sampleRate)
+    header.putInt(byteRate)
+    header.putShort(blockAlign)
+    header.putShort(bitsPerSample)
+    header.put("data".toByteArray(Charsets.US_ASCII))
+    header.putInt(pcmData.size)
+
+    val out = ByteArray(44 + pcmData.size)
+    System.arraycopy(header.array(), 0, out, 0, 44)
+    System.arraycopy(pcmData, 0, out, 44, pcmData.size)
+    return out
+}
 
 class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener {
 
@@ -363,7 +398,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
     override fun onWakeStateChanged(state: String) {
         runOnUiThread {
             voiceStateText.value = when (state) {
-                "listening_cmd" -> "LISTENING..."
+                "listening_cmd" -> "LISTENING (Tap to Stop)..."
                 "processing" -> "THINKING..."
                 "speaking" -> "SPEAKING..."
                 "paused", "sleep" -> "SLEEPING / MUTED"
@@ -374,13 +409,13 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     override fun onSpeechStarted() {
         runOnUiThread {
-            voiceStateText.value = "LISTENING..."
+            voiceStateText.value = "LISTENING (Tap to Stop)..."
         }
     }
 
     override fun onSpeechEnded() {
         runOnUiThread {
-            voiceStateText.value = "THINKING..."
+            voiceStateText.value = "TRANSCRIBING..."
         }
     }
 
@@ -532,10 +567,14 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         val service = JarvisVoiceService.instance
         if (service?.isTtsSpeaking == true || service?.acousticState == JarvisVoiceService.AcousticState.SPEAKING) {
             service.triggerBargeInAbort()
+            voiceStateText.value = "INTERRUPTED: Say \"Jarvis\""
+        } else if (service?.isListeningOrRecording() == true) {
+            service.toggleTapToTalk()
+            voiceStateText.value = "TRANSCRIBING..."
         } else {
-            JarvisVoiceService.forceStartListening(this)
+            service?.toggleTapToTalk() ?: JarvisVoiceService.forceStartListening(this)
+            voiceStateText.value = "LISTENING (Tap to Stop)..."
         }
-        voiceStateText.value = "LISTENING..."
     }
 
     private fun startHealthCheckLoop() {
@@ -1352,6 +1391,10 @@ private fun JarvisSettingsDialog(
     var showHealthCheckDialog by remember { mutableStateOf(false) }
     var availableModels by remember { mutableStateOf(CuratedFreeModels) }
 
+    var isTestingMic by remember { mutableStateOf(false) }
+    var diagnosticTitle by remember { mutableStateOf<String?>(null) }
+    var diagnosticMessage by remember { mutableStateOf<String?>(null) }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             color = DarkCard,
@@ -1629,6 +1672,182 @@ private fun JarvisSettingsDialog(
                         serverUrl = urlText,
                         apiKey = apiKeyText,
                         onDismiss = { showHealthCheckDialog = false }
+                    )
+                }
+
+                // -------------------------------------------------------------
+                // 🔬 HARDWARE & SENSOR DIAGNOSTICS
+                // -------------------------------------------------------------
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.15f))
+
+                Text(
+                    text = "🔬 HARDWARE & SENSOR DIAGNOSTICS",
+                    color = CyanDim,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                // 🎙 Test Mic & VPS STT (3s) Button
+                Button(
+                    onClick = {
+                        if (!isTestingMic) {
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                diagnosticTitle = "Permission Required"
+                                diagnosticMessage = "RECORD_AUDIO permission is not granted. Please enable microphone permission in Android settings."
+                                return@Button
+                            }
+                            isTestingMic = true
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    val sampleRate = 16000
+                                    val minBuf = AudioRecord.getMinBufferSize(
+                                        sampleRate,
+                                        AudioFormat.CHANNEL_IN_MONO,
+                                        AudioFormat.ENCODING_PCM_16BIT
+                                    )
+                                    val bufSize = maxOf(minBuf, 3200)
+                                    val record = AudioRecord(
+                                        MediaRecorder.AudioSource.MIC,
+                                        sampleRate,
+                                        AudioFormat.CHANNEL_IN_MONO,
+                                        AudioFormat.ENCODING_PCM_16BIT,
+                                        bufSize
+                                    )
+                                    val bos = ByteArrayOutputStream()
+                                    val sBuf = ShortArray(1600)
+                                    var peakRms = 0.0
+
+                                    record.startRecording()
+                                    val startT = SystemClock.elapsedRealtime()
+                                    while (SystemClock.elapsedRealtime() - startT < 3000L) {
+                                        val n = record.read(sBuf, 0, 1600)
+                                        if (n > 0) {
+                                            var sum = 0.0
+                                            val bArr = ByteArray(n * 2)
+                                            for (i in 0 until n) {
+                                                val s = sBuf[i].toInt()
+                                                sum += s * s
+                                                bArr[i * 2] = (s and 0xFF).toByte()
+                                                bArr[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+                                            }
+                                            val rms = Math.sqrt(sum / n)
+                                            if (rms > peakRms) peakRms = rms
+                                            bos.write(bArr)
+                                        }
+                                        delay(40)
+                                    }
+                                    try {
+                                        record.stop()
+                                        record.release()
+                                    } catch (_: Exception) {}
+
+                                    val pcmData = bos.toByteArray()
+                                    val wavBytes = pcmToWavBytes(pcmData, sampleRate)
+
+                                    val server = urlText.trim().removeSuffix("/")
+                                    val u = URL("$server/api/stt")
+                                    val conn = (u.openConnection() as HttpURLConnection).apply {
+                                        requestMethod = "POST"
+                                        setRequestProperty("Content-Type", "audio/wav")
+                                        setRequestProperty("Accept", "application/json")
+                                        connectTimeout = 6000
+                                        readTimeout = 12000
+                                        doOutput = true
+                                    }
+                                    conn.outputStream.use { it.write(wavBytes) }
+                                    val code = conn.responseCode
+                                    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                                    val respStr = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                                    val json = try { JSONObject(respStr) } catch (_: Exception) { JSONObject() }
+                                    val transcript = json.optString("text", json.optString("transcript", ""))
+                                    val lang = json.optString("language", "auto")
+                                    val err = json.optString("error", "")
+
+                                    withContext(Dispatchers.Main) {
+                                        isTestingMic = false
+                                        diagnosticTitle = "🎙 Mic & STT Results"
+                                        diagnosticMessage = "• Peak RMS: ${peakRms.toInt()}\n" +
+                                                "• Audio Size: ${wavBytes.size} bytes (3.0s WAV)\n" +
+                                                "• Server HTTP: $code\n" +
+                                                "• Language: $lang\n" +
+                                                "• Transcript: \"${transcript.ifBlank { "(empty)" }}\"\n" +
+                                                if (err.isNotBlank()) "• Error: $err" else "• Status: Audio pipeline verified!"
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        isTestingMic = false
+                                        diagnosticTitle = "🎙 Mic Diagnostic Error"
+                                        diagnosticMessage = "Mic recording or STT network call failed: ${e.message}"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    enabled = !isTestingMic,
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(1.dp, CyanDim),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isTestingMic) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = CyanNeon, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Recording 3s & Testing VPS STT...", color = CyanNeon, fontSize = 13.sp)
+                    } else {
+                        Text("🎙 Test Mic & VPS STT (3s)", color = CyanDim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                // 📷 Test Camera Photo Capture Button
+                Button(
+                    onClick = {
+                        val act = JSONObject().apply {
+                            put("type", "camera_control")
+                            put("mode", "photo")
+                            put("capture", true)
+                        }
+                        val intent = Intent(context, JarvisCameraActivity::class.java).apply {
+                            putExtra(JarvisCameraActivity.EXTRA_CAMERA_ACTION, act.toString())
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                        AppLauncher.launchWithOverlayFallback(context, intent)
+                        diagnosticTitle = "📷 Camera Photo Test"
+                        diagnosticMessage = "Launched JarvisCameraActivity with mode=photo, capture=true.\nCheck DCIM/Jarvis in Gallery for captured image."
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(1.dp, VioletAccent),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("📷 Test Camera Photo Capture", color = VioletAccent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                if (diagnosticTitle != null && diagnosticMessage != null) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            diagnosticTitle = null
+                            diagnosticMessage = null
+                        },
+                        title = {
+                            Text(text = diagnosticTitle ?: "", color = CyanNeon, fontWeight = FontWeight.Bold)
+                        },
+                        text = {
+                            Text(text = diagnosticMessage ?: "", color = TextPrimary, fontSize = 14.sp)
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    diagnosticTitle = null
+                                    diagnosticMessage = null
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CyanNeon)
+                            ) {
+                                Text("OK", color = DarkBackground, fontWeight = FontWeight.Bold)
+                            }
+                        },
+                        containerColor = DarkCard,
+                        shape = RoundedCornerShape(16.dp)
                     )
                 }
 

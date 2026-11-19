@@ -104,10 +104,16 @@ class ProVoiceEngine(
     private var activeProbeJob: Job? = null
 
     private var activeConversationUntil: Long = 0L
-    private val isUtteranceInProgress = AtomicBoolean(false)
-    private var isDirectTapToTalk = false
+    val isUtteranceInProgress = AtomicBoolean(false)
+    val isRecordingUtterance: Boolean
+        get() = isUtteranceInProgress.get()
 
-    private var ambientFloor = 200.0
+    @Volatile var isDirectTapToTalk: Boolean = false
+        private set
+    @Volatile private var tapSpeechStartTime: Long = 0L
+    @Volatile private var tapLastSpeechTime: Long = 0L
+
+    private var ambientFloor = 180.0
     private var consecutiveSpeechChunks = 0
 
     // Ring buffer for pre-roll speech capture (never miss wake word onset)
@@ -222,13 +228,30 @@ class ProVoiceEngine(
     fun triggerInstantTapToTalk() {
         activeProbeJob?.cancel()
         activeProbeJob = null
+        val now = SystemClock.elapsedRealtime()
+        tapSpeechStartTime = now
+        tapLastSpeechTime = now
         isDirectTapToTalk = true
         extendActiveConversation(ACTIVE_CONV_WINDOW_MS)
         isUtteranceInProgress.set(true)
         utteranceStream.reset()
         updateState(EngineState.LISTENING_UTTERANCE)
-        listener.onSpeechStarted()
-        Log.i(TAG, "Instant Tap-to-Talk override activated")
+        scope.launch(Dispatchers.Main) {
+            listener.onSpeechStarted()
+        }
+        Log.i(TAG, "Instant Tap-to-Talk override activated (t=$now)")
+    }
+
+    /**
+     * Stop Tap-to-Talk and immediately commit whatever audio has been recorded so far.
+     */
+    fun stopTapToTalkAndCommit() {
+        if (isUtteranceInProgress.get()) {
+            Log.i(TAG, "Manual tap-to-stop triggered: committing utterance buffer")
+            val pcmData = utteranceStream.toByteArray()
+            val isConvMode = SystemClock.elapsedRealtime() < activeConversationUntil || isDirectTapToTalk
+            commitUtterance(pcmData, isConvMode, isDirectTapToTalk, null)
+        }
     }
 
     private fun updateState(newState: EngineState) {
@@ -330,7 +353,13 @@ class ProVoiceEngine(
                         }
                         ambientFloor = ambientFloor.coerceIn(30.0, 3000.0)
 
-                        val speechThreshold = maxOf(ambientFloor * 2.0, 350.0)
+                        // If direct tap-to-talk was just activated, sync timestamps!
+                        if (isDirectTapToTalk && (speechStartTime == 0L || speechStartTime < tapSpeechStartTime)) {
+                            speechStartTime = tapSpeechStartTime
+                            lastSpeechTime = tapLastSpeechTime
+                        }
+
+                        val speechThreshold = maxOf(ambientFloor * 1.5, 140.0)
                         val isChunkSpeech = rms > speechThreshold
 
                         if (isChunkSpeech) {
@@ -408,9 +437,10 @@ class ProVoiceEngine(
                             }
 
                             // Safety silence cutoff fallback
-                            val fallbackSilenceCutoff = if (!isConvMode) 1000L else 1400L
-                            val maxDuration = if (!isConvMode) STANDBY_MAX_DURATION_MS else CONV_MAX_DURATION_MS
-                            val shouldStop = (silenceDuration >= fallbackSilenceCutoff) || (utteranceDuration >= maxDuration)
+                            val fallbackSilenceCutoff = if (isDirectTapToTalk) 1800L else if (!isConvMode) 1000L else 1400L
+                            val maxDuration = if (isDirectTapToTalk) 15000L else if (!isConvMode) STANDBY_MAX_DURATION_MS else CONV_MAX_DURATION_MS
+                            val hasSpoken = utteranceStream.size() >= (SAMPLE_RATE * 2 * 0.4) // at least 400ms recorded audio
+                            val shouldStop = (hasSpoken && silenceDuration >= fallbackSilenceCutoff) || (utteranceDuration >= maxDuration)
 
                             if (shouldStop && isUtteranceInProgress.get()) {
                                 val pcmData = utteranceStream.toByteArray()
@@ -469,7 +499,7 @@ class ProVoiceEngine(
                 cachedTranscript
             } else {
                 val serverUrl = getServerUrl()
-                val transcriptObj = transcribeAudio(serverUrl, wavBytes, timeoutMs = 4000)
+                val transcriptObj = transcribeAudio(serverUrl, wavBytes, timeoutMs = 10000)
                 transcriptObj.optString("text", transcriptObj.optString("transcript", "")).trim()
             }
 
@@ -495,7 +525,7 @@ class ProVoiceEngine(
                 val clean = transcript.lowercase(Locale.ROOT)
                 val wakePatterns = listOf(
                     "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "hello jarvis", "dear jarvis",
-                    "جارویس", "ای جارویس", "جرویس", "هی جارویس", "سلام جارویس", "چاویس", "جارویز"
+                    "جارویس", "ای جارویس", "جرویس", "هی جارویس", "سلام جارویس", "چاویس", "جارویز", "سرویس"
                 )
 
                 val matchedWake = wakePatterns.firstOrNull { clean.contains(it) }
@@ -530,11 +560,11 @@ class ProVoiceEngine(
         return if (stripped.isNotBlank()) stripped else fullText
     }
 
-    private fun transcribeAudio(serverUrl: String, wavData: ByteArray, timeoutMs: Int = 4000): JSONObject {
+    private fun transcribeAudio(serverUrl: String, wavData: ByteArray, timeoutMs: Int = 10000): JSONObject {
         return try {
             val url = URL("${serverUrl.removeSuffix("/")}/api/stt")
             val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3000
+                connectTimeout = 5000
                 readTimeout = timeoutMs
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "audio/wav")

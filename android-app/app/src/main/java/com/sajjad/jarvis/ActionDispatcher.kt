@@ -577,6 +577,16 @@ object ActionDispatcher {
             return false
         }
 
+        // Normalize intent payload for direct take_photo / record_video actions
+        val actType = act.optString("type", "").lowercase(Locale.ROOT)
+        if (actType in listOf("take_photo", "android_camera_capture")) {
+            if (!act.has("mode")) act.put("mode", "photo")
+            if (!act.has("capture")) act.put("capture", true)
+        } else if (actType == "record_video") {
+            if (!act.has("mode")) act.put("mode", "video")
+            if (!act.has("capture")) act.put("capture", true)
+        }
+
         // If user explicitly asks for "stock" camera app, open OEM Camera
         if (act.optString("app", "").lowercase(Locale.ROOT) == "stock") {
             DeviceController.openCamera(context)
