@@ -402,6 +402,9 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                 "processing" -> "THINKING..."
                 "speaking" -> "SPEAKING..."
                 "paused", "sleep" -> "SLEEPING / MUTED"
+                "empty_stt" -> "Didn't catch that (empty STT)"
+                "local_action" -> "Local Action (0 tokens)"
+                "asking_ai" -> "Asking AI..."
                 else -> "STANDBY: Say \"Jarvis\""
             }
         }
@@ -609,6 +612,19 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
         val turnId = UUID.randomUUID().toString()
         handleUserMessage(clean, turnId)
+
+        // Check Zero-Token LocalCommandRouter first for typed chat!
+        val localResult = LocalCommandRouter.route(applicationContext, clean)
+        if (localResult.handled) {
+            val isFa = clean.any { it in '\u0600'..'\u06FF' }
+            val reply = localResult.spokenFeedback ?: (if (isFa) "انجام شد قربان." else "Done, sir.")
+            handleAssistantMessage(reply, turnId, false)
+            speakEdgeTts(reply)
+            isProcessingState.value = false
+            voiceStateText.value = "STANDBY: Say \"Jarvis\""
+            return
+        }
+
         isProcessingState.value = true
         voiceStateText.value = "THINKING..."
 

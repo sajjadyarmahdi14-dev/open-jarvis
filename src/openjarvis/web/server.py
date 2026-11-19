@@ -2715,6 +2715,22 @@ async def summarize_notifications_endpoint(req: NotificationSummarizeRequest, re
 # Part A & C: Long-Term Memory and Safe VPS Operations Endpoints
 # ---------------------------------------------------------------------------
 
+class SaveMemoryRequest(BaseModel):
+    content: str
+    category: Optional[str] = "general"
+
+
+@app.post("/api/memory")
+async def save_memory_endpoint(req: SaveMemoryRequest):
+    """Save persistent long-term memory."""
+    from openjarvis.memory_store import get_memory_store
+    mem = get_memory_store().remember(
+        content=req.content,
+        category=req.category or "general"
+    )
+    return {"id": mem.get("id"), "content": req.content, "status": "saved", "memory": mem}
+
+
 @app.get("/api/memory")
 async def list_memories_endpoint(limit: int = 100):
     """List persistent long-term memories."""
@@ -2864,15 +2880,70 @@ _voice_session: Dict[str, Any] = {
 }
 
 
+def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
+    """Calculate duration, RMS, and return normalized WAV if RMS is low."""
+    try:
+        import wave, io, math, struct
+        try:
+            import audioop
+        except ImportError:
+            audioop = None
+
+        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+            params = w.getparams()
+            nchannels, sampwidth, framerate, nframes = params[:4]
+            frames = w.readframes(nframes)
+        duration = nframes / float(framerate) if framerate > 0 else 0.0
+        if not frames or sampwidth != 2:
+            return wav_bytes, duration, 0.0
+
+        # Calculate RMS
+        rms = 0.0
+        if audioop is not None:
+            try:
+                rms = float(audioop.rms(frames, 2))
+            except Exception:
+                pass
+        if rms == 0.0:
+            count = len(frames) // 2
+            shorts = struct.unpack(f"<{count}h", frames[:count * 2])
+            rms = math.sqrt(sum(s * s for s in shorts) / count) if count > 0 else 0.0
+
+        # If RMS is low (< 1800), normalize up to target RMS (~4500) with max gain 5.0
+        if 50.0 < rms < 1800.0:
+            gain = min(5.0, 4500.0 / rms)
+            norm_frames = None
+            if audioop is not None:
+                try:
+                    norm_frames = audioop.mul(frames, 2, gain)
+                except Exception:
+                    pass
+            if norm_frames is None:
+                count = len(frames) // 2
+                shorts = struct.unpack(f"<{count}h", frames[:count * 2])
+                clamped = [max(-32768, min(32767, int(s * gain))) for s in shorts]
+                norm_frames = struct.pack(f"<{count}h", *clamped)
+            out_buf = io.BytesIO()
+            with wave.open(out_buf, "wb") as out_w:
+                out_w.setparams(params)
+                out_w.writeframes(norm_frames)
+            return out_buf.getvalue(), duration, rms
+        return wav_bytes, duration, rms
+    except Exception as e:
+        logger.debug("Audio normalization skipped: %s", e)
+        return wav_bytes, 0.0, 0.0
+
+
 def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
     """Transcribe audio WAV/PCM bytes with smart concurrent bilingual (fa-IR + en-US) recognition."""
+    norm_data, duration, rms = _normalize_audio(data)
     try:
         import io
         import speech_recognition as sr
         from concurrent.futures import ThreadPoolExecutor
 
         r = sr.Recognizer()
-        with sr.AudioFile(io.BytesIO(data)) as source:
+        with sr.AudioFile(io.BytesIO(norm_data)) as source:
             audio = r.record(source)
 
         def _recognize(lang: str) -> str:
@@ -2882,21 +2953,29 @@ def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
             except (sr.UnknownValueError, Exception):
                 return ""
 
+        wake_words_fa = (
+            "جارویس", "جرویس", "جارویز", "جرویز", "چارویس", "چرویس",
+            "جاروویس", "جاربیس", "دارویس", "یارویس", "جارو بیس"
+        )
+        wake_words_en = (
+            "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "jervis",
+            "javis", "garvis", "charvis", "jarvish", "jarvez", "travis"
+        )
+
         req_clean = (requested_lang or "auto").strip().lower()
+        result = ""
         if req_clean in ("fa", "fa-ir"):
             txt_fa = _recognize("fa-IR")
             if txt_fa:
-                return txt_fa
-            txt_en = _recognize("en-US")
-            if txt_en:
-                return txt_en
+                result = txt_fa
+            else:
+                result = _recognize("en-US")
         elif req_clean in ("en", "en-us"):
             txt_en = _recognize("en-US")
             if txt_en:
-                return txt_en
-            txt_fa = _recognize("fa-IR")
-            if txt_fa:
-                return txt_fa
+                result = txt_en
+            else:
+                result = _recognize("fa-IR")
         else:
             # "auto" mode: execute fa-IR and en-US concurrently in parallel
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -2905,35 +2984,49 @@ def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
                 txt_fa = fut_fa.result()
                 txt_en = fut_en.result()
 
-            # Smart Persian selection:
-            # Google STT en-US hallucinates English phonemes when fed Persian speech.
-            # But Google STT fa-IR accurately outputs Persian characters and rejects English.
+            # Smart wake-word & bilingual selection:
+            # 1. Prefer candidate containing a wake-word variant
+            fa_has_wake = any(w in txt_fa.lower() for w in wake_words_fa)
+            en_has_wake = any(w in txt_en.lower() for w in wake_words_en)
             has_fa_chars = any("\u0600" <= c <= "\u06FF" for c in txt_fa)
-            if txt_fa and has_fa_chars:
-                return txt_fa
-            if txt_en:
-                return txt_en
-            if txt_fa:
-                return txt_fa
+
+            if fa_has_wake:
+                result = txt_fa
+            elif en_has_wake:
+                result = txt_en
+            elif txt_fa and has_fa_chars:
+                result = txt_fa
+            elif txt_en:
+                result = txt_en
+            elif txt_fa:
+                result = txt_fa
 
         # Fallback to local whisper or speech backend if configured
-        try:
-            txt = r.recognize_whisper(audio)
-            if txt and txt.strip():
-                return txt.strip()
-        except Exception as e:
-            logger.debug("Whisper fallback transcription error: %s", e)
-        try:
-            from openjarvis.core.config import load_config
-            from openjarvis.speech._discovery import discover_speech_backend
-            cfg = load_config()
-            backend = discover_speech_backend(cfg)
-            if backend:
-                res = backend.transcribe(data)
-                if res and res.strip():
-                    return res.strip()
-        except Exception as e:
-            logger.debug("SpeechBackend fallback error: %s", e)
+        if not result:
+            try:
+                txt = r.recognize_whisper(audio)
+                if txt and txt.strip():
+                    result = txt.strip()
+            except Exception as e:
+                logger.debug("Whisper fallback transcription error: %s", e)
+        if not result:
+            try:
+                from openjarvis.core.config import load_config
+                from openjarvis.speech._discovery import discover_speech_backend
+                cfg = load_config()
+                backend = discover_speech_backend(cfg)
+                if backend:
+                    res = backend.transcribe(norm_data)
+                    if res and res.strip():
+                        result = res.strip()
+            except Exception as e:
+                logger.debug("SpeechBackend fallback error: %s", e)
+
+        logger.info(
+            "STT audio: bytes=%d, duration=%.2fs, rms=%.1f -> transcript='%s'",
+            len(data), duration, rms, result
+        )
+        return result
     except Exception as exc:
         logger.warning("VAD transcription exception: %s", exc)
     return ""

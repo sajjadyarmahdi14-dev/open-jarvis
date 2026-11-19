@@ -41,12 +41,12 @@ class ProVoiceEngine(
         const val SAMPLE_RATE = 16000
         const val CHUNK_MS = 50
         const val CHUNK_SAMPLES = (SAMPLE_RATE * CHUNK_MS) / 1000 // 800 shorts
-        const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 350) / 1000 // 5600 shorts (350ms pre-roll)
+        const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 600) / 1000 // 9600 shorts (600ms pre-roll)
 
         const val MICRO_PAUSE_PROBE_MS = 450L
         const val STANDBY_MAX_DURATION_MS = 12000L
         const val CONV_MAX_DURATION_MS = 45000L
-        const val ACTIVE_CONV_WINDOW_MS = 20000L // 20s active conversation window
+        const val ACTIVE_CONV_WINDOW_MS = 25000L // 25s active conversation window
 
         const val HARD_STALE_TTL_MS = 12000L // 12-second hard drop rule
 
@@ -62,6 +62,33 @@ class ProVoiceEngine(
             if (words.isEmpty()) return false
             val lastWord = words.last().trim()
             return INCOMPLETE_FA_ENDINGS.contains(lastWord) || INCOMPLETE_EN_ENDINGS.contains(lastWord)
+        }
+
+        fun levenshtein(s1: String, s2: String): Int {
+            val dp = IntArray(s2.length + 1) { it }
+            for (i in 1..s1.length) {
+                var prev = dp[0]
+                dp[0] = i
+                for (j in 1..s2.length) {
+                    val temp = dp[j]
+                    dp[j] = if (s1[i - 1] == s2[j - 1]) prev else minOf(prev, dp[j], dp[j - 1]) + 1
+                    prev = temp
+                }
+            }
+            return dp[s2.length]
+        }
+
+        fun isFuzzyWakeWord(token: String): Boolean {
+            val clean = token.trim().lowercase(Locale.ROOT).replace(Regex("[^a-zA-Z\\u0600-\\u06FF]"), "")
+            if (clean.length < 3) return false
+            if (levenshtein(clean, "jarvis") <= 2) return true
+            if (levenshtein(clean, "jervis") <= 2) return true
+            if (levenshtein(clean, "garvis") <= 2) return true
+            if (levenshtein(clean, "travis") <= 2) return true
+            if (levenshtein(clean, "جارویس") <= 1) return true
+            if (levenshtein(clean, "جرویس") <= 1) return true
+            if (levenshtein(clean, "چارویس") <= 1) return true
+            return false
         }
     }
 
@@ -81,6 +108,8 @@ class ProVoiceEngine(
         fun onWakeAlone(isFa: Boolean)
         fun onCommandCaptured(transcript: String, wavBytes: ByteArray, isFa: Boolean, turnId: String, createdAtMs: Long)
         fun onStateChanged(state: EngineState)
+        fun onSttEmpty()
+        fun onStandbyIgnored(transcript: String)
     }
 
     @Volatile var currentState: EngineState = EngineState.STANDBY
@@ -235,11 +264,12 @@ class ProVoiceEngine(
         extendActiveConversation(ACTIVE_CONV_WINDOW_MS)
         isUtteranceInProgress.set(true)
         utteranceStream.reset()
+        utteranceStream.write(preRollBuffer.toByteArray())
         updateState(EngineState.LISTENING_UTTERANCE)
         scope.launch(Dispatchers.Main) {
             listener.onSpeechStarted()
         }
-        Log.i(TAG, "Instant Tap-to-Talk override activated (t=$now)")
+        Log.i(TAG, "Instant Tap-to-Talk override activated with pre-roll (t=$now)")
     }
 
     /**
@@ -506,7 +536,10 @@ class ProVoiceEngine(
             val isFa = transcript.any { it in '\u0600'..'\u06FF' }
 
             if (transcript.isBlank()) {
-                Log.i(TAG, "No speech transcribed from audio chunk")
+                Log.i(TAG, "No speech transcribed from audio chunk (empty STT)")
+                scope.launch(Dispatchers.Main) {
+                    listener.onSttEmpty()
+                }
                 val isConv = SystemClock.elapsedRealtime() < activeConversationUntil
                 updateState(if (isConv) EngineState.ACTIVE_CONVERSATION else EngineState.STANDBY)
                 return@launch
@@ -525,10 +558,17 @@ class ProVoiceEngine(
                 val clean = transcript.lowercase(Locale.ROOT)
                 val wakePatterns = listOf(
                     "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "hello jarvis", "dear jarvis",
-                    "جارویس", "ای جارویس", "جرویس", "هی جارویس", "سلام جارویس", "چاویس", "جارویز", "سرویس"
+                    "jervis", "javis", "garvis", "charvis", "jarvish", "jarvez", "travis",
+                    "جارویس", "ای جارویس", "جرویس", "هی جارویس", "سلام جارویس", "چاویس", "چارویس", "چرویس",
+                    "جارویز", "جرویز", "جاروویس", "جاربیس", "دارویس", "یارویس", "جارو بیس", "سرویس"
                 )
 
-                val matchedWake = wakePatterns.firstOrNull { clean.contains(it) }
+                // Match exact pattern OR fuzzy Levenshtein <= 2 on first 2 words
+                val matchedWake = wakePatterns.firstOrNull { clean.contains(it) } ?: run {
+                    val tokens = clean.split(Regex("\\s+")).take(2)
+                    if (tokens.any { isFuzzyWakeWord(it) }) "jarvis" else null
+                }
+
                 if (matchedWake != null) {
                     extendActiveConversation(ACTIVE_CONV_WINDOW_MS)
                     // Check if utterance is ONLY the wake word
@@ -548,6 +588,9 @@ class ProVoiceEngine(
                     }
                 } else {
                     Log.i(TAG, "Standby audio ignored (no wake word found in '$transcript')")
+                    scope.launch(Dispatchers.Main) {
+                        listener.onStandbyIgnored(transcript)
+                    }
                     updateState(EngineState.STANDBY)
                 }
             }

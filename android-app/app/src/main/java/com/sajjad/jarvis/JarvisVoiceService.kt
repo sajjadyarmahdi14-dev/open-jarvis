@@ -634,6 +634,24 @@ class JarvisVoiceService : Service() {
                         dispatchVadUtteranceDirect(transcript, wavBytes, isFa, turnId, createdAtMs)
                     }
 
+                    override fun onSttEmpty() {
+                        broadcastUiUpdate(wakeStatus = "empty_stt")
+                        updateNotification("Didn't catch that (empty STT)")
+                        JarvisOverlayManager.instance?.updateText("Didn't catch that (empty STT)")
+                        scope.launch {
+                            delay(1500)
+                            val st = if (proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION) "listening_cmd" else "active"
+                            broadcastUiUpdate(wakeStatus = st)
+                            val notif = if (proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION) "Active Conversation Window (25s)" else "J.A.R.V.I.S. Standby — Say 'Jarvis' anytime"
+                            updateNotification(notif)
+                        }
+                    }
+
+                    override fun onStandbyIgnored(transcript: String) {
+                        Log.i(TAG, "Standby audio ignored: $transcript")
+                        updateNotification("Ignored (no wake word): $transcript")
+                    }
+
                     override fun onStateChanged(state: ProVoiceEngine.EngineState) {
                         val st = when (state) {
                             ProVoiceEngine.EngineState.STANDBY -> "active"
@@ -647,7 +665,7 @@ class JarvisVoiceService : Service() {
                         broadcastUiUpdate(wakeStatus = st)
                         val notifText = when (state) {
                             ProVoiceEngine.EngineState.STANDBY -> "J.A.R.V.I.S. Standby — Say 'Jarvis' anytime"
-                            ProVoiceEngine.EngineState.ACTIVE_CONVERSATION -> "Active Conversation Window (20s)"
+                            ProVoiceEngine.EngineState.ACTIVE_CONVERSATION -> "Active Conversation Window (25s)"
                             ProVoiceEngine.EngineState.LISTENING_UTTERANCE -> "Listening for command..."
                             ProVoiceEngine.EngineState.PROCESSING -> "Processing command..."
                             ProVoiceEngine.EngineState.SPEAKING -> "Responding..."
@@ -686,7 +704,33 @@ class JarvisVoiceService : Service() {
                 withTimeout(15_000L) {
                     serviceListener?.onFinalSpeech(transcript, turnId)
                     broadcastUiUpdate(userText = transcript, turnId = turnId, wakeStatus = "processing")
-                    updateNotification("Processing speech...")
+                    updateNotification("Processing speech: $transcript")
+
+                    // -------------------------------------------------------------
+                    // Check Zero-Token LocalCommandRouter FIRST!
+                    // -------------------------------------------------------------
+                    val localResult = LocalCommandRouter.route(applicationContext, transcript)
+                    if (localResult.handled) {
+                        Log.i(TAG, "Command handled locally by LocalCommandRouter (category=${localResult.category}, 0 tokens)")
+                        val reply = localResult.spokenFeedback ?: (if (isFa) "انجام شد قربان." else "Done, sir.")
+                        serviceListener?.onAssistantResponse(reply, turnId, false)
+                        broadcastUiUpdate(
+                            assistantReply = reply,
+                            turnId = turnId,
+                            isAppend = false,
+                            wakeStatus = "speaking"
+                        )
+                        JarvisOverlayManager.instance?.updateText(reply)
+                        JarvisOverlayManager.instance?.updateState("speaking")
+                        updateNotification("Local Action (0 tokens): ${localResult.category}")
+                        speakBritish(reply)
+                        isProcessing = false
+                        isCommandInFlight.set(false)
+                        proVoiceEngine?.notifyProcessing(false)
+                        return@withTimeout
+                    }
+
+                    updateNotification("Asking AI: $transcript")
 
                     val (batPct, isCharging) = getBatteryTelemetry()
                     ProactiveMonitor.checkBatteryAlert(applicationContext, batPct, isCharging)

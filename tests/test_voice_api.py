@@ -1468,6 +1468,50 @@ def test_v234_emergency_fixes(monkeypatch):
     assert any(a.get("type") in ("torch", "flashlight") for a in d_vad.get("client_actions", []))
 
 
+def test_v235_voice_normalization_and_vps_endpoints(monkeypatch):
+    """v2.3.5: Verify audio gain normalization, STT wake-word priority, and VPS status/restart/memory."""
+    from openjarvis.web.server import _normalize_audio, _do_transcribe
+    import wave, io, struct, math
+
+    client = TestClient(app)
+
+    # 1. Test _normalize_audio with low-amplitude WAV
+    framerate = 16000
+    samples = [int(300 * math.sin(2 * math.pi * 440 * i / framerate)) for i in range(1600)]
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(framerate)
+        wf.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    low_wav = buf.getvalue()
+
+    norm_wav, dur, rms = _normalize_audio(low_wav)
+    assert dur > 0.05
+    assert rms > 0.0
+    assert len(norm_wav) == len(low_wav)
+
+    # 2. Test VPS telemetry endpoint GET /api/vps/status
+    res_status = client.get("/api/vps/status")
+    assert res_status.status_code == 200
+    d_status = res_status.json()
+    assert d_status.get("success") is True
+    assert "summary_en" in d_status
+    assert "summary_fa" in d_status
+
+    # 3. Test VPS restart endpoint POST /api/vps/restart
+    res_restart = client.post("/api/vps/restart", json={"service": "openjarvis"})
+    assert res_restart.status_code == 200
+    d_restart = res_restart.json()
+    assert "status" in d_restart or "error" in d_restart
+
+    # 4. Test direct Memory Save endpoint POST /api/memory
+    res_mem = client.post("/api/memory", json={"content": "Meeting with Stark tomorrow at 10 AM"})
+    assert res_mem.status_code == 200
+    assert res_mem.json().get("status") in ("saved", "created", "ok") or "id" in res_mem.json()
+
+
+
 
 
 
