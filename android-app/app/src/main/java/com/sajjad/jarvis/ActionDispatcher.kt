@@ -306,7 +306,7 @@ object ActionDispatcher {
                     val screenText = JarvisAccessibilityService.instance?.readScreen() ?: ""
                     lastActionResult = "Screen text extracted (${screenText.length} chars)"
                     if (screenText.isNotBlank()) {
-                        JarvisVoiceService.instance?.sendScreenSummaryRequest(screenText)
+                        JarvisVoiceService.instance?.handleReadScreenAction(screenText)
                     }
                     true
                 }
@@ -451,10 +451,7 @@ object ActionDispatcher {
                     true
                 }
                 "sleep" -> {
-                    JarvisVoiceService.instance?.let { svc ->
-                        svc.currentVadMode = JarvisVoiceService.VadMode.SLEEP_WAKEWORD_ONLY
-                        svc.awakeUntilTimestamp = 0L
-                    }
+                    JarvisVoiceService.instance?.enterStandbyMode()
                     lastActionResult = "Jarvis entered standby mode"
                     true
                 }

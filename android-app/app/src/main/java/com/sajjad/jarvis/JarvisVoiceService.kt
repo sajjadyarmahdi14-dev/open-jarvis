@@ -1528,6 +1528,19 @@ class JarvisVoiceService : Service() {
         }
     }
 
+    fun handleReadScreenAction(screenText: String) {
+        serviceScope.launch {
+            sendScreenSummaryRequest(screenText)
+        }
+    }
+
+    fun enterStandbyMode() {
+        currentVadMode = VadMode.SLEEP_WAKEWORD_ONLY
+        awakeUntilTimestamp = 0L
+        updateNotification("paused")
+        broadcastUiUpdate(wakeStatus = "paused")
+    }
+
     // -----------------------------------------------------------------------
     // Layer 2: End-to-End Streaming Pipeline & Incremental Audio Playback
     // -----------------------------------------------------------------------
