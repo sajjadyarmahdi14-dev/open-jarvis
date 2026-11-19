@@ -2082,23 +2082,6 @@ class JarvisVoiceService : Service() {
             }
         }
     }
-                try {
-                    val isFa = text.any { it in '\u0600'..'\u06FF' }
-                    val voice = if (isFa) "fa-IR-FaridNeural" else "en-GB-RyanNeural"
-                    val encText = URLEncoder.encode(text, "UTF-8")
-                    val encVoice = URLEncoder.encode(voice, "UTF-8")
-                    val url = URL("$server/api/tts/audio?text=$encText&voice=$encVoice&rate=%2B6%25&pitch=-2Hz")
-                    val conn = url.openConnection() as HttpURLConnection
-                    conn.connectTimeout = 3000
-                    conn.readTimeout = 15000
-                    if (conn.responseCode in 200..299) {
-                        destFile.outputStream().use { out -> conn.inputStream.copyTo(out) }
-                        Log.i(TAG, "Pre-cached British audio for '$text'")
-                    }
-                } catch (_: Exception) {}
-            }
-        }
-    }
 
     private fun playActivationChime() {
         try {
