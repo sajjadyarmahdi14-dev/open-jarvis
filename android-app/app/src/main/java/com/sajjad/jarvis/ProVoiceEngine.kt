@@ -44,14 +44,48 @@ class ProVoiceEngine(
         const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 600) / 1000 // 9600 shorts (600ms pre-roll)
 
         const val MICRO_PAUSE_PROBE_MS = 450L
-        const val STANDBY_MAX_DURATION_MS = 2200L // 2.2s cap in STANDBY (Fix 3)
-        const val CONV_MAX_DURATION_MS = 8000L    // 8.0s noisy cap in LISTENING without transcript growth (Fix 3)
+        const val STANDBY_MAX_DURATION_MS = 3200L // Full 1.0s to 3.2s utterance with 600ms pre-roll + 450ms post-roll
+        const val CONV_MAX_DURATION_MS = 8000L    // 8.0s noisy cap in LISTENING without transcript growth
         const val CONV_EXTENDED_MAX_DURATION_MS = 35000L // Up to 35s if words keep arriving
-        const val PERIODIC_PROBE_INTERVAL_MS = 1800L // 1.8s periodic probe in noisy environment (Fix 3)
-        const val EMPTY_NOISE_TIMEOUT_MS = 4000L // 4.0s timeout if noise produces empty transcript (Fix 3)
+        const val PERIODIC_PROBE_INTERVAL_MS = 1800L // 1.8s periodic probe in noisy environment
+        const val EMPTY_NOISE_TIMEOUT_MS = 4000L // 4.0s timeout if noise produces empty transcript
         const val ACTIVE_CONV_WINDOW_MS = 25000L // 25s active conversation window
 
         const val HARD_STALE_TTL_MS = 12000L // 12-second hard drop rule
+
+        /**
+         * Peak-normalize 16-bit signed PCM audio before STT (Fix 2: 2).
+         * If peak > 80 and peak < 18000, applies linear gain up to ~24000 (-2.5 dBFS)
+         * so quiet, distant, or outdoor speech is crisp and loud for STT without clipping distortion.
+         */
+        fun peakNormalizePcm(pcmData: ByteArray): ByteArray {
+            if (pcmData.size < 4) return pcmData
+            val count = pcmData.size / 2
+            var maxPeak = 0
+            for (i in 0 until count) {
+                val low = pcmData[i * 2].toInt() and 0xFF
+                val high = pcmData[i * 2 + 1].toInt()
+                val s = ((high shl 8) or low).toShort()
+                val absVal = Math.abs(s.toInt())
+                if (absVal > maxPeak) maxPeak = absVal
+            }
+
+            if (maxPeak in 81..17999) {
+                val gain = 24000.0 / maxPeak.toDouble()
+                val normalized = ByteArray(pcmData.size)
+                for (i in 0 until count) {
+                    val low = pcmData[i * 2].toInt() and 0xFF
+                    val high = pcmData[i * 2 + 1].toInt()
+                    val s = ((high shl 8) or low).toShort()
+                    val scaled = (s.toDouble() * gain).toInt().coerceIn(-32768, 32767)
+                    normalized[i * 2] = (scaled and 0xFF).toByte()
+                    normalized[i * 2 + 1] = ((scaled shr 8) and 0xFF).toByte()
+                }
+                Log.d(TAG, "peakNormalizePcm: peak $maxPeak -> ~24000 (gain=${String.format(Locale.US, "%.2f", gain)})")
+                return normalized
+            }
+            return pcmData
+        }
 
         class HighPassFilter300Hz(val alpha: Float = 0.895f) {
             var prevX: Float = 0f
@@ -157,6 +191,7 @@ class ProVoiceEngine(
         fun onStateChanged(state: EngineState)
         fun onSttEmpty()
         fun onStandbyIgnored(transcript: String)
+        fun onMicBlocked()
     }
 
     @Volatile var currentState: EngineState = EngineState.STANDBY
@@ -167,6 +202,9 @@ class ProVoiceEngine(
 
     @Volatile var isMuted: Boolean = false
         private set
+
+    val isMicGated = AtomicBoolean(false)
+    private var consecutiveZeroAudioFrames = 0
 
     private var audioRecord: AudioRecord? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -273,16 +311,18 @@ class ProVoiceEngine(
 
     fun extendActiveConversation(durationMs: Long = ACTIVE_CONV_WINDOW_MS) {
         activeConversationUntil = SystemClock.elapsedRealtime() + durationMs
-        if (currentState != EngineState.PROCESSING && currentState != EngineState.SPEAKING && !isMuted) {
+        if (!isMuted) {
             updateState(EngineState.ACTIVE_CONVERSATION)
         }
     }
 
     fun notifySpeaking(isSpeaking: Boolean) {
         if (isSpeaking) {
+            isMicGated.set(true)
             updateState(EngineState.SPEAKING)
         } else {
-            // After Jarvis finishes speaking, give user 20-second active conversation window!
+            isMicGated.set(false)
+            // After Jarvis finishes speaking, give user 25-second active conversation window!
             extendActiveConversation(ACTIVE_CONV_WINDOW_MS)
         }
     }
@@ -409,23 +449,6 @@ class ProVoiceEngine(
                     var lastTranscriptGrowthMs = 0L
 
                     while (isRunning && isActive) {
-                        // When muted, speaking, or processing, flush incoming audio to prevent feedback
-                        if (isMuted || currentState == EngineState.SPEAKING || currentState == EngineState.PROCESSING) {
-                            record.read(readBuffer, 0, CHUNK_SAMPLES)
-                            preRollBuffer.clear()
-                            utteranceStream.reset()
-                            isUtteranceInProgress.set(false)
-                            probeTriggeredForUtterance = false
-                            speechStartTime = 0L
-                            lastSpeechTime = 0L
-                            speechPeakRms = 0.0
-                            silenceStartMs = 0L
-                            flatNoiseChunks = 0
-                            hpf.reset()
-                            delay(40)
-                            continue
-                        }
-
                         val readCount = record.read(readBuffer, 0, CHUNK_SAMPLES)
                         if (readCount <= 0) {
                             consecutiveZeroReads++
@@ -439,6 +462,49 @@ class ProVoiceEngine(
                         consecutiveZeroReads = 0
 
                         val now = SystemClock.elapsedRealtime()
+
+                        // Fix 1: Detect OS all-zero silenced mic (Zero Silent Failures)
+                        var maxSample = 0
+                        for (i in 0 until readCount) {
+                            val absVal = Math.abs(readBuffer[i].toInt())
+                            if (absVal > maxSample) maxSample = absVal
+                        }
+
+                        if (!isMicGated.get() && !isMuted) {
+                            if (maxSample == 0) {
+                                consecutiveZeroAudioFrames++
+                                if (consecutiveZeroAudioFrames == 60) { // 60 * 50ms = 3.0 seconds of literally 0
+                                    Log.e(TAG, "Mic blocked or delivering all zeros from OS for 3 seconds!")
+                                    scope.launch(Dispatchers.Main) {
+                                        listener.onMicBlocked()
+                                    }
+                                }
+                            } else {
+                                if (consecutiveZeroAudioFrames >= 60) {
+                                    Log.i(TAG, "Mic recovered from all-zero state (sample=$maxSample)")
+                                }
+                                consecutiveZeroAudioFrames = 0
+                            }
+                        } else {
+                            consecutiveZeroAudioFrames = 0
+                        }
+
+                        // Fix 1: Continuous AudioRecord session NEVER stopped/released during SPEAKING!
+                        // When muted, mic-gated (speaking + echo cooldown), or processing:
+                        // DRAIN AudioRecord continuously so the OS buffer NEVER overflows, and software-discard frames!
+                        if (isMuted || isMicGated.get() || currentState == EngineState.SPEAKING || currentState == EngineState.PROCESSING) {
+                            preRollBuffer.clear()
+                            utteranceStream.reset()
+                            isUtteranceInProgress.set(false)
+                            probeTriggeredForUtterance = false
+                            speechStartTime = 0L
+                            lastSpeechTime = 0L
+                            speechPeakRms = 0.0
+                            silenceStartMs = 0L
+                            flatNoiseChunks = 0
+                            hpf.reset()
+                            continue
+                        }
 
                         // Fix 1: Pass samples through 300Hz HPF for VAD and Mic Live Meter (unfiltered PCM kept for STT)
                         val filteredRms = hpf.apply(readBuffer, readCount)
@@ -465,26 +531,49 @@ class ProVoiceEngine(
                             speechPeakRms = maxOf(speechPeakRms, filteredRms)
                         }
 
-                        val speechThreshold = maxOf(liveNoiseFloor * 1.5, 140.0)
-                        val isChunkSpeech = filteredRms > speechThreshold
-
-                        if (isChunkSpeech) {
-                            consecutiveSpeechChunks++
-                        } else {
-                            consecutiveSpeechChunks = maxOf(0, consecutiveSpeechChunks - 1)
-                        }
-
-                        val isSpeechActive = consecutiveSpeechChunks >= 2
-
-                        // State transition: check conversation window timeout
                         val inConvWindow = now < activeConversationUntil
                         if (!isUtteranceInProgress.get() && !inConvWindow && currentState == EngineState.ACTIVE_CONVERSATION) {
                             updateState(EngineState.STANDBY)
                         }
 
+                        // Fix 2: Always Record Full Audio in LISTENING / ACTIVE_CONVERSATION
+                        // Immediately append all incoming PCM frames (plus 600ms pre-roll) to capture buffer!
+                        if ((inConvWindow || isDirectTapToTalk) && !isUtteranceInProgress.get()) {
+                            isUtteranceInProgress.set(true)
+                            speechStartTime = now
+                            lastSpeechTime = now
+                            speechPeakRms = filteredRms
+                            silenceStartMs = 0L
+                            flatNoiseChunks = 0
+                            probeTriggeredForUtterance = false
+                            lastProbeTime = now
+                            prevProbeTranscript = ""
+                            prevProbeWordCount = 0
+                            lastTranscriptGrowthMs = now
+
+                            utteranceStream.reset()
+                            utteranceStream.write(preRollBuffer.toByteArray())
+                            utteranceStream.write(shortsToBytes(readBuffer, readCount))
+                            updateState(EngineState.ACTIVE_CONVERSATION)
+                            scope.launch(Dispatchers.Main) {
+                                listener.onSpeechStarted()
+                            }
+                        }
+
                         if (!isUtteranceInProgress.get()) {
+                            // STANDBY mode: sensitive voice-band VAD threshold for conversational "Jarvis" outdoors
+                            val speechThreshold = maxOf(liveNoiseFloor * 1.30 + 75.0, 160.0)
+                            val isChunkSpeech = filteredRms > speechThreshold
+
+                            if (isChunkSpeech) {
+                                consecutiveSpeechChunks++
+                            } else {
+                                consecutiveSpeechChunks = maxOf(0, consecutiveSpeechChunks - 1)
+                            }
+
+                            val isSpeechActive = consecutiveSpeechChunks >= 2 // >= 100-120ms
                             if (isSpeechActive) {
-                                // Speech onset detected!
+                                // Wake onset detected! Include full 600ms pre-roll!
                                 isUtteranceInProgress.set(true)
                                 speechStartTime = now
                                 lastSpeechTime = now
@@ -499,7 +588,6 @@ class ProVoiceEngine(
 
                                 utteranceStream.reset()
                                 utteranceStream.write(preRollBuffer.toByteArray())
-                                // Keep raw unfiltered PCM for STT!
                                 utteranceStream.write(shortsToBytes(readBuffer, readCount))
                                 updateState(EngineState.LISTENING_UTTERANCE)
                                 scope.launch(Dispatchers.Main) {
@@ -546,7 +634,7 @@ class ProVoiceEngine(
                             if (silenceDuration >= MICRO_PAUSE_PROBE_MS && !probeTriggeredForUtterance && utteranceDuration >= 400L) {
                                 probeTriggeredForUtterance = true
                                 val snapshotPcm = utteranceStream.toByteArray()
-                                val probeWav = pcmToWav(snapshotPcm, SAMPLE_RATE)
+                                val probeWav = pcmToWav(peakNormalizePcm(snapshotPcm), SAMPLE_RATE)
                                 activeProbeJob?.cancel()
                                 activeProbeJob = scope.launch(Dispatchers.IO) {
                                     val serverUrl = getServerUrl()
@@ -572,7 +660,7 @@ class ProVoiceEngine(
                             // 2. Clean Silence or Flat Noise End-of-Speech (Fix 2)
                             // -------------------------------------------------------------
                             val hasSpokenMin = utteranceStream.size() >= (SAMPLE_RATE * 2 * 0.35)
-                            val silenceCutoff = if (isDirectTapToTalk) 1000L else 600L
+                            val silenceCutoff = if (isDirectTapToTalk) 1000L else if (!isConvMode) 450L else 600L
                             val cleanSilenceEnd = hasSpokenMin && (silenceDuration >= silenceCutoff || isFlatNoise)
 
                             if (cleanSilenceEnd && isUtteranceInProgress.get()) {
@@ -583,11 +671,11 @@ class ProVoiceEngine(
                             }
 
                             // -------------------------------------------------------------
-                            // 3. Fast Max-Cap in STANDBY Mode (2.2s cap) (Fix 3: 1)
+                            // 3. Fast Max-Cap in STANDBY Mode (Fix 2: 3)
                             // -------------------------------------------------------------
                             if (!isConvMode && !isDirectTapToTalk) {
                                 if (utteranceDuration >= STANDBY_MAX_DURATION_MS && isUtteranceInProgress.get()) {
-                                    Log.i(TAG, "Standby 2.2s max burst cap hit. Committing wake-word probe...")
+                                    Log.i(TAG, "Standby max burst cap hit. Committing wake-word probe...")
                                     val pcmData = utteranceStream.toByteArray()
                                     commitUtterance(pcmData, isConvMode = false, isDirectTap = false, preParsedTranscript = null)
                                     continue
@@ -618,7 +706,7 @@ class ProVoiceEngine(
                                 if (utteranceDuration >= 1800L && (now - lastProbeTime) >= PERIODIC_PROBE_INTERVAL_MS && activeProbeJob?.isActive != true) {
                                     lastProbeTime = now
                                     val snapshotPcm = utteranceStream.toByteArray()
-                                    val probeWav = pcmToWav(snapshotPcm, SAMPLE_RATE)
+                                    val probeWav = pcmToWav(peakNormalizePcm(snapshotPcm), SAMPLE_RATE)
                                     activeProbeJob = scope.launch(Dispatchers.IO) {
                                         val serverUrl = getServerUrl()
                                         val probeObj = transcribeAudio(serverUrl, probeWav, timeoutMs = 2000)
@@ -691,7 +779,8 @@ class ProVoiceEngine(
         }
 
         if (pcmData.size >= (SAMPLE_RATE * 2 * 0.35)) { // at least 350ms audio
-            val wavBytes = pcmToWav(pcmData, SAMPLE_RATE)
+            val normalizedPcm = peakNormalizePcm(pcmData)
+            val wavBytes = pcmToWav(normalizedPcm, SAMPLE_RATE)
             processCapturedAudio(wavBytes, isConvMode, isDirectTap, preParsedTranscript)
         } else {
             val inConvWindow = SystemClock.elapsedRealtime() < activeConversationUntil

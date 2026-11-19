@@ -2882,7 +2882,7 @@ _voice_session: Dict[str, Any] = {
 
 
 def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
-    """Calculate duration, RMS, and return normalized WAV if RMS is low."""
+    """Calculate duration, RMS, and return peak-normalized WAV (Fix 2: 2)."""
     try:
         import wave, io, math, struct
         try:
@@ -2898,37 +2898,27 @@ def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
         if not frames or sampwidth != 2:
             return wav_bytes, duration, 0.0
 
-        # Calculate RMS
-        rms = 0.0
-        if audioop is not None:
-            try:
-                rms = float(audioop.rms(frames, 2))
-            except Exception:
-                pass
-        if rms == 0.0:
-            count = len(frames) // 2
-            shorts = struct.unpack(f"<{count}h", frames[:count * 2])
-            rms = math.sqrt(sum(s * s for s in shorts) / count) if count > 0 else 0.0
+        count = len(frames) // 2
+        shorts = struct.unpack(f"<{count}h", frames[:count * 2])
+        if count == 0:
+            return wav_bytes, duration, 0.0
 
-        # If RMS is low (< 1800), normalize up to target RMS (~4500) with max gain 5.0
-        if 50.0 < rms < 1800.0:
-            gain = min(5.0, 4500.0 / rms)
-            norm_frames = None
-            if audioop is not None:
-                try:
-                    norm_frames = audioop.mul(frames, 2, gain)
-                except Exception:
-                    pass
-            if norm_frames is None:
-                count = len(frames) // 2
-                shorts = struct.unpack(f"<{count}h", frames[:count * 2])
-                clamped = [max(-32768, min(32767, int(s * gain))) for s in shorts]
-                norm_frames = struct.pack(f"<{count}h", *clamped)
+        rms = math.sqrt(sum(s * s for s in shorts) / count)
+        peak = max(abs(s) for s in shorts)
+
+        # Peak normalization: if 80 < peak < 18000, boost linearly to ~24000 (-2.5 dBFS)
+        if 80 < peak < 18000:
+            gain = min(15.0, 24000.0 / peak)
+            clamped = [max(-32768, min(32767, int(s * gain))) for s in shorts]
+            norm_frames = struct.pack(f"<{count}h", *clamped)
+            norm_rms = math.sqrt(sum(s * s for s in clamped) / count)
             out_buf = io.BytesIO()
             with wave.open(out_buf, "wb") as out_w:
                 out_w.setparams(params)
                 out_w.writeframes(norm_frames)
-            return out_buf.getvalue(), duration, rms
+            logger.info("Server audio normalized: peak %d -> 24000, rms %.1f -> %.1f (gain=%.2f)", peak, rms, norm_rms, gain)
+            return out_buf.getvalue(), duration, norm_rms
+
         return wav_bytes, duration, rms
     except Exception as e:
         logger.debug("Audio normalization skipped: %s", e)
@@ -2979,7 +2969,7 @@ def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
                 result = _recognize("fa-IR")
         else:
             # "auto" mode: execute fa-IR and en-US concurrently in parallel
-            with ThreadPoolExecutor(max_workers=2) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 fut_fa = executor.submit(_recognize, "fa-IR")
                 fut_en = executor.submit(_recognize, "en-US")
                 txt_fa = fut_fa.result()
@@ -3001,6 +2991,12 @@ def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
                 result = txt_en
             elif txt_fa:
                 result = txt_fa
+
+            # Fallback to en-GB if both return empty on valid audio (RMS > 150) (Fix 2: 4)
+            if not result and rms > 150.0:
+                txt_gb = _recognize("en-GB")
+                if txt_gb:
+                    result = txt_gb
 
         # Fallback to local whisper or speech backend if configured
         if not result:

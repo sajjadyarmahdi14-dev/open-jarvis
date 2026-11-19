@@ -79,6 +79,10 @@ class JarvisOverlayManager(private val context: Context) {
             style = Paint.Style.FILL
             color = Color.parseColor("#4000E5FF")
         }
+        private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.parseColor("#00E5FF")
+        }
 
         private var amplitude: Float = 0f
         private var targetColor: Int = Color.parseColor("#00E5FF")
@@ -91,6 +95,7 @@ class JarvisOverlayManager(private val context: Context) {
         fun setStateColor(color: Int) {
             targetColor = color
             centerPaint.color = targetColor
+            barPaint.color = targetColor
             val alpha = (Color.alpha(targetColor) * 0.25f).toInt().coerceIn(20, 80)
             haloPaint.color = Color.argb(
                 alpha,
@@ -103,17 +108,34 @@ class JarvisOverlayManager(private val context: Context) {
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val cx = width / 2f
-            val cy = height / 2f
-            val baseRadius = Math.min(cx, cy) * 0.5f
+            val d = resources.displayMetrics.density
+            val h = height.toFloat()
+            val cy = h / 2f
 
-            // Dynamic pulsating halo
-            val haloRadius = baseRadius + (baseRadius * 0.9f * amplitude)
-            canvas.drawCircle(cx, cy, haloRadius, haloPaint)
+            // 1. Draw glowing orb on the left
+            val orbRadius = 6.5f * d
+            val orbCx = orbRadius + 2f * d
+            val dynamicHalo = orbRadius + (orbRadius * 0.85f * amplitude)
+            canvas.drawCircle(orbCx, cy, dynamicHalo, haloPaint)
+            val coreRadius = orbRadius * 0.7f + (orbRadius * 0.3f * amplitude)
+            canvas.drawCircle(orbCx, cy, coreRadius, centerPaint)
 
-            // Inner glowing center core
-            val coreRadius = baseRadius * 0.75f + (baseRadius * 0.25f * amplitude)
-            canvas.drawCircle(cx, cy, coreRadius, centerPaint)
+            // 2. Draw 3 mini live audio equalizer bars (Fix 3: 2)
+            val barW = 2.5f * d
+            val barSpacing = 2.5f * d
+            val startX = orbCx + orbRadius + 5f * d
+
+            val barMultipliers = floatArrayOf(0.6f, 1.0f, 0.75f)
+            val baseH = 3.5f * d
+            val maxH = 15f * d
+
+            for (i in 0 until 3) {
+                val bx = startX + i * (barW + barSpacing)
+                val curH = (baseH + (maxH - baseH) * amplitude * barMultipliers[i]).coerceIn(baseH, maxH)
+                val top = cy - curH / 2f
+                val bottom = cy + curH / 2f
+                canvas.drawRoundRect(bx, top, bx + barW, bottom, barW / 2f, barW / 2f, barPaint)
+            }
         }
     }
 
@@ -169,11 +191,13 @@ class JarvisOverlayManager(private val context: Context) {
             }
         }
 
-        // Mini Voice Orb
+        // Mini Voice Orb & Live Visualizer Bars
         val orb = MiniVoiceOrbView(context)
-        val orbSize = (22 * density).toInt()
-        val orbParams = LinearLayout.LayoutParams(orbSize, orbSize).apply {
+        val orbWidth = (36 * density).toInt()
+        val orbHeight = (22 * density).toInt()
+        val orbParams = LinearLayout.LayoutParams(orbWidth, orbHeight).apply {
             marginEnd = (10 * density).toInt()
+            gravity = Gravity.CENTER_VERTICAL
         }
         container.addView(orb, orbParams)
         orbView = orb
@@ -339,8 +363,11 @@ class JarvisOverlayManager(private val context: Context) {
      * Keeps HUD continuously visible throughout LISTENING, ACTIVE_CONVERSATION, THINKING, SPEAKING, and AGENT_WORKING.
      * Only schedules auto-hide after settling back into STANDBY or SLEEPING.
      */
-    fun updateState(state: String) {
+    fun updateState(state: String, text: String? = null) {
         mainHandler.post {
+            if (text != null && text.isNotBlank()) {
+                subtitleText?.text = text.trim()
+            }
             when (state.lowercase()) {
                 "listening", "listening_wake", "listening_cmd", "active_conversation" -> {
                     orbView?.setStateColor(Color.parseColor("#00E5FF")) // Cyan = Listening
@@ -359,11 +386,15 @@ class JarvisOverlayManager(private val context: Context) {
                     showOverlay()
                 }
                 "standby", "paused", "sleep", "sleeping", "idle", "active" -> {
-                    // Only start auto-hide after settling back to idle!
+                    orbView?.setStateColor(Color.parseColor("#78909C")) // Slate Grey = Standby
                     scheduleAutoHide(4500L)
                 }
             }
         }
+    }
+
+    fun updateState(state: String) {
+        updateState(state, null)
     }
 
     fun updateText(text: String) {

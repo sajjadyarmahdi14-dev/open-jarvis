@@ -37,6 +37,7 @@ import android.speech.RecognizerIntent
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -625,10 +626,9 @@ class JarvisVoiceService : Service() {
                         val reply = if (isFa) "در خدمت شما هستم قربان. گوش می‌دهم." else "At your service, sir. I'm listening."
                         val turnId = UUID.randomUUID().toString()
                         serviceListener?.onAssistantResponse(reply, turnId, false)
-                        broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false, wakeStatus = "listening_cmd")
+                        broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false, wakeStatus = "speaking")
                         JarvisOverlayManager.instance?.showOverlay()
-                        JarvisOverlayManager.instance?.updateText(reply)
-                        JarvisOverlayManager.instance?.updateState("speaking")
+                        JarvisOverlayManager.instance?.updateState("speaking", reply)
                         speakBritish(reply)
                     }
 
@@ -665,6 +665,26 @@ class JarvisVoiceService : Service() {
                         }
                         serviceListener?.onWakeStateChanged(st)
                         broadcastUiUpdate(wakeStatus = st)
+                        when (state) {
+                            ProVoiceEngine.EngineState.STANDBY -> {
+                                JarvisOverlayManager.instance?.updateState("standby", "Standby")
+                            }
+                            ProVoiceEngine.EngineState.ACTIVE_CONVERSATION -> {
+                                JarvisOverlayManager.instance?.updateState("listening", "Listening...")
+                            }
+                            ProVoiceEngine.EngineState.LISTENING_UTTERANCE -> {
+                                JarvisOverlayManager.instance?.updateState("listening", "Listening...")
+                            }
+                            ProVoiceEngine.EngineState.PROCESSING -> {
+                                JarvisOverlayManager.instance?.updateState("thinking", "Thinking...")
+                            }
+                            ProVoiceEngine.EngineState.SPEAKING -> {
+                                JarvisOverlayManager.instance?.updateState("speaking")
+                            }
+                            ProVoiceEngine.EngineState.MUTED -> {
+                                JarvisOverlayManager.instance?.updateState("paused", "Muted")
+                            }
+                        }
                         val notifText = when (state) {
                             ProVoiceEngine.EngineState.STANDBY -> "J.A.R.V.I.S. Standby — Say 'Jarvis' anytime"
                             ProVoiceEngine.EngineState.ACTIVE_CONVERSATION -> "Active Conversation Window (25s)"
@@ -674,6 +694,11 @@ class JarvisVoiceService : Service() {
                             ProVoiceEngine.EngineState.MUTED -> "J.A.R.V.I.S. Muted"
                         }
                         updateNotification(notifText)
+                    }
+
+                    override fun onMicBlocked() {
+                        JarvisOverlayManager.instance?.updateText("Mic blocked by OS — open Jarvis once")
+                        updateNotification("Mic blocked by OS — tap to reopen Jarvis")
                     }
                 }
             )
@@ -2214,10 +2239,17 @@ class JarvisVoiceService : Service() {
                 acousticState = AcousticState.IDLE
                 proVoiceEngine?.notifySpeaking(false)
                 serviceListener?.onTtsFinished()
-                val st = if (isServiceMuted) "paused" else if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
+                val isConv = proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION
+                val st = if (isServiceMuted) "paused" else if (isConv) "listening_cmd" else "listening_wake"
                 serviceListener?.onWakeStateChanged(st)
                 broadcastUiUpdate(wakeStatus = st)
-                updateNotification()
+                val notif = if (isConv) "Listening..." else "J.A.R.V.I.S. Standby — Say 'Jarvis' anytime"
+                updateNotification(notif)
+                if (isConv) {
+                    JarvisOverlayManager.instance?.updateState("listening", "Listening...")
+                } else {
+                    JarvisOverlayManager.instance?.updateState("standby", "Standby")
+                }
             }
         }
     }
@@ -2463,13 +2495,13 @@ class JarvisVoiceService : Service() {
                     }
                 }
                 try {
-                    startForeground(NOTIFICATION_ID, notification, fgsType)
+                    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
                 } catch (t: Throwable) {
-                    Log.w(TAG, "startForeground with fgsType $fgsType failed: ${t.message}. Falling back.")
-                    startForeground(NOTIFICATION_ID, notification)
+                    Log.w(TAG, "ServiceCompat.startForeground with fgsType $fgsType failed: ${t.message}. Falling back.")
+                    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0)
                 }
             } else {
-                startForeground(NOTIFICATION_ID, notification)
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0)
             }
         } catch (t: Throwable) {
             Log.e(TAG, "startForeground fatal error: ${t.message}", t)

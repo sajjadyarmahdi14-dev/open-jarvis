@@ -235,6 +235,8 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                                 isTtsMuted = isTtsMutedState.value,
                                 onToggleService = { enable ->
                                     isServiceActiveState.value = enable
+                                    val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                                    prefs.edit().putBoolean("bg_listening_enabled", enable).apply()
                                     if (enable) startVoiceService() else stopVoiceService()
                                 },
                                 onToggleTtsMute = { toggleTtsMute() },
@@ -335,6 +337,14 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
     override fun onResume() {
         super.onResume()
         JarvisVoiceService.serviceListener = this
+        val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        val bgListening = prefs.getBoolean("bg_listening_enabled", true)
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            if (bgListening && !JarvisVoiceService.isServiceRunning) {
+                startVoiceService()
+            }
+            JarvisVoiceService.startRecordingIfPermitted(applicationContext)
+        }
         isServiceActiveState.value = JarvisVoiceService.isServiceRunning
     }
 

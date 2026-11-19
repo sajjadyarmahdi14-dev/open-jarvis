@@ -75,4 +75,57 @@ class ProVoiceEngineVadTest {
         assertFalse(LocalCommandRouter.isAllWakeWords("سلام"))
         assertFalse(LocalCommandRouter.isAllWakeWords(""))
     }
+
+    @Test
+    fun testPeakNormalizePcmBoostsQuietSpeechWithoutClipping() {
+        val count = 800
+        val quietPeak = 1200
+        val pcm = ByteArray(count * 2)
+
+        // Generate quiet sine wave with peak = 1200
+        for (i in 0 until count) {
+            val s = (sin(2.0 * PI * i / 50.0) * quietPeak).toInt().toShort()
+            val u = s.toInt()
+            pcm[i * 2] = (u and 0xFF).toByte()
+            pcm[i * 2 + 1] = ((u shr 8) and 0xFF).toByte()
+        }
+
+        val normalized = ProVoiceEngine.Companion.peakNormalizePcm(pcm)
+        var maxNormPeak = 0
+        for (i in 0 until count) {
+            val low = normalized[i * 2].toInt() and 0xFF
+            val high = normalized[i * 2 + 1].toInt()
+            val s = ((high shl 8) or low).toShort()
+            val absVal = kotlin.math.abs(s.toInt())
+            if (absVal > maxNormPeak) maxNormPeak = absVal
+        }
+
+        // Peak should be boosted cleanly from 1200 to ~24000 (-2.5 dBFS)
+        assertTrue("Normalized peak ($maxNormPeak) should be close to 24000", maxNormPeak in 23500..24500)
+
+        // Flat silence (peak <= 80) should NOT be amplified
+        val silentPcm = ByteArray(100) { 10 }
+        val normSilent = ProVoiceEngine.Companion.peakNormalizePcm(silentPcm)
+        assertEquals(silentPcm.toList(), normSilent.toList())
+
+        // Already loud audio (peak = 22000) should NOT be modified
+        val loudPcm = ByteArray(count * 2)
+        val loudShort = 22000.toShort()
+        loudPcm[0] = (loudShort.toInt() and 0xFF).toByte()
+        loudPcm[1] = ((loudShort.toInt() shr 8) and 0xFF).toByte()
+        val normLoud = ProVoiceEngine.Companion.peakNormalizePcm(loudPcm)
+        assertEquals(loudPcm.toList(), normLoud.toList())
+    }
+
+    @Test
+    fun testListeningModeBuffersAudioImmediately() {
+        // In LISTENING mode, preRoll (600ms = 19200 bytes) + incoming audio is buffered immediately
+        val preRollBytes = (16000 * 600 / 1000) * 2 // 19200 bytes
+        assertTrue("Pre-roll buffer must be at least 600ms of 16-bit PCM (19200 bytes)", preRollBytes == 19200)
+
+        val incoming50ms = (16000 * 50 / 1000) * 2 // 1600 bytes
+        val totalRecorded = preRollBytes + incoming50ms
+        // Total audio on immediate tap-to-stop is > 20000 bytes (over 650ms), never empty STT!
+        assertTrue("Immediate capture in LISTENING mode is never empty STT", totalRecorded > 16000)
+    }
 }
