@@ -626,7 +626,7 @@ class JarvisVoiceService : Service() {
                         broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false, wakeStatus = "listening_cmd")
                         JarvisOverlayManager.instance?.showOverlay()
                         JarvisOverlayManager.instance?.updateText(reply)
-                        JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.SPEAKING)
+                        JarvisOverlayManager.instance?.updateState("speaking")
                         speakBritish(reply)
                     }
 
@@ -679,7 +679,7 @@ class JarvisVoiceService : Service() {
 
         JarvisOverlayManager.instance?.showOverlay()
         JarvisOverlayManager.instance?.updateText("Thinking...")
-        JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.THINKING)
+        JarvisOverlayManager.instance?.updateState("thinking")
 
         scope.launch {
             try {
@@ -727,7 +727,7 @@ class JarvisVoiceService : Service() {
                             isProcessing = false
                             acousticState = AcousticState.IDLE
                             proVoiceEngine?.notifyProcessing(false)
-                            JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.STANDBY)
+                            JarvisOverlayManager.instance?.updateState("standby")
                             return@withTimeout
                         }
 
@@ -746,7 +746,7 @@ class JarvisVoiceService : Service() {
                             serviceListener?.onAssistantResponse(sleepMsg, turnId, false)
                             broadcastUiUpdate(assistantReply = sleepMsg, turnId = turnId, isAppend = false, wakeStatus = "paused")
                             JarvisOverlayManager.instance?.updateText(sleepMsg)
-                            JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.STANDBY)
+                            JarvisOverlayManager.instance?.updateState("standby")
                             speakBritish(sleepMsg)
                             return@withTimeout
                         }
@@ -754,7 +754,7 @@ class JarvisVoiceService : Service() {
                         // Client actions execution via ActionDispatcher
                         val hasClientActions = clientActions != null && clientActions.length() > 0
                         if (hasClientActions) {
-                            JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.AGENT_WORKING)
+                            JarvisOverlayManager.instance?.updateState("agent_working")
                             var deferredMediaAction: JSONObject? = null
                             for (i in 0 until clientActions.length()) {
                                 val act = clientActions.optJSONObject(i) ?: continue
@@ -773,7 +773,7 @@ class JarvisVoiceService : Service() {
                                     serviceListener?.onAssistantResponse(response, turnId, false)
                                     broadcastUiUpdate(assistantReply = response, turnId = turnId, isAppend = false)
                                     JarvisOverlayManager.instance?.updateText(response)
-                                    JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.SPEAKING)
+                                    JarvisOverlayManager.instance?.updateState("speaking")
                                     speakBritish(response) {
                                         ActionDispatcher.dispatchAction(applicationContext, deferredMediaAction)
                                     }
@@ -788,17 +788,17 @@ class JarvisVoiceService : Service() {
                             serviceListener?.onAssistantResponse(response, turnId, false)
                             broadcastUiUpdate(assistantReply = response, turnId = turnId, isAppend = false)
                             JarvisOverlayManager.instance?.updateText(response)
-                            JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.SPEAKING)
+                            JarvisOverlayManager.instance?.updateState("speaking")
                             speakBritish(response)
                         } else if (transcript.isNotBlank() && !hasClientActions) {
                             streamChatAndPlay(transcript, turnId)
                         } else {
                             proVoiceEngine?.notifyProcessing(false)
-                            JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.ACTIVE_CONVERSATION)
+                            JarvisOverlayManager.instance?.updateState("active_conversation")
                         }
                     } else {
                         proVoiceEngine?.notifyProcessing(false)
-                        JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.STANDBY)
+                        JarvisOverlayManager.instance?.updateState("standby")
                     }
                 }
             } catch (e: Exception) {
@@ -1842,7 +1842,7 @@ class JarvisVoiceService : Service() {
         updateNotification("J.A.R.V.I.S. Thinking...")
         JarvisOverlayManager.instance?.showOverlay()
         JarvisOverlayManager.instance?.updateText("Thinking...")
-        JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.THINKING)
+        JarvisOverlayManager.instance?.updateState("thinking")
 
         // Layer 3: Verbal Filler Micro-Ack for Long/Complex Queries (>1600ms)
         fillerJob?.cancel()
@@ -1915,7 +1915,7 @@ class JarvisVoiceService : Service() {
                                                 serviceListener?.onAssistantResponse(sentence, turnId, true)
                                                 broadcastUiUpdate(assistantReply = sentence, turnId = turnId, isAppend = true, wakeStatus = "speaking")
                                                 JarvisOverlayManager.instance?.updateText(sentence)
-                                                JarvisOverlayManager.instance?.updateState(JarvisOverlayManager.HUDState.SPEAKING)
+                                                JarvisOverlayManager.instance?.updateState("speaking")
                                             }
                                             enqueueSpeech(sentence)
                                         }
