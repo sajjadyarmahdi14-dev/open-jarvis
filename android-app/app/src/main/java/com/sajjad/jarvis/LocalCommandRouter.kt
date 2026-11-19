@@ -110,17 +110,58 @@ object LocalCommandRouter {
     // -------------------------------------------------------------------------
     // Category 1: Wake, Audio & Session Control
     // -------------------------------------------------------------------------
-    private fun handleSessionAndWake(context: Context, clean: String, lower: String, isFa: Boolean): LocalRouteResult {
-        val wakeWords = setOf(
-            "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "hello jarvis", "dear jarvis",
-            "jervis", "javis", "garvis", "charvis", "jarvish", "jarvez", "travis",
-            "جارویس", "ای جارویس", "جرویس", "هی جارویس", "سلام جارویس", "چاویس", "چارویس", "چرویس",
-            "جارویز", "جرویز", "جاروویس", "جاربیس", "دارویس", "یارویس", "جارو بیس", "سرویس"
-        )
+    val WAKE_WORDS = setOf(
+        "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "hello jarvis", "dear jarvis",
+        "jervis", "javis", "garvis", "charvis", "jarvish", "jarvez", "travis",
+        "جارویس", "ای جارویس", "جرویس", "هی جارویس", "سلام جارویس", "چاویس", "چارویس", "چرویس",
+        "جارویز", "جرویز", "جاروویس", "جاربیس", "دارویس", "یارویس", "جارو بیس", "سرویس"
+    )
 
-        // Standalone wake word check
+    fun levenshtein(s1: String, s2: String): Int {
+        val dp = IntArray(s2.length + 1) { it }
+        for (i in 1..s1.length) {
+            var prev = dp[0]
+            dp[0] = i
+            for (j in 1..s2.length) {
+                val temp = dp[j]
+                dp[j] = if (s1[i - 1] == s2[j - 1]) prev else minOf(prev, dp[j], dp[j - 1]) + 1
+                prev = temp
+            }
+        }
+        return dp[s2.length]
+    }
+
+    fun isWakeToken(token: String): Boolean {
+        val clean = token.lowercase(Locale.ROOT).replace(Regex("[^a-zA-Z\\u0600-\\u06FF]"), "")
+        if (clean in WAKE_WORDS) return true
+        if (clean.length >= 3) {
+            if (levenshtein(clean, "jarvis") <= 2) return true
+            if (levenshtein(clean, "jervis") <= 2) return true
+            if (levenshtein(clean, "garvis") <= 2) return true
+            if (levenshtein(clean, "travis") <= 2) return true
+            if (levenshtein(clean, "جارویس") <= 1) return true
+            if (levenshtein(clean, "جرویس") <= 1) return true
+            if (levenshtein(clean, "چارویس") <= 1) return true
+        }
+        return false
+    }
+
+    fun isAllWakeWords(text: String): Boolean {
+        val clean = text.lowercase(Locale.ROOT).replace(Regex("[,.!?،؟]+"), " ").trim()
+        val tokens = clean.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return false
+        val prefixTokens = setOf("hey", "hi", "ok", "hello", "dear", "ای", "هی", "سلام")
+        val mainTokens = tokens.filter { it !in prefixTokens }
+        if (mainTokens.isEmpty()) return false
+        return tokens.all { token ->
+            token in prefixTokens || isWakeToken(token)
+        }
+    }
+
+    private fun handleSessionAndWake(context: Context, clean: String, lower: String, isFa: Boolean): LocalRouteResult {
+        // Standalone wake word or repeated wake-word deduplication ("Jarvis Jarvis Jarvis")
         val normalizedLower = lower.replace(Regex("[,.!?،؟]+"), "").trim()
-        if (wakeWords.contains(normalizedLower)) {
+        if (WAKE_WORDS.contains(normalizedLower) || isAllWakeWords(lower)) {
             val reply = if (isFa) "در خدمت شما هستم قربان. گوش می‌دهم." else "At your service, sir. I'm listening."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "wake_session")
         }

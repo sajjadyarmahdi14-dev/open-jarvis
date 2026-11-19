@@ -44,11 +44,58 @@ class ProVoiceEngine(
         const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 600) / 1000 // 9600 shorts (600ms pre-roll)
 
         const val MICRO_PAUSE_PROBE_MS = 450L
-        const val STANDBY_MAX_DURATION_MS = 12000L
-        const val CONV_MAX_DURATION_MS = 45000L
+        const val STANDBY_MAX_DURATION_MS = 2200L // 2.2s cap in STANDBY (Fix 3)
+        const val CONV_MAX_DURATION_MS = 8000L    // 8.0s noisy cap in LISTENING without transcript growth (Fix 3)
+        const val CONV_EXTENDED_MAX_DURATION_MS = 35000L // Up to 35s if words keep arriving
+        const val PERIODIC_PROBE_INTERVAL_MS = 1800L // 1.8s periodic probe in noisy environment (Fix 3)
+        const val EMPTY_NOISE_TIMEOUT_MS = 4000L // 4.0s timeout if noise produces empty transcript (Fix 3)
         const val ACTIVE_CONV_WINDOW_MS = 25000L // 25s active conversation window
 
         const val HARD_STALE_TTL_MS = 12000L // 12-second hard drop rule
+
+        class HighPassFilter300Hz(val alpha: Float = 0.895f) {
+            var prevX: Float = 0f
+            var prevY: Float = 0f
+
+            fun reset() {
+                prevX = 0f
+                prevY = 0f
+            }
+
+            fun apply(samples: ShortArray, count: Int): Double {
+                var sumSq = 0.0
+                var xPrev = prevX
+                var yPrev = prevY
+                val a = alpha
+                for (i in 0 until count) {
+                    val x = samples[i].toFloat()
+                    val y = a * (yPrev + x - xPrev)
+                    xPrev = x
+                    yPrev = y
+                    sumSq += (y * y).toDouble()
+                }
+                prevX = xPrev
+                prevY = yPrev
+                return if (count > 0) Math.sqrt(sumSq / count) else 0.0
+            }
+
+            fun filterSamples(samples: ShortArray, count: Int): ShortArray {
+                val out = ShortArray(count)
+                var xPrev = prevX
+                var yPrev = prevY
+                val a = alpha
+                for (i in 0 until count) {
+                    val x = samples[i].toFloat()
+                    val y = a * (yPrev + x - xPrev)
+                    xPrev = x
+                    yPrev = y
+                    out[i] = y.toInt().coerceIn(-32768, 32767).toShort()
+                }
+                prevX = xPrev
+                prevY = yPrev
+                return out
+            }
+        }
 
         private val INCOMPLETE_FA_ENDINGS = setOf(
             "و", "که", "به", "با", "از", "رو", "را", "بگو", "بنویس", "بزار", "اممم", "اه", "خب", "برای", "در", "تا", "کن"
@@ -142,7 +189,6 @@ class ProVoiceEngine(
     @Volatile private var tapSpeechStartTime: Long = 0L
     @Volatile private var tapLastSpeechTime: Long = 0L
 
-    private var ambientFloor = 180.0
     private var consecutiveSpeechChunks = 0
 
     // Ring buffer for pre-roll speech capture (never miss wake word onset)
@@ -306,34 +352,61 @@ class ProVoiceEngine(
                     )
                     val bufferSize = maxOf(minBufSize, CHUNK_SAMPLES * 2 * 4)
 
-                    record = AudioRecord(
-                        MediaRecorder.AudioSource.MIC,
-                        SAMPLE_RATE,
-                        AudioFormat.CHANNEL_IN_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT,
-                        bufferSize
-                    )
+                    // Fix 1: Try VOICE_RECOGNITION hardware DSP first, fallback to MIC
+                    var rec: AudioRecord? = try {
+                        AudioRecord(
+                            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            SAMPLE_RATE,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            bufferSize
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "AudioRecord VOICE_RECOGNITION failed: ${e.message}, falling back to MIC")
+                        null
+                    }
 
-                    if (record.state != AudioRecord.STATE_INITIALIZED) {
+                    if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
+                        rec?.release()
+                        rec = AudioRecord(
+                            MediaRecorder.AudioSource.MIC,
+                            SAMPLE_RATE,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            bufferSize
+                        )
+                    }
+
+                    if (rec.state != AudioRecord.STATE_INITIALIZED) {
                         Log.w(TAG, "AudioRecord failed to initialize, retrying in 1s...")
-                        record.release()
+                        rec.release()
                         delay(1000)
                         continue
                     }
 
+                    record = rec
                     audioRecord = record
                     attachHardwareEffects(record.audioSessionId)
                     record.startRecording()
-                    Log.i(TAG, "AudioRecord continuous capture active (session=${record.audioSessionId})")
+                    Log.i(TAG, "AudioRecord continuous capture active (src=${record.audioSource}, session=${record.audioSessionId})")
 
                     val readBuffer = ShortArray(CHUNK_SAMPLES)
                     preRollBuffer.clear()
                     utteranceStream.reset()
 
+                    val hpf = HighPassFilter300Hz(0.895f)
+                    var liveNoiseFloor = 180.0
                     var speechStartTime = 0L
                     var lastSpeechTime = 0L
+                    var speechPeakRms = 0.0
+                    var silenceStartMs = 0L
+                    var flatNoiseChunks = 0
                     var consecutiveZeroReads = 0
                     var probeTriggeredForUtterance = false
+                    var lastProbeTime = 0L
+                    var prevProbeTranscript = ""
+                    var prevProbeWordCount = 0
+                    var lastTranscriptGrowthMs = 0L
 
                     while (isRunning && isActive) {
                         // When muted, speaking, or processing, flush incoming audio to prevent feedback
@@ -343,6 +416,12 @@ class ProVoiceEngine(
                             utteranceStream.reset()
                             isUtteranceInProgress.set(false)
                             probeTriggeredForUtterance = false
+                            speechStartTime = 0L
+                            lastSpeechTime = 0L
+                            speechPeakRms = 0.0
+                            silenceStartMs = 0L
+                            flatNoiseChunks = 0
+                            hpf.reset()
                             delay(40)
                             continue
                         }
@@ -361,36 +440,33 @@ class ProVoiceEngine(
 
                         val now = SystemClock.elapsedRealtime()
 
-                        // Calculate RMS of 50ms chunk
-                        var sum = 0.0
-                        for (i in 0 until readCount) {
-                            val v = readBuffer[i].toDouble()
-                            sum += v * v
-                        }
-                        val rms = Math.sqrt(sum / readCount)
+                        // Fix 1: Pass samples through 300Hz HPF for VAD and Mic Live Meter (unfiltered PCM kept for STT)
+                        val filteredRms = hpf.apply(readBuffer, readCount)
 
-                        // Normalize mic meter level (0.0f..1.0f) and broadcast live
-                        val normalizedMic = ((rms - ambientFloor) / 2500.0).coerceIn(0.0, 1.0).toFloat()
+                        // Fix 2: Continuously track rolling live noiseFloor (tracks even while listening)
+                        if (filteredRms < liveNoiseFloor) {
+                            liveNoiseFloor = liveNoiseFloor * 0.85 + filteredRms * 0.15
+                        } else {
+                            liveNoiseFloor = liveNoiseFloor * 0.992 + filteredRms * 0.008
+                        }
+                        liveNoiseFloor = liveNoiseFloor.coerceIn(30.0, 3500.0)
+
+                        // Fix 2: Normalize mic meter level (0.0f..1.0f) by subtracting liveNoiseFloor
+                        val dynamicRange = 2500.0
+                        val normalizedMic = ((filteredRms - liveNoiseFloor) / dynamicRange).coerceIn(0.0, 1.0).toFloat()
                         scope.launch(Dispatchers.Main) {
                             listener.onMicLevel(normalizedMic)
                         }
-
-                        // Adaptive noise floor tracking when quiet
-                        if (rms < ambientFloor * 1.5) {
-                            ambientFloor = ambientFloor * 0.95 + rms * 0.05
-                        } else {
-                            ambientFloor = ambientFloor * 0.99 + rms * 0.01
-                        }
-                        ambientFloor = ambientFloor.coerceIn(30.0, 3000.0)
 
                         // If direct tap-to-talk was just activated, sync timestamps!
                         if (isDirectTapToTalk && (speechStartTime == 0L || speechStartTime < tapSpeechStartTime)) {
                             speechStartTime = tapSpeechStartTime
                             lastSpeechTime = tapLastSpeechTime
+                            speechPeakRms = maxOf(speechPeakRms, filteredRms)
                         }
 
-                        val speechThreshold = maxOf(ambientFloor * 1.5, 140.0)
-                        val isChunkSpeech = rms > speechThreshold
+                        val speechThreshold = maxOf(liveNoiseFloor * 1.5, 140.0)
+                        val isChunkSpeech = filteredRms > speechThreshold
 
                         if (isChunkSpeech) {
                             consecutiveSpeechChunks++
@@ -412,9 +488,18 @@ class ProVoiceEngine(
                                 isUtteranceInProgress.set(true)
                                 speechStartTime = now
                                 lastSpeechTime = now
+                                speechPeakRms = filteredRms
+                                silenceStartMs = 0L
+                                flatNoiseChunks = 0
                                 probeTriggeredForUtterance = false
+                                lastProbeTime = now
+                                prevProbeTranscript = ""
+                                prevProbeWordCount = 0
+                                lastTranscriptGrowthMs = now
+
                                 utteranceStream.reset()
                                 utteranceStream.write(preRollBuffer.toByteArray())
+                                // Keep raw unfiltered PCM for STT!
                                 utteranceStream.write(shortsToBytes(readBuffer, readCount))
                                 updateState(EngineState.LISTENING_UTTERANCE)
                                 scope.launch(Dispatchers.Main) {
@@ -424,57 +509,160 @@ class ProVoiceEngine(
                                 preRollBuffer.write(readBuffer, readCount)
                             }
                         } else {
-                            // Utterance ongoing: write chunk
+                            // Utterance ongoing: keep raw unfiltered PCM for STT
                             utteranceStream.write(shortsToBytes(readBuffer, readCount))
-                            if (isSpeechActive) {
-                                lastSpeechTime = now
-                                probeTriggeredForUtterance = false
-                            }
 
                             val utteranceDuration = now - speechStartTime
-                            val silenceDuration = now - lastSpeechTime
                             val isConvMode = inConvWindow || isDirectTapToTalk
 
+                            // Update speech peak RMS during utterance
+                            speechPeakRms = maxOf(speechPeakRms, filteredRms)
+
+                            // Dynamic peak-relative silence threshold (Fix 2)
+                            val silenceThreshold = maxOf(liveNoiseFloor * 1.35, speechPeakRms * 0.45)
+                            val isBelowSilence = filteredRms < silenceThreshold
+
+                            if (isBelowSilence) {
+                                if (silenceStartMs == 0L) {
+                                    silenceStartMs = now
+                                }
+                            } else {
+                                silenceStartMs = 0L
+                                lastSpeechTime = now
+                            }
+                            val silenceDuration = if (silenceStartMs > 0L) now - silenceStartMs else 0L
+
+                            // Flat noise tracking near noise floor (Fix 2: b)
+                            if (filteredRms <= liveNoiseFloor * 1.25) {
+                                flatNoiseChunks++
+                            } else {
+                                flatNoiseChunks = 0
+                            }
+                            val isFlatNoise = flatNoiseChunks >= 14 // 14 * 50ms = 700ms
+
                             // -------------------------------------------------------------
-                            // Smart Semantic Micro-Pause Probing (at 450ms silence)
+                            // 1. Smart Semantic Micro-Pause Probing (at 450ms silence)
                             // -------------------------------------------------------------
-                            if (!isSpeechActive && silenceDuration >= MICRO_PAUSE_PROBE_MS && !probeTriggeredForUtterance && utteranceDuration >= 400L) {
+                            if (silenceDuration >= MICRO_PAUSE_PROBE_MS && !probeTriggeredForUtterance && utteranceDuration >= 400L) {
                                 probeTriggeredForUtterance = true
                                 val snapshotPcm = utteranceStream.toByteArray()
                                 val probeWav = pcmToWav(snapshotPcm, SAMPLE_RATE)
                                 activeProbeJob?.cancel()
                                 activeProbeJob = scope.launch(Dispatchers.IO) {
                                     val serverUrl = getServerUrl()
-                                    val probeObj = transcribeAudio(serverUrl, probeWav, timeoutMs = 2500)
+                                    val probeObj = transcribeAudio(serverUrl, probeWav, timeoutMs = 2000)
                                     val probeTranscript = probeObj.optString("text", probeObj.optString("transcript", "")).trim()
                                     if (probeTranscript.isNotBlank() && isUtteranceInProgress.get()) {
                                         val cleanLower = probeTranscript.lowercase(Locale.ROOT)
-                                        val wakeWords = listOf("jarvis", "hey jarvis", "جارویس", "ای جارویس", "جرویس")
-                                        val containsWake = wakeWords.any { cleanLower.contains(it) }
-
-                                        // If wake word alone or complete clause -> COMMIT IMMEDIATELY! (~500ms total latency)
+                                        val isAllWake = LocalCommandRouter.isAllWakeWords(cleanLower)
                                         val isIncomplete = isSemanticallyIncomplete(probeTranscript)
-                                        if (containsWake || (!isIncomplete && isConvMode)) {
+                                        if (isAllWake || (!isIncomplete && isConvMode)) {
                                             Log.i(TAG, "Micro-pause semantic probe committed immediately: '$probeTranscript'")
                                             withContext(Dispatchers.IO) {
                                                 commitUtterance(snapshotPcm, isConvMode, isDirectTapToTalk, probeTranscript)
                                             }
                                         } else {
-                                            Log.i(TAG, "Micro-pause probe found incomplete clause ('$probeTranscript'). Continuing buffering...")
+                                            Log.i(TAG, "Micro-pause probe continuing buffering: '$probeTranscript'")
                                         }
                                     }
                                 }
                             }
 
-                            // Safety silence cutoff fallback
-                            val fallbackSilenceCutoff = if (isDirectTapToTalk) 1800L else if (!isConvMode) 1000L else 1400L
-                            val maxDuration = if (isDirectTapToTalk) 15000L else if (!isConvMode) STANDBY_MAX_DURATION_MS else CONV_MAX_DURATION_MS
-                            val hasSpoken = utteranceStream.size() >= (SAMPLE_RATE * 2 * 0.4) // at least 400ms recorded audio
-                            val shouldStop = (hasSpoken && silenceDuration >= fallbackSilenceCutoff) || (utteranceDuration >= maxDuration)
+                            // -------------------------------------------------------------
+                            // 2. Clean Silence or Flat Noise End-of-Speech (Fix 2)
+                            // -------------------------------------------------------------
+                            val hasSpokenMin = utteranceStream.size() >= (SAMPLE_RATE * 2 * 0.35)
+                            val silenceCutoff = if (isDirectTapToTalk) 1000L else 600L
+                            val cleanSilenceEnd = hasSpokenMin && (silenceDuration >= silenceCutoff || isFlatNoise)
 
-                            if (shouldStop && isUtteranceInProgress.get()) {
+                            if (cleanSilenceEnd && isUtteranceInProgress.get()) {
+                                Log.i(TAG, "End-of-speech triggered (silenceDur=${silenceDuration}ms, isFlatNoise=$isFlatNoise, peak=$speechPeakRms, floor=$liveNoiseFloor)")
                                 val pcmData = utteranceStream.toByteArray()
                                 commitUtterance(pcmData, isConvMode, isDirectTapToTalk, null)
+                                continue
+                            }
+
+                            // -------------------------------------------------------------
+                            // 3. Fast Max-Cap in STANDBY Mode (2.2s cap) (Fix 3: 1)
+                            // -------------------------------------------------------------
+                            if (!isConvMode && !isDirectTapToTalk) {
+                                if (utteranceDuration >= STANDBY_MAX_DURATION_MS && isUtteranceInProgress.get()) {
+                                    Log.i(TAG, "Standby 2.2s max burst cap hit. Committing wake-word probe...")
+                                    val pcmData = utteranceStream.toByteArray()
+                                    commitUtterance(pcmData, isConvMode = false, isDirectTap = false, preParsedTranscript = null)
+                                    continue
+                                }
+                            }
+
+                            // -------------------------------------------------------------
+                            // 4. LISTENING / ACTIVE_CONVERSATION Periodic Probe & 8s Cap (Fix 3: 2)
+                            // -------------------------------------------------------------
+                            if (isConvMode && !isDirectTapToTalk) {
+                                // Empty noise timeout: continuous noise for 4.0s with no speech recognized
+                                if (utteranceDuration >= EMPTY_NOISE_TIMEOUT_MS && prevProbeTranscript.isBlank() && isUtteranceInProgress.get()) {
+                                    Log.i(TAG, "Empty noise timeout hit (4.0s continuous noise without speech). Aborting to STANDBY.")
+                                    isUtteranceInProgress.set(false)
+                                    activeProbeJob?.cancel()
+                                    activeProbeJob = null
+                                    utteranceStream.reset()
+                                    preRollBuffer.clear()
+                                    scope.launch(Dispatchers.Main) {
+                                        listener.onSpeechEnded()
+                                        listener.onSttEmpty()
+                                    }
+                                    updateState(EngineState.STANDBY)
+                                    continue
+                                }
+
+                                // Periodic 1.8s probe
+                                if (utteranceDuration >= 1800L && (now - lastProbeTime) >= PERIODIC_PROBE_INTERVAL_MS && activeProbeJob?.isActive != true) {
+                                    lastProbeTime = now
+                                    val snapshotPcm = utteranceStream.toByteArray()
+                                    val probeWav = pcmToWav(snapshotPcm, SAMPLE_RATE)
+                                    activeProbeJob = scope.launch(Dispatchers.IO) {
+                                        val serverUrl = getServerUrl()
+                                        val probeObj = transcribeAudio(serverUrl, probeWav, timeoutMs = 2000)
+                                        val probeTranscript = probeObj.optString("text", probeObj.optString("transcript", "")).trim()
+                                        if (!isUtteranceInProgress.get()) return@launch
+
+                                        val words = probeTranscript.split(Regex("\\s+")).filter { it.isNotBlank() }
+                                        val wordCount = words.size
+                                        Log.d(TAG, "Periodic probe (t=${utteranceDuration}ms): '$probeTranscript' (words=$wordCount, prevWords=$prevProbeWordCount)")
+
+                                        if (probeTranscript.isNotBlank()) {
+                                            if (prevProbeTranscript.isNotBlank() && wordCount <= prevProbeWordCount) {
+                                                Log.i(TAG, "Periodic probe stabilized with no new words ('$probeTranscript'). Committing immediately!")
+                                                withContext(Dispatchers.IO) {
+                                                    commitUtterance(snapshotPcm, isConvMode = true, isDirectTap = false, preParsedTranscript = probeTranscript)
+                                                }
+                                            } else {
+                                                prevProbeTranscript = probeTranscript
+                                                prevProbeWordCount = wordCount
+                                                lastTranscriptGrowthMs = SystemClock.elapsedRealtime()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Cap noisy LISTENING without transcript growth to 8 seconds max (or 35s if growing)
+                                val hasNoGrowthPast8s = (utteranceDuration >= CONV_MAX_DURATION_MS) && ((now - lastTranscriptGrowthMs) >= 2000L)
+                                val hitExtendedCap = utteranceDuration >= CONV_EXTENDED_MAX_DURATION_MS
+                                if ((hasNoGrowthPast8s || hitExtendedCap) && isUtteranceInProgress.get()) {
+                                    Log.i(TAG, "Listening cap reached (dur=${utteranceDuration}ms, noGrowth=$hasNoGrowthPast8s). Committing...")
+                                    val pcmData = utteranceStream.toByteArray()
+                                    commitUtterance(pcmData, isConvMode = true, isDirectTap = false, preParsedTranscript = if (prevProbeTranscript.isNotBlank()) prevProbeTranscript else null)
+                                    continue
+                                }
+                            }
+
+                            // -------------------------------------------------------------
+                            // 5. Tap-to-Talk 15s Safety Cap
+                            // -------------------------------------------------------------
+                            if (isDirectTapToTalk && utteranceDuration >= 15000L && isUtteranceInProgress.get()) {
+                                Log.i(TAG, "Tap-to-talk 15s cap reached. Committing...")
+                                val pcmData = utteranceStream.toByteArray()
+                                commitUtterance(pcmData, isConvMode = true, isDirectTap = true, preParsedTranscript = null)
+                                continue
                             }
                         }
                     }
@@ -514,7 +702,7 @@ class ProVoiceEngine(
     /**
      * Process captured WAV:
      * - In Standby mode: transcribes audio, inspects for wake-words.
-     *   - Wake word only -> chime + wake greeting + enter active conversation window in <150ms (ZERO LLM call!).
+     *   - Wake word only / repeated wake words -> chime + wake greeting + enter active conversation window in <150ms (ZERO LLM call!).
      *   - Wake word + command -> strip wake word + execute command immediately in same turn!
      * - In Conversation / Tap-to-Talk mode: directly executes command without wake word.
      */
@@ -547,6 +735,17 @@ class ProVoiceEngine(
 
             Log.i(TAG, "Transcribed: '$transcript' (ConvMode=$isConvMode, DirectTap=$isDirectTap)")
 
+            val clean = transcript.lowercase(Locale.ROOT)
+            // Repeated wake-word deduplication check (Fix 4: "Jarvis Jarvis Jarvis" -> standalone wake)
+            if (LocalCommandRouter.isAllWakeWords(clean)) {
+                Log.i(TAG, "Transcript '$transcript' recognized as repeated wake-words! Triggering onWakeAlone.")
+                extendActiveConversation(ACTIVE_CONV_WINDOW_MS)
+                scope.launch(Dispatchers.Main) {
+                    listener.onWakeAlone(isFa)
+                }
+                return@launch
+            }
+
             if (isConvMode || isDirectTap) {
                 // In Active Conversation or Tap-to-Talk: direct command!
                 extendActiveConversation(ACTIVE_CONV_WINDOW_MS)
@@ -555,7 +754,6 @@ class ProVoiceEngine(
                 }
             } else {
                 // Standby mode: verify wake word!
-                val clean = transcript.lowercase(Locale.ROOT)
                 val wakePatterns = listOf(
                     "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "hello jarvis", "dear jarvis",
                     "jervis", "javis", "garvis", "charvis", "jarvish", "jarvez", "travis",

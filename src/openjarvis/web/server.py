@@ -859,17 +859,18 @@ def _handle_fast_path(
     # 0. Conversational greetings and wake checks (<5ms)
     greetings_en = {
         "", "hi", "hello", "hey", "jarvis", "hey jarvis", "hi jarvis", "dear jarvis",
+        "jarvis jarvis", "jarvis jarvis jarvis", "hey jarvis jarvis",
         "good morning", "good afternoon", "good evening", "how are you",
         "are you there", "who are you", "what's up", "whats up", "status", "ping"
     }
     greetings_fa = {
         "", "سلام", "درود", "خوبی", "چطوری", "جارویس", "هی jarvis", "هی جارویس",
-        "سلام جارویس", "هستی", "آنلاینی", "صبح بخیر", "عصر بخیر", "شب بخیر"
+        "سلام جارویس", "جارویس جارویس", "جارویس جارویس جارویس", "هستی", "آنلاینی", "صبح بخیر", "عصر بخیر", "شب بخیر"
     }
-    if raw_cleaned in {"jarvis", "hey jarvis", "hi jarvis", "dear jarvis", "جارویس", "سلام جارویس"} or not cleaned:
+    if raw_cleaned in {"jarvis", "hey jarvis", "hi jarvis", "dear jarvis", "jarvis jarvis", "jarvis jarvis jarvis", "جارویس", "سلام جارویس", "جارویس جارویس"} or not cleaned:
         if is_persian:
             return {
-                "response": "در خدمت شما هستم قربان. تمام سیستم‌ها آنلاین و آماده هستند. چطور می‌توانم کمکتان کنم؟",
+                "response": "در خدمت شما هستم قربان. گوش می‌دهم.",
                 "tool_calls": [],
                 "turns": 1,
                 "client_actions": [],
@@ -877,7 +878,7 @@ def _handle_fast_path(
             }
         else:
             return {
-                "response": "At your service, sir. All systems are online. How may I help you?",
+                "response": "At your service, sir. I'm listening.",
                 "tool_calls": [],
                 "turns": 1,
                 "client_actions": [],
@@ -886,7 +887,7 @@ def _handle_fast_path(
 
     if cleaned in greetings_en or raw_cleaned in greetings_en or norm in greetings_en:
         return {
-            "response": "At your service, sir. All systems are online. How may I help you?",
+            "response": "At your service, sir. I'm listening.",
             "tool_calls": [],
             "turns": 1,
             "client_actions": [],
@@ -894,7 +895,7 @@ def _handle_fast_path(
         }
     if cleaned in greetings_fa or raw_cleaned in greetings_fa or norm in greetings_fa:
         return {
-            "response": "در خدمت شما هستم قربان. تمام سیستم‌ها آنلاین و آماده هستند. چطور می‌توانم کمکتان کنم؟",
+            "response": "در خدمت شما هستم قربان. گوش می‌دهم.",
             "tool_calls": [],
             "turns": 1,
             "client_actions": [],

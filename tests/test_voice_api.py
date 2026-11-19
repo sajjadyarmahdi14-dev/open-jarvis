@@ -1511,16 +1511,18 @@ def test_v235_voice_normalization_and_vps_endpoints(monkeypatch):
     assert res_mem.json().get("status") in ("saved", "created", "ok") or "id" in res_mem.json()
 
 
+def test_v236_repeated_wake_words_and_exact_match():
+    """v2.3.6: Verify repeated wake words deduplicate to exact matching greeting text."""
+    client = TestClient(app)
 
+    # 1. English repeated wake words
+    for phrase in ["jarvis", "jarvis jarvis", "jarvis jarvis jarvis", "hey jarvis"]:
+        res = client.post("/api/chat", json={"message": phrase})
+        assert res.status_code == 200
+        assert res.json().get("response") == "At your service, sir. I'm listening."
 
-
-
-
-
-
-
-
-
-
-
-
+    # 2. Persian repeated wake words
+    for phrase in ["جارویس", "جارویس جارویس", "جارویس جارویس جارویس", "سلام جارویس"]:
+        res = client.post("/api/chat", json={"message": phrase})
+        assert res.status_code == 200
+        assert res.json().get("response") == "در خدمت شما هستم قربان. گوش می‌دهم."

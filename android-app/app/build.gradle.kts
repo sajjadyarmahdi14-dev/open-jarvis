@@ -11,8 +11,8 @@ android {
         applicationId = "com.sajjad.jarvis"
         minSdk = 24
         targetSdk = 35
-        versionCode = 26
-        versionName = "2.3.5"
+        versionCode = 27
+        versionName = "2.3.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -74,4 +74,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-video:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
+
+    testImplementation("junit:junit:4.13.2")
 }
