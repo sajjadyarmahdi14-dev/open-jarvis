@@ -97,6 +97,8 @@ class JarvisVoiceService : Service() {
         const val CHANNEL_ID = "jarvis_voice_service_channel"
         const val NOTIFICATION_ID = 1001
 
+        @Volatile var lastSpokenText: String = ""
+
         const val ACTION_START = "com.sajjad.jarvis.VOICE_START"
         const val ACTION_STOP = "com.sajjad.jarvis.VOICE_STOP"
         const val ACTION_TOGGLE_MUTE = "com.sajjad.jarvis.VOICE_TOGGLE_MUTE"
@@ -2312,6 +2314,10 @@ class JarvisVoiceService : Service() {
     }
 
     fun speakBritish(text: String, onFinished: (() -> Unit)? = null) {
+        val clean = UtteranceStitcher.sanitizeLiteralText(text)
+        if (clean.isNotBlank()) {
+            lastSpokenText = clean
+        }
         if (text.isBlank()) {
             isProcessing = false
             acousticState = AcousticState.IDLE

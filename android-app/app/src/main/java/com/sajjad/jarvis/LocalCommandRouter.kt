@@ -378,16 +378,25 @@ object LocalCommandRouter {
     // -------------------------------------------------------------------------
     // Category 5: Pro Camera Control
     // -------------------------------------------------------------------------
+    private fun launchCameraAction(context: Context, act: JSONObject) {
+        val inst = JarvisCameraActivity.instance
+        if (inst != null) {
+            inst.applyCameraControl(act)
+        } else {
+            val intent = Intent(context, JarvisCameraActivity::class.java).apply {
+                putExtra(JarvisCameraActivity.EXTRA_CAMERA_ACTION, act.toString())
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            context.startActivity(intent)
+        }
+    }
+
     private fun handleCameraControls(context: Context, lower: String, isFa: Boolean): LocalRouteResult {
         // Take Selfie
         val selfieWords = listOf("take a selfie", "take selfie", "selfie", "عکس سلفی بگیر", "یه سلفی بگیر", "سلفی بگیر", "عکس از خودت بگیر")
         if (selfieWords.any { lower.contains(it) }) {
-            val intent = Intent(context, JarvisCameraActivity::class.java).apply {
-                putExtra(JarvisCameraActivity.EXTRA_COMMAND, "take_photo")
-                putExtra(JarvisCameraActivity.EXTRA_LENS, "front")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            }
-            context.startActivity(intent)
+            val act = JSONObject().put("mode", "photo").put("lens", "front").put("capture", true)
+            launchCameraAction(context, act)
             val reply = if (isFa) "در حال گرفتن عکس سلفی قربان." else "Taking selfie now, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_selfie")
         }
@@ -397,12 +406,8 @@ object LocalCommandRouter {
             ?: Regex("عکس با تایمر\\s*(\\d+)\\s*(ثانیه)?").find(lower)
         if (timerMatch != null) {
             val sec = timerMatch.groupValues[timerMatch.groupValues.size - 2].toIntOrNull() ?: 3
-            val intent = Intent(context, JarvisCameraActivity::class.java).apply {
-                putExtra(JarvisCameraActivity.EXTRA_COMMAND, "take_photo")
-                putExtra(JarvisCameraActivity.EXTRA_TIMER_SECONDS, sec)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            }
-            context.startActivity(intent)
+            val act = JSONObject().put("mode", "photo").put("capture", true).put("timer_seconds", sec)
+            launchCameraAction(context, act)
             val reply = if (isFa) "عکس با تایمر $sec ثانیه‌ای ثبت خواهد شد قربان." else "Photo timer set for $sec seconds, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_timed_photo")
         }
@@ -410,12 +415,8 @@ object LocalCommandRouter {
         // Take Photo
         val photoWords = listOf("take a photo", "take photo", "take picture", "shoot photo", "capture photo", "عکس بگیر", "یه عکس بگیر", "عکس بنداز", "یک عکس بگیر")
         if (photoWords.any { lower.contains(it) }) {
-            val intent = Intent(context, JarvisCameraActivity::class.java).apply {
-                putExtra(JarvisCameraActivity.EXTRA_COMMAND, "take_photo")
-                putExtra(JarvisCameraActivity.EXTRA_LENS, "back")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            }
-            context.startActivity(intent)
+            val act = JSONObject().put("mode", "photo").put("lens", "back").put("capture", true)
+            launchCameraAction(context, act)
             val reply = if (isFa) "در حال ثبت عکس قربان." else "Capturing photo, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_photo")
         }
@@ -423,11 +424,8 @@ object LocalCommandRouter {
         // Record Video
         val videoWords = listOf("record a video", "record video", "start recording video", "take video", "فیلم بگیر", "فیلمبرداری کن", "ویدیو بگیر", "شروع فیلمبرداری")
         if (videoWords.any { lower.contains(it) }) {
-            val intent = Intent(context, JarvisCameraActivity::class.java).apply {
-                putExtra(JarvisCameraActivity.EXTRA_COMMAND, "capture_video")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            }
-            context.startActivity(intent)
+            val act = JSONObject().put("mode", "video").put("capture", true)
+            launchCameraAction(context, act)
             val reply = if (isFa) "در حال ضبط ویدیو قربان." else "Recording video, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_video")
         }
@@ -435,14 +433,24 @@ object LocalCommandRouter {
         // Stop Video
         val stopVideoWords = listOf("stop recording", "stop video", "stop video recording", "ضبط رو قطع کن", "فیلمبرداری رو قطع کن", "متوقف کردن فیلمبرداری")
         if (stopVideoWords.any { lower.contains(it) }) {
-            JarvisCameraActivity.instance?.stopVideoRecording()
+            val inst = JarvisCameraActivity.instance
+            if (inst != null) {
+                inst.stopVideoRecording()
+            } else {
+                launchCameraAction(context, JSONObject().put("mode", "stop_video"))
+            }
             val reply = if (isFa) "ضبط ویدیو متوقف و ذخیره شد قربان." else "Video recording stopped and saved, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_stop_video")
         }
 
         // Close Camera
         if (lower.contains("close camera") || lower.contains("exit camera") || lower.contains("دوربین رو ببند") || lower.contains("خروج از دوربین")) {
-            JarvisCameraActivity.instance?.finish()
+            val inst = JarvisCameraActivity.instance
+            if (inst != null) {
+                inst.finish()
+            } else {
+                launchCameraAction(context, JSONObject().put("mode", "close"))
+            }
             val reply = if (isFa) "دوربین بسته شد قربان." else "Camera closed, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_close")
         }
@@ -685,21 +693,21 @@ object LocalCommandRouter {
 
         // Sleep Protocol
         if (lower.contains("sleep protocol") || lower.contains("enter sleep mode") || lower.contains("پروتکل خواب") || lower.contains("حالت خواب")) {
-            ProtocolEngine.executeSleepProtocol(context)
+            ProtocolEngine.executeSleepProtocol(context, isFa)
             val reply = if (isFa) "پروتکل خواب فعال شد قربان." else "Sleep protocol engaged, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "protocol_sleep")
         }
 
         // Walk Mode
         if (lower.contains("walk mode") || lower.contains("start walk mode") || lower.contains("حالت پیاده‌روی") || lower.contains("حالت پیاده روی")) {
-            ProtocolEngine.executeWalkMode(context)
+            ProtocolEngine.executeWalkProtocol(context, isFa)
             val reply = if (isFa) "حالت پیاده‌روی فعال شد قربان." else "Walk mode engaged, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "protocol_walk")
         }
 
         // Focus Protocol
         if (lower.contains("focus protocol") || lower.contains("do not disturb mode") || lower.contains("پروتکل تمرکز")) {
-            ProtocolEngine.executeFocusProtocol(context)
+            ProtocolEngine.executeFocusProtocol(context, 45, isFa)
             val reply = if (isFa) "پروتکل تمرکز فعال شد قربان." else "Focus protocol engaged, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "protocol_focus")
         }

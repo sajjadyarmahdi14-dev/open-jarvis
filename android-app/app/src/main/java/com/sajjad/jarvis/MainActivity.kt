@@ -606,6 +606,23 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         }
     }
 
+    private fun speakText(text: String) {
+        if (!isTtsMutedState.value) {
+            val svc = JarvisVoiceService.instance
+            if (svc != null) {
+                svc.speakBritish(text)
+            } else {
+                try {
+                    val speakIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
+                        action = JarvisVoiceService.ACTION_SPEAK_TEXT
+                        putExtra(JarvisVoiceService.EXTRA_SPEAK_TEXT, text)
+                    }
+                    ContextCompat.startForegroundService(applicationContext, speakIntent)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
     private fun sendMessage(text: String) {
         val clean = text.trim()
         if (clean.isBlank() || isProcessingState.value) return
@@ -619,7 +636,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
             val isFa = clean.any { it in '\u0600'..'\u06FF' }
             val reply = localResult.spokenFeedback ?: (if (isFa) "انجام شد قربان." else "Done, sir.")
             handleAssistantMessage(reply, turnId, false)
-            speakEdgeTts(reply)
+            speakText(reply)
             isProcessingState.value = false
             voiceStateText.value = "STANDBY: Say \"Jarvis\""
             return

@@ -555,7 +555,7 @@ class JarvisCameraActivity : ComponentActivity() {
         }
     }
 
-    private fun stopVideoRecording() {
+    fun stopVideoRecording() {
         try {
             activeRecording?.stop()
             activeRecording = null
