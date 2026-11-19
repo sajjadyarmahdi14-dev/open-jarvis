@@ -43,6 +43,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -87,6 +89,7 @@ private val TextSecondary = Color(0xFF94A3B8)
 
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
+    val turnId: String = "",
     val isUser: Boolean,
     val text: String,
     val timestamp: Long = System.currentTimeMillis()
@@ -380,20 +383,54 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     override fun onPartialSpeech(text: String) {}
 
-    override fun onFinalSpeech(userText: String) {
+    private fun handleUserMessage(userText: String, turnId: String = "") {
+        val clean = userText.trim()
+        if (clean.isBlank()) return
         runOnUiThread {
-            if (userText.isNotBlank()) {
-                messagesState.add(ChatMessage(isUser = true, text = userText))
+            if (turnId.isNotBlank() && messagesState.any { it.isUser && it.turnId == turnId }) {
+                return@runOnUiThread
             }
+            val recentDup = messagesState.lastOrNull { it.isUser }
+            val now = System.currentTimeMillis()
+            if (recentDup != null && recentDup.text == clean && (now - recentDup.timestamp) < 2500L) {
+                return@runOnUiThread
+            }
+            messagesState.add(ChatMessage(turnId = turnId, isUser = true, text = clean))
         }
     }
 
-    override fun onAssistantResponse(response: String) {
+    private fun handleAssistantMessage(response: String, turnId: String = "", isAppend: Boolean = false) {
+        val clean = response.trim()
+        if (clean.isBlank()) return
         runOnUiThread {
-            if (response.isNotBlank()) {
-                messagesState.add(ChatMessage(isUser = false, text = response))
+            if (turnId.isNotBlank()) {
+                val existingIndex = messagesState.indexOfLast { !it.isUser && it.turnId == turnId }
+                if (existingIndex >= 0) {
+                    val existing = messagesState[existingIndex]
+                    val updatedText = if (isAppend) {
+                        if (existing.text.contains(clean)) existing.text
+                        else "${existing.text} $clean".trim()
+                    } else {
+                        clean
+                    }
+                    messagesState[existingIndex] = existing.copy(text = updatedText)
+                    return@runOnUiThread
+                }
             }
+            val recentDup = messagesState.lastOrNull { !it.isUser }
+            if (recentDup != null && recentDup.text == clean && (System.currentTimeMillis() - recentDup.timestamp) < 2000L) {
+                return@runOnUiThread
+            }
+            messagesState.add(ChatMessage(turnId = turnId, isUser = false, text = clean))
         }
+    }
+
+    override fun onFinalSpeech(userText: String, turnId: String) {
+        handleUserMessage(userText, turnId)
+    }
+
+    override fun onAssistantResponse(response: String, turnId: String, isAppend: Boolean) {
+        handleAssistantMessage(response, turnId, isAppend)
     }
 
     override fun onTtsStarted() {
@@ -422,14 +459,16 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         override fun onReceive(context: Context?, intent: Intent?) {
             val userText = intent?.getStringExtra("user_text")
             val assistantReply = intent?.getStringExtra("assistant_reply")
+            val turnId = intent?.getStringExtra("turn_id") ?: ""
+            val isAppend = intent?.getBooleanExtra("is_append", false) ?: false
             val wakeStatus = intent?.getStringExtra("wake_status")
             val amp = intent?.getFloatExtra("amplitude", -1f) ?: -1f
 
             if (!userText.isNullOrBlank()) {
-                messagesState.add(ChatMessage(isUser = true, text = userText))
+                handleUserMessage(userText, turnId)
             }
             if (!assistantReply.isNullOrBlank()) {
-                messagesState.add(ChatMessage(isUser = false, text = assistantReply))
+                handleAssistantMessage(assistantReply, turnId, isAppend)
             }
             if (!wakeStatus.isNullOrBlank()) {
                 onWakeStateChanged(wakeStatus)
@@ -515,7 +554,8 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         val clean = text.trim()
         if (clean.isBlank() || isProcessingState.value) return
 
-        messagesState.add(ChatMessage(isUser = true, text = clean))
+        val turnId = UUID.randomUUID().toString()
+        handleUserMessage(clean, turnId)
         isProcessingState.value = true
         voiceStateText.value = "THINKING..."
 
@@ -552,7 +592,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                     val clientActions = json.optJSONArray("client_actions")
 
                     withContext(Dispatchers.Main) {
-                        messagesState.add(ChatMessage(isUser = false, text = reply))
+                        handleAssistantMessage(reply, turnId, false)
                         isProcessingState.value = false
                         voiceStateText.value = "STANDBY: Say \"Jarvis\""
                     }
@@ -565,27 +605,31 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                         }
                     }
 
-                    // Read out reply via TTS (guaranteed loud voice on both voice and typed chat)
+                    // Read out reply via TTS (guaranteed single-flight loud Edge-TTS)
                     if (!isTtsMutedState.value) {
-                        try {
-                            val speakIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
-                                action = JarvisVoiceService.ACTION_SPEAK_TEXT
-                                putExtra(JarvisVoiceService.EXTRA_SPEAK_TEXT, reply)
-                            }
-                            ContextCompat.startForegroundService(applicationContext, speakIntent)
-                        } catch (_: Exception) {}
-                        JarvisVoiceService.instance?.speakBritish(reply)
+                        val svc = JarvisVoiceService.instance
+                        if (svc != null) {
+                            svc.speakBritish(reply)
+                        } else {
+                            try {
+                                val speakIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
+                                    action = JarvisVoiceService.ACTION_SPEAK_TEXT
+                                    putExtra(JarvisVoiceService.EXTRA_SPEAK_TEXT, reply)
+                                }
+                                ContextCompat.startForegroundService(applicationContext, speakIntent)
+                            } catch (_: Exception) {}
+                        }
                     }
                 } else {
                     withContext(Dispatchers.Main) {
-                        messagesState.add(ChatMessage(isUser = false, text = "Server returned HTTP ${conn.responseCode}"))
+                        handleAssistantMessage("Server returned HTTP ${conn.responseCode}", turnId, false)
                         isProcessingState.value = false
                         voiceStateText.value = "STANDBY: Say \"Jarvis\""
                     }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    messagesState.add(ChatMessage(isUser = false, text = "Connection error: ${e.message}"))
+                    handleAssistantMessage("Connection error: ${e.message}", turnId, false)
                     isProcessingState.value = false
                     voiceStateText.value = "STANDBY: Say \"Jarvis\""
                 }
@@ -770,59 +814,55 @@ private fun JarvisTopBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Title & Connection Indicator
-            Column {
+            // Left Column (weight 1f takes available space, never pushes right controls off-screen)
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp)
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "J.A.R.V.I.S.",
                         color = CyanNeon,
-                        fontSize = 20.sp,
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
-                        letterSpacing = 2.sp
+                        letterSpacing = 1.sp
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Box(
                         modifier = Modifier
-                            .size(8.dp)
+                            .size(7.dp)
                             .clip(CircleShape)
                             .background(if (isConnected) GreenActive else RedOffline)
                     )
                 }
-                val host = serverUrl.removePrefix("http://").removePrefix("https://")
+                val host = serverUrl.removePrefix("http://").removePrefix("https://").trimEnd('/')
+                val statusText = if (isServiceActive) "● Listening" else "● Ready"
                 Text(
-                    text = host,
+                    text = "$host  $statusText",
                     color = TextSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            // Model Badge, 24/7 Switch, Speaker Mute Toggle, and Settings Button
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val modelShort = if (activeModel.contains("nemotron")) "Nemotron" else activeModel.take(10)
-                Surface(
-                    color = DarkCard,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(0.5.dp, CyanDim.copy(alpha = 0.3f))
+            // Right Controls Row (wrapContentWidth, always anchored to the right edge and visible)
+            Row(
+                modifier = Modifier.wrapContentWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End
+            ) {
+                // Compact 24/7 Switch (scale 0.8)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(end = 4.dp)
                 ) {
-                    Text(
-                        text = modelShort,
-                        color = CyanDim,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                // 24/7 Switch
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Switch(
                         checked = isServiceActive,
                         onCheckedChange = onToggleService,
@@ -832,7 +872,9 @@ private fun JarvisTopBar(
                             uncheckedThumbColor = TextSecondary,
                             uncheckedTrackColor = DarkCard
                         ),
-                        modifier = Modifier.height(28.dp)
+                        modifier = Modifier
+                            .scale(0.8f)
+                            .height(28.dp)
                     )
                     Text(
                         text = "24/7",
@@ -842,24 +884,31 @@ private fun JarvisTopBar(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(6.dp))
-
-                // Speaker Mute/Unmute Toggle
-                IconButton(onClick = onToggleTtsMute) {
+                // Speaker Mute/Unmute (36.dp)
+                IconButton(
+                    onClick = onToggleTtsMute,
+                    modifier = Modifier.size(36.dp)
+                ) {
                     Icon(
                         imageVector = if (isTtsMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
                         contentDescription = if (isTtsMuted) "Unmute Speech" else "Mute Speech",
-                        tint = if (isTtsMuted) RedOffline else CyanNeon
+                        tint = if (isTtsMuted) RedOffline else CyanNeon,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
-                Spacer(modifier = Modifier.width(2.dp))
+                Spacer(modifier = Modifier.width(4.dp))
 
-                IconButton(onClick = onOpenSettings) {
+                // Settings Gear (36.dp, bright Cyan) - ALWAYS 100% visible and tappable
+                IconButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier.size(36.dp)
+                ) {
                     Icon(
                         imageVector = Icons.Default.Settings,
                         contentDescription = "Settings",
-                        tint = CyanNeon.copy(alpha = 0.85f)
+                        tint = CyanNeon,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }

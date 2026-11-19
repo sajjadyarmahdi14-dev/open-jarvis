@@ -2962,43 +2962,49 @@ async def _synthesize_edge_tts(
     is_persian = any("\u0600" <= c <= "\u06FF" for c in clean_text)
     selected_voice = voice or ("fa-IR-FaridNeural" if is_persian else "en-GB-RyanNeural")
 
-    try:
-        import aiohttp
-        import edge_tts
+    import aiohttp
+    import edge_tts
 
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
-        comm_kwargs = {
-            "text": clean_text,
-            "voice": selected_voice,
-            "rate": rate or "+5%",
-            "pitch": pitch or "-2Hz",
-        }
+    last_exc = None
+    for attempt in range(2):
         try:
-            import inspect
-            sig = inspect.signature(edge_tts.Communicate)
-            if "connector" in sig.parameters:
-                comm_kwargs["connector"] = connector
-        except Exception:
-            pass
+            connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+            comm_kwargs = {
+                "text": clean_text,
+                "voice": selected_voice,
+                "rate": rate or "+5%",
+                "pitch": pitch or "-2Hz",
+            }
+            try:
+                import inspect
+                sig = inspect.signature(edge_tts.Communicate)
+                if "connector" in sig.parameters:
+                    comm_kwargs["connector"] = connector
+            except Exception:
+                pass
 
-        try:
-            comm = edge_tts.Communicate(**comm_kwargs)
-        except TypeError:
-            comm_kwargs.pop("connector", None)
-            comm = edge_tts.Communicate(**comm_kwargs)
+            try:
+                comm = edge_tts.Communicate(**comm_kwargs)
+            except TypeError:
+                comm_kwargs.pop("connector", None)
+                comm = edge_tts.Communicate(**comm_kwargs)
 
-        buffer = bytearray()
-        async for chunk in comm.stream():
-            if chunk.get("type") == "audio":
-                buffer.extend(chunk.get("data", b""))
+            buffer = bytearray()
+            async for chunk in comm.stream():
+                if chunk.get("type") == "audio":
+                    buffer.extend(chunk.get("data", b""))
 
-        if not buffer:
-            raise RuntimeError("No audio data synthesized")
+            if not buffer:
+                raise RuntimeError("No audio data synthesized")
 
-        return Response(content=bytes(buffer), media_type="audio/mpeg")
-    except Exception as exc:
-        logger.warning("edge-tts synthesis failed: %s", exc)
-        raise HTTPException(status_code=503, detail=f"TTS synthesis unavailable: {exc}")
+            return Response(content=bytes(buffer), media_type="audio/mpeg")
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("edge-tts synthesis attempt %d failed: %s", attempt + 1, exc)
+            if attempt == 0:
+                await asyncio.sleep(0.2)
+
+    raise HTTPException(status_code=503, detail=f"TTS synthesis unavailable: {last_exc}")
 
 
 @app.post("/api/tts")
