@@ -119,4 +119,42 @@ class DomainRouterTest {
         assertTrue(LocalCommandRouter.isAllWakeWords("hey jarvis"))
         assertFalse(LocalCommandRouter.isAllWakeWords("Jarvis play some music"))
     }
+
+    @Test
+    fun testLiveAudioWavEncoder() {
+        val dummyPcm = ByteArray(3200) // 100ms at 16kHz 16-bit mono
+        val wav = com.sajjad.jarvis.live.LiveAudioSessionManager.pcmToWav(dummyPcm, 16000)
+        assertEquals(3200 + 44, wav.size)
+        // Check RIFF header
+        assertEquals('R'.code.toByte(), wav[0])
+        assertEquals('I'.code.toByte(), wav[1])
+        assertEquals('F'.code.toByte(), wav[2])
+        assertEquals('F'.code.toByte(), wav[3])
+        // Check WAVE fmt
+        assertEquals('W'.code.toByte(), wav[8])
+        assertEquals('A'.code.toByte(), wav[9])
+        assertEquals('V'.code.toByte(), wav[10])
+        assertEquals('E'.code.toByte(), wav[11])
+    }
+
+    @Test
+    fun testLiveAudioAndScreenTriggersInNormalizer() {
+        val audioTriggers = listOf(
+            "به این گوش کن", "به این آهنگ گوش کن", "به این ویدیو گوش کن", "گوش کن ببین چی میگه", "گوش کن این چه آهنگیه",
+            "listen to this", "listen to this song", "listen to this video", "listen to the audio"
+        )
+        for (trigger in audioTriggers) {
+            val norm = NlpNormalizer.cleanLower(trigger)
+            assertTrue("Normalizer should preserve audio trigger words: $trigger", norm.isNotBlank())
+        }
+
+        val screenTriggers = listOf(
+            "صفحه گوشیم رو نگاه کن", "صفحه رو نگاه کن", "به اسکرینم نگاه کن", "اسکرینم رو ببین", "صفحهام رو ببین",
+            "watch my screen", "look at my screen", "start watching my screen"
+        )
+        for (trigger in screenTriggers) {
+            val norm = NlpNormalizer.cleanLower(trigger)
+            assertTrue("Normalizer should preserve screen trigger words: $trigger", norm.isNotBlank())
+        }
+    }
 }

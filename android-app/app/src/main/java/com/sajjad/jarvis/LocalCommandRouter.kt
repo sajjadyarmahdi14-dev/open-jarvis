@@ -46,6 +46,10 @@ object LocalCommandRouter {
             val sessionRes = handleSessionAndWake(context, clean, lower, isFa)
             if (sessionRes.handled) return sessionRes
 
+            // 0.5 Live Multimodal Session Controls (Audio Listening & Screen Watching)
+            val liveRes = handleLiveMultimodalControls(context, rawText, clean, lower, isFa)
+            if (liveRes.handled) return liveRes
+
             // 1. Media Domain (Next, Prev, Pause, Stop, Resume, Seek, Info, Live Device Search)
             val mediaRes = MediaDomain.handle(context, rawText, clean, lower, isFa)
             if (mediaRes.handled) return mediaRes
@@ -164,6 +168,80 @@ object LocalCommandRouter {
         }
         if (lower.contains("speak persian") || lower.contains("switch to persian") || lower.contains("فارسی صحبت کن") || lower.contains("فارسی حرف بزن") || lower.contains("فارسی بگو")) {
             return LocalRouteResult(handled = true, spokenFeedback = "به زبان فارسی تغییر یافت قربان. در خدمتم.", category = "language_override")
+        }
+
+        return LocalRouteResult(handled = false)
+    }
+
+    private fun handleLiveMultimodalControls(
+        context: Context,
+        rawText: String,
+        clean: String,
+        lower: String,
+        isFa: Boolean
+    ): LocalRouteResult {
+        val norm = NlpNormalizer.cleanLower(rawText)
+
+        // 1. Live Screen Watching Stop
+        if (com.sajjad.jarvis.live.LiveScreenWatcher.isActive) {
+            val screenStopWords = listOf("دیگه نگاه نکن", "تماشا رو قطع کن", "صفحه رو نببین", "دیگه صفحه رو نگاه نکن", "stop watching", "stop looking at my screen")
+            if (screenStopWords.any { norm == it || norm.contains(it) }) {
+                com.sajjad.jarvis.live.LiveScreenWatcher.stopWatching(context)
+                val reply = if (isFa) "تماشای صفحه متوقف شد قربان." else "Stopped watching screen, sir."
+                return LocalRouteResult(handled = true, spokenFeedback = reply, category = "live_screen_stop")
+            }
+        }
+
+        // 2. Live Audio Listening Stop
+        if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
+            val audioStopWords = listOf("تموم شد", "کافیه", "بسه", "دیگه گوش نده", "خب بگو", "stop listening", "done listening")
+            if (audioStopWords.any { norm == it || norm.contains(it) }) {
+                com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(context)
+                return LocalRouteResult(handled = true, spokenFeedback = null, category = "live_audio_stop")
+            }
+        }
+
+        // 3. Live Screen Watching Start
+        val screenStartWords = listOf(
+            "صفحه گوشیم رو نگاه کن", "صفحه رو نگاه کن", "به اسکرینم نگاه کن", "اسکرینم رو ببین", "صفحهام رو ببین", "صفحه‌ام رو ببین",
+            "watch my screen", "look at my screen", "start watching my screen"
+        )
+        if (screenStartWords.any { norm == it || norm.contains(it) }) {
+            var question: String? = null
+            for (trigger in screenStartWords) {
+                if (norm.contains(trigger)) {
+                    val after = norm.substringAfter(trigger).trim().removePrefix("و ").removePrefix("ببین ").trim()
+                    if (after.length > 2) {
+                        question = after
+                    }
+                    break
+                }
+            }
+            com.sajjad.jarvis.live.LiveScreenWatcher.startWatching(context, question)
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "live_screen_start")
+        }
+
+        // 4. Live Audio Listening Start
+        val audioStartWords = listOf(
+            "به این گوش کن", "به این آهنگ گوش کن", "به این ویدیو گوش کن", "گوش کن ببین چی میگه", "گوش کن این چه آهنگیه",
+            "listen to this", "listen to this song", "listen to this video", "listen to the audio"
+        )
+        if (audioStartWords.any { norm == it || norm.contains(it) }) {
+            var question: String? = null
+            for (trigger in audioStartWords) {
+                if (norm.contains(trigger)) {
+                    val after = norm.substringAfter(trigger).trim().removePrefix("و ").trim()
+                    if (after.length > 2) {
+                        question = after
+                    }
+                    break
+                }
+            }
+            com.sajjad.jarvis.live.LiveAudioSessionManager.startListening(context, question)
+            val reply = if (question == null) {
+                if (isFa) "در حال گوش دادن به صوت قربان..." else "Listening to audio, sir..."
+            } else null
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "live_audio_start")
         }
 
         return LocalRouteResult(handled = false)

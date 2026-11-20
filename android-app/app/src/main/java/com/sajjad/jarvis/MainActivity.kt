@@ -652,6 +652,27 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
             return
         }
 
+        if (com.sajjad.jarvis.live.LiveScreenWatcher.isActive) {
+            isProcessingState.value = true
+            voiceStateText.value = "WATCHING SCREEN..."
+            com.sajjad.jarvis.live.LiveScreenWatcher.askScreenQuestion(applicationContext, clean) { reply ->
+                handleAssistantMessage(reply, turnId, false)
+                speakText(reply)
+                isProcessingState.value = false
+                voiceStateText.value = "STANDBY: Say \"Jarvis\""
+            }
+            return
+        }
+
+        if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
+            isProcessingState.value = true
+            voiceStateText.value = "ANALYZING AUDIO..."
+            com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(applicationContext, clean)
+            isProcessingState.value = false
+            voiceStateText.value = "STANDBY: Say \"Jarvis\""
+            return
+        }
+
         isProcessingState.value = true
         voiceStateText.value = "THINKING..."
 

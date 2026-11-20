@@ -39,6 +39,9 @@ class ProVoiceEngine(
     companion object {
         private const val TAG = "ProVoiceEngine"
         const val SAMPLE_RATE = 16000
+
+        @Volatile
+        var liveAudioChunkListener: ((ShortArray, Int) -> Unit)? = null
         const val CHUNK_MS = 50
         const val CHUNK_SAMPLES = (SAMPLE_RATE * CHUNK_MS) / 1000 // 800 shorts
         const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 600) / 1000 // 9600 shorts (600ms pre-roll)
@@ -461,6 +464,9 @@ class ProVoiceEngine(
                         }
                         consecutiveZeroReads = 0
 
+                        // Live audio continuous listener tap
+                        liveAudioChunkListener?.invoke(readBuffer, readCount)
+
                         val now = SystemClock.elapsedRealtime()
 
                         // Fix 1: Detect OS all-zero silenced mic (Zero Silent Failures)
@@ -558,6 +564,11 @@ class ProVoiceEngine(
                             scope.launch(Dispatchers.Main) {
                                 listener.onSpeechStarted()
                             }
+                        }
+
+                        if (liveAudioChunkListener != null) {
+                            preRollBuffer.write(readBuffer, readCount)
+                            continue
                         }
 
                         if (!isUtteranceInProgress.get()) {

@@ -1088,11 +1088,154 @@ async def analyze_vision_multimodal(
     return "I was unable to analyze the image through the visual models, sir."
 
 
+async def analyze_vision_live_multimodal(
+    current_frame_base64: str,
+    recent_frames_base64: Optional[List[str]] = None,
+    prompt: str = "Analyze what is on the screen and answer clearly.",
+    ui_text_context: Optional[str] = None,
+    foreground_app: Optional[str] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    api_key: Optional[str] = None,
+    active_model: Optional[str] = None,
+    gemini_key: Optional[str] = None,
+) -> str:
+    """Analyze a live screen frame with rolling context, UI text hierarchy, and multi-turn visual history."""
+    clean_current_b64 = current_frame_base64.strip()
+    if clean_current_b64.startswith("data:image"):
+        clean_current_b64 = clean_current_b64.split(",", 1)[-1].strip()
+
+    models_to_try: List[str] = []
+    if active_model:
+        m_lower = active_model.lower()
+        if any(k in m_lower for k in ("vision", "vl", "gemma-3", "gemini", "gpt-4o", "omni")):
+            models_to_try.append(active_model)
+
+    for m in VISION_MODEL_FALLBACK_POOL:
+        if m not in models_to_try:
+            models_to_try.append(m)
+
+    headers = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/sajjadyarmahdi14-dev/open-jarvis",
+        "X-Title": "Open Jarvis Live Screen Vision",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    is_persian = any("\u0600" <= c <= "\u06FF" for c in prompt)
+
+    system_instruction = (
+        "You are J.A.R.V.I.S., an expert real-time AI assistant watching the user's smartphone screen live.\n"
+        f"Active Foreground App: {foreground_app or 'Unknown'}\n"
+        f"Extracted Screen UI Text & Hierarchy:\n{ui_text_context or 'None extracted'}\n\n"
+        "Instructions:\n"
+        "1. Answer the user's question with high accuracy, combining visible image pixels with the extracted UI text.\n"
+        "2. Identify landmarks, places, famous people, actors, characters, products, movies, games, plants, and objects if asked.\n"
+        "3. Read, translate, summarize, or simplify on-screen text, code, articles, or messages when requested.\n"
+        "4. Solve math problems, quizzes, riddles, homework, or puzzles step-by-step with clear reasoning.\n"
+        "5. Speak directly and politely (addressing user as sir/قربان in Persian, or sir in English).\n"
+        "6. Keep the reply conversational and concise for Male Edge-TTS voice playback (avoid huge tables, ascii art, or robotic formatting)."
+    )
+
+    # Build multi-turn messages
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_instruction}
+    ]
+
+    if conversation_history:
+        for turn in conversation_history[-4:]:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if content:
+                messages.append({"role": role, "content": content})
+
+    # Latest user message with image(s) and prompt
+    user_content: List[Dict[str, Any]] = [
+        {"type": "text", "text": prompt}
+    ]
+
+    # Include up to 1 previous keyframe if distinct
+    if recent_frames_base64:
+        for prev_b64 in recent_frames_base64[-1:]:
+            c_prev = prev_b64.strip()
+            if c_prev.startswith("data:image"):
+                c_prev = c_prev.split(",", 1)[-1].strip()
+            if c_prev and c_prev != clean_current_b64:
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{c_prev}"}
+                })
+
+    user_content.append({
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{clean_current_b64}"}
+    })
+
+    messages.append({"role": "user", "content": user_content})
+
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        for candidate in models_to_try:
+            actual_model = candidate.removeprefix("openrouter/")
+
+            # Gemini direct support
+            if "gemini" in candidate.lower() and gemini_key:
+                try:
+                    url = f"{GEMINI_API_BASE}/{actual_model}:generateContent?key={gemini_key}"
+                    parts: List[Dict[str, Any]] = [
+                        {"text": f"{system_instruction}\n\nQuestion: {prompt}"},
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": clean_current_b64,
+                            }
+                        }
+                    ]
+                    resp = await client.post(url, json={"contents": [{"parts": parts}]}, headers={"Content-Type": "application/json"})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        cands = data.get("candidates", [])
+                        if cands:
+                            content_parts = cands[0].get("content", {}).get("parts", [])
+                            text = "".join(p.get("text", "") for p in content_parts).strip()
+                            if text:
+                                return text
+                except Exception as ex:
+                    logger.debug("Gemini live vision candidate %s failed: %s", candidate, ex)
+
+            # OpenRouter support
+            payload = {
+                "model": actual_model,
+                "messages": messages,
+                "max_tokens": 1500,
+                "temperature": 0.25,
+            }
+            try:
+                resp = await client.post(
+                    f"{OPENROUTER_API_BASE}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = safe_extract_message_content(data).strip()
+                    if content:
+                        return content
+                else:
+                    logger.warning("Live vision model %s returned HTTP %d: %s", actual_model, resp.status_code, resp.text[:200])
+            except Exception as ex:
+                logger.warning("Live vision candidate %s exception: %s", actual_model, ex)
+
+    if is_persian:
+        return "قربان، متأسفانه در حال حاضر تحلیل محتوای صفحه با مدل‌های بینایی مقدور نبود."
+    return "I was unable to analyze the screen content at this moment, sir."
+
+
 __all__ = [
     "FREE_MODEL_FALLBACK_POOL",
     "QUOTA_EXHAUSTED_REPLY_EN",
     "QUOTA_EXHAUSTED_REPLY_FA",
     "VISION_MODEL_FALLBACK_POOL",
+    "analyze_vision_live_multimodal",
     "analyze_vision_multimodal",
     "build_gemini_contents",
     "build_gemini_payload",

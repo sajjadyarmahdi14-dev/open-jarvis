@@ -2275,6 +2275,18 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
     if req.screen_context:
         input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{input_text}"
 
+    # Live Audio Session Context Injection
+    try:
+        from openjarvis.live_media_session import get_active_audio_context
+        active_audio_ctx = get_active_audio_context()
+        if active_audio_ctx and any(k in req.message.lower() for k in [
+            "این آهنگ", "این موزیک", "این ویدیو", "چی گفت", "ترجمهش کن", "خلاصهش کن", "ساده توضیح بده",
+            "بیشتر بگو", "خوانندش", "اسم آهنگ", "this song", "this video", "what did it say", "translate it"
+        ]):
+            input_text = f"{active_audio_ctx}\n\n{input_text}"
+    except Exception as e:
+        logger.debug("Active audio context injection notice: %s", e)
+
     try:
         # Run agent in background thread so async event loop and ping checks are never blocked!
         result = await asyncio.to_thread(agent.run, input=input_text, context=context)
@@ -2463,6 +2475,18 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             input_text = f"[INSTALLED APPS ON PHONE]: {compact_apps}\nCRITICAL: If launching an app, select exact package name from this list.\n\n{input_text}"
         if req.screen_context:
             input_text = f"[Current Screen Context:\n{req.screen_context}]\n\n{input_text}"
+
+        # Live Audio Session Context Injection
+        try:
+            from openjarvis.live_media_session import get_active_audio_context
+            active_audio_ctx = get_active_audio_context()
+            if active_audio_ctx and any(k in req.message.lower() for k in [
+                "این آهنگ", "این موزیک", "این ویدیو", "چی گفت", "ترجمهش کن", "خلاصهش کن", "ساده توضیح بده",
+                "بیشتر بگو", "خوانندش", "اسم آهنگ", "this song", "this video", "what did it say", "translate it"
+            ]):
+                input_text = f"{active_audio_ctx}\n\n{input_text}"
+        except Exception as e:
+            logger.debug("Active audio context stream injection notice: %s", e)
 
         system_prompt = (
             "You are J.A.R.V.I.S., a witty, razor-sharp, hyper-competent AI assistant with the personality of Tony Stark's iconic AI. "
@@ -2758,6 +2782,245 @@ async def summarize_notifications_endpoint(req: NotificationSummarizeRequest, re
     return {
         "summary": clean_summary,
         "count": len(notifs),
+        "status": "success",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature 1 & 2: Live Multimodal Sessions (Audio Listening & Screen Watching)
+# ---------------------------------------------------------------------------
+
+class AudioSessionStartRequest(BaseModel):
+    session_id: Optional[str] = None
+    media_metadata: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/audio/session/start")
+async def audio_session_start_endpoint(req: Optional[AudioSessionStartRequest] = None):
+    """Start or initialize a real-time live audio listening session."""
+    from openjarvis.live_media_session import LiveSessionStore
+    store = LiveSessionStore.get_instance()
+    sess_id = (req.session_id if req and req.session_id else None) or f"audio_{int(time.time() * 1000)}"
+    meta = req.media_metadata if req else {}
+    sess = store.get_or_create_audio_session(sess_id, media_metadata=meta)
+    sess.status = "listening"
+    store.save_audio_session(sess)
+    return {
+        "session_id": sess_id,
+        "status": "listening",
+        "created_at": sess.created_at,
+    }
+
+
+@app.post("/api/audio/session/chunk")
+async def audio_session_chunk_endpoint(
+    audio: UploadFile = File(...),
+    session_id: str = Form(...),
+    metadata: Optional[str] = Form(None),
+):
+    """Receive a rolling 10s audio chunk, transcribe multi-lingually, and append to session."""
+    from openjarvis.live_media_session import LiveSessionStore, transcribe_audio_chunk
+    store = LiveSessionStore.get_instance()
+    meta_dict = None
+    if metadata:
+        try:
+            meta_dict = json.loads(metadata)
+        except Exception:
+            pass
+
+    sess = store.get_or_create_audio_session(session_id, media_metadata=meta_dict)
+    wav_bytes = await audio.read()
+    if not wav_bytes:
+        return {"error": "Empty audio chunk", "session_id": session_id}
+
+    if sess.sample_wav_bytes is None or len(sess.sample_wav_bytes) < 320000:
+        if sess.sample_wav_bytes is None:
+            sess.sample_wav_bytes = wav_bytes
+        else:
+            sess.sample_wav_bytes += wav_bytes
+
+    sess.chunks_count += 1
+
+    chunk_text, lang = await transcribe_audio_chunk(wav_bytes)
+    if chunk_text:
+        if sess.transcript:
+            sess.transcript += " " + chunk_text
+        else:
+            sess.transcript = chunk_text
+        sess.detected_language = lang
+
+    store.save_audio_session(sess)
+
+    return {
+        "session_id": session_id,
+        "chunk_index": sess.chunks_count,
+        "chunk_transcript": chunk_text,
+        "total_transcript": sess.transcript,
+        "status": "listening",
+    }
+
+
+class AudioSessionFinishRequest(BaseModel):
+    session_id: str
+    question: Optional[str] = None
+    language: Optional[str] = "fa"
+
+
+@app.post("/api/audio/session/finish")
+async def audio_session_finish_endpoint(req: AudioSessionFinishRequest):
+    """Finalize audio listening, run multi-layer song ID, and optionally answer immediate question."""
+    from openjarvis.live_media_session import LiveSessionStore, identify_song, answer_audio_session_query
+    store = LiveSessionStore.get_instance()
+    sess = store.get_audio_session(req.session_id)
+    if not sess:
+        return {"error": "Session not found", "session_id": req.session_id}
+
+    sess.status = "finished"
+    store.save_audio_session(sess)
+
+    song = await identify_song(sess)
+
+    answer = None
+    if req.question:
+        answer = await answer_audio_session_query(
+            session=sess,
+            question=req.question,
+            user_language=req.language or "fa",
+        )
+        answer = _clean_tts_response(answer)
+
+    return {
+        "session_id": req.session_id,
+        "status": "finished",
+        "identified_song": song,
+        "transcript": sess.transcript,
+        "chunks_count": sess.chunks_count,
+        "answer": answer,
+    }
+
+
+class AudioSessionAskRequest(BaseModel):
+    session_id: Optional[str] = None
+    question: str
+    language: Optional[str] = "fa"
+
+
+@app.post("/api/audio/session/ask")
+async def audio_session_ask_endpoint(req: AudioSessionAskRequest):
+    """Answer any question grounded in the captured audio session."""
+    from openjarvis.live_media_session import LiveSessionStore, answer_audio_session_query
+    store = LiveSessionStore.get_instance()
+    sess = store.get_audio_session(req.session_id)
+    if not sess:
+        is_fa = req.language == "fa" or any("\u0600" <= c <= "\u06FF" for c in req.question)
+        msg = "جلسه صوتی فعالی برای پاسخگویی یافت نشد قربان." if is_fa else "No active audio session found, sir."
+        return {"response": msg, "session_id": req.session_id, "status": "error"}
+
+    answer = await answer_audio_session_query(
+        session=sess,
+        question=req.question,
+        user_language=req.language or "fa",
+    )
+    clean_answer = _clean_tts_response(answer)
+    return {
+        "session_id": sess.session_id,
+        "response": clean_answer,
+        "identified_song": sess.identified_song,
+        "transcript": sess.transcript,
+        "status": "success",
+    }
+
+
+class LiveVisionRequest(BaseModel):
+    session_id: Optional[str] = None
+    current_frame_base64: str
+    recent_frames_base64: Optional[List[str]] = None
+    ui_text_context: Optional[str] = None
+    foreground_app: Optional[str] = None
+    prompt: Optional[str] = None
+    language: Optional[str] = "fa"
+
+
+@app.post("/api/vision/live")
+async def vision_live_endpoint(req: LiveVisionRequest, request: Request = None):
+    """Continuous Live Screen Watching session visual reasoning with multi-turn memory."""
+    from openjarvis.live_media_session import LiveSessionStore
+    from openjarvis.engine.cloud_rest import analyze_vision_live_multimodal
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if request is not None:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth[7:].strip()
+            if bearer:
+                api_key = bearer
+
+    cfg_status = get_config_status()
+    if not api_key:
+        api_key = cfg_status.get("openrouter_key")
+    gemini_key = cfg_status.get("gemini_key") or os.environ.get("GEMINI_API_KEY")
+    active_model = cfg_status.get("active_model")
+
+    store = LiveSessionStore.get_instance()
+    sess_id = req.session_id or f"vis_{int(time.time() * 1000)}"
+    v_sess = store.get_or_create_visual_session(
+        session_id=sess_id,
+        foreground_app=req.foreground_app or "",
+        ui_text=req.ui_text_context or "",
+    )
+
+    is_persian = req.language == "fa" or any("\u0600" <= c <= "\u06FF" for c in (req.prompt or ""))
+    default_prompt = (
+        "محتوای زنده روی صفحه گوشی را تحلیل کن، عناصر و متون را بررسی کن و پاسخ بده."
+        if is_persian
+        else "Analyze the live screen view, examine on-screen elements and text, and answer clearly."
+    )
+    user_prompt = (req.prompt or "").strip() or default_prompt
+
+    # Optional Web Verification Hook
+    web_context = ""
+    lower_p = user_prompt.lower()
+    if any(k in lower_p for k in ["قیمت", "چنده", "امتیاز", "تاریخ", "فیلم", "بازیگر", "بازی", "price", "rating", "who is", "release date"]):
+        try:
+            from openjarvis.web_intel import web_search
+            search_query = f"{req.foreground_app or ''} {user_prompt[:60]}".strip()
+            web_res = await web_search(search_query, max_results=3)
+            if web_res:
+                web_lines = "\n".join(f"- {r.get('title')}: {r.get('snippet')}" for r in web_res[:3])
+                web_context = f"\n[LIVE WEB INTEL VERIFICATION]:\n{web_lines}\n"
+        except Exception as e:
+            logger.debug("Live vision web verification notice: %s", e)
+
+    full_prompt = f"{user_prompt}{web_context}" if web_context else user_prompt
+
+    try:
+        raw_result = await analyze_vision_live_multimodal(
+            current_frame_base64=req.current_frame_base64,
+            recent_frames_base64=req.recent_frames_base64,
+            prompt=full_prompt,
+            ui_text_context=req.ui_text_context,
+            foreground_app=req.foreground_app,
+            conversation_history=v_sess.history,
+            api_key=api_key,
+            active_model=active_model,
+            gemini_key=gemini_key,
+        )
+    except Exception as ex:
+        logger.warning("Live vision analysis exception: %s", ex)
+        raw_result = "قربان، در حال حاضر امکان تحلیل زنده صفحه مقدور نبود." if is_persian else "Live screen analysis could not complete, sir."
+
+    clean_result = _clean_tts_response(str(raw_result or ""))
+
+    # Update visual session history
+    v_sess.history.append({"role": "user", "content": user_prompt})
+    v_sess.history.append({"role": "assistant", "content": clean_result})
+    store.save_visual_session(v_sess)
+
+    return {
+        "session_id": sess_id,
+        "response": clean_result,
+        "prompt": user_prompt,
+        "foreground_app": req.foreground_app,
         "status": "success",
     }
 

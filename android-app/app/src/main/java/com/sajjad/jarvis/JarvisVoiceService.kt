@@ -757,6 +757,31 @@ class JarvisVoiceService : Service() {
                         return@withTimeout
                     }
 
+                    // Live Screen Watching Active Session Hook
+                    if (com.sajjad.jarvis.live.LiveScreenWatcher.isActive) {
+                        Log.i(TAG, "Routing question directly to active LiveScreenWatcher: $transcript")
+                        updateNotification("Screen Vision: $transcript")
+                        com.sajjad.jarvis.live.LiveScreenWatcher.askScreenQuestion(applicationContext, transcript) { reply ->
+                            serviceListener?.onAssistantResponse(reply, turnId, false)
+                            broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false, wakeStatus = "speaking")
+                        }
+                        isProcessing = false
+                        isCommandInFlight.set(false)
+                        proVoiceEngine?.notifyProcessing(false)
+                        return@withTimeout
+                    }
+
+                    // Live Audio Listening Active Session Hook
+                    if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
+                        Log.i(TAG, "User spoke during LiveAudioSessionManager: $transcript")
+                        updateNotification("Audio Session: $transcript")
+                        com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(applicationContext, transcript)
+                        isProcessing = false
+                        isCommandInFlight.set(false)
+                        proVoiceEngine?.notifyProcessing(false)
+                        return@withTimeout
+                    }
+
                     updateNotification("Asking AI: $transcript")
 
                     val (batPct, isCharging) = getBatteryTelemetry()

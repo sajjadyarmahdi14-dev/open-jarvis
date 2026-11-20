@@ -179,12 +179,18 @@ class JarvisOverlayManager(private val context: Context) {
                 setStroke((1.5f * density).toInt(), Color.parseColor("#9900E5FF")) // Neon cyan glow border
             }
 
-            // Click handling: Tap HUD pill triggers instant Barge-In or dismiss
+            // Click handling: Tap HUD pill triggers instant Barge-In, Live Session stop, or dismiss
             setOnClickListener {
                 val service = JarvisVoiceService.instance
                 if (service?.isTtsSpeaking == true || service?.acousticState == JarvisVoiceService.AcousticState.SPEAKING) {
                     Log.i(TAG, "HUD pill tapped during speaking: Triggering Barge-In abort!")
                     service.triggerBargeInAbort()
+                } else if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
+                    Log.i(TAG, "HUD pill tapped during live audio listening: Stopping and asking!")
+                    com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(context)
+                } else if (com.sajjad.jarvis.live.LiveScreenWatcher.isActive) {
+                    Log.i(TAG, "HUD pill tapped during live screen watching: Stopping screen watch!")
+                    com.sajjad.jarvis.live.LiveScreenWatcher.stopWatching(context)
                 } else {
                     hideOverlay()
                 }
@@ -369,11 +375,11 @@ class JarvisOverlayManager(private val context: Context) {
                 subtitleText?.text = text.trim()
             }
             when (state.lowercase()) {
-                "listening", "listening_wake", "listening_cmd", "active_conversation" -> {
+                "listening", "listening_wake", "listening_cmd", "active_conversation", "live_audio_listening" -> {
                     orbView?.setStateColor(Color.parseColor("#00E5FF")) // Cyan = Listening
                     showOverlay()
                 }
-                "thinking", "processing", "vision", "vision_camera", "vision_screen" -> {
+                "thinking", "processing", "vision", "vision_camera", "vision_screen", "live_screen_watching" -> {
                     orbView?.setStateColor(Color.parseColor("#FFB300")) // Amber = Thinking/Vision
                     showOverlay()
                 }
