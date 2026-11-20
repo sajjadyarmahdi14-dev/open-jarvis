@@ -1972,7 +1972,7 @@ async def agent_step_endpoint(req: AgentStepRequest):
                 temperature=0.1,
                 max_tokens=150,
             )
-            raw_c = llm_res.get("content", "").strip()
+            raw_c = str((llm_res or {}).get("content") or "").strip()
             raw_c = re.sub(r"<think>[\s\S]*?</think>", "", raw_c, flags=re.IGNORECASE)
             raw_c = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", raw_c).strip()
             match = re.search(r"\{[\s\S]*\}", raw_c)
@@ -2339,7 +2339,22 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         }
     except Exception as exc:
         logger.exception("Agent run failed")
-        return {"error": str(exc), "response": f"Error processing request: {exc}"}
+        exc_str = str(exc)
+        is_fa = any("\u0600" <= c <= "\u06FF" for c in req.message)
+        from openjarvis.engine.cloud_rest import (
+            QUOTA_EXHAUSTED_REPLY_FA,
+            QUOTA_EXHAUSTED_REPLY_EN,
+            is_quota_status_or_text,
+        )
+        if is_quota_status_or_text(None, exc_str):
+            quota_resp = QUOTA_EXHAUSTED_REPLY_FA if is_fa else QUOTA_EXHAUSTED_REPLY_EN
+            return {"error": "quota_exhausted", "response": quota_resp, "client_actions": [], "tool_calls": [], "turns": 1}
+        fallback_msg = (
+            "مشکلی در پردازش درخواست پیش آمد قربان؛ اما تمام امکانات آفلاین گوشی در دسترس است."
+            if is_fa else
+            "I encountered a processing issue, sir. All offline device controls remain fully operational."
+        )
+        return {"error": exc_str, "response": fallback_msg, "client_actions": [], "tool_calls": [], "turns": 1}
 
 
 @app.post("/api/chat/stream")
@@ -2403,7 +2418,23 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             agent = _get_or_create_agent()
             engine = agent.engine
         except Exception as exc:
-            yield json.dumps({"type": "sentence", "text": f"Engine error: {exc}"}) + "\n"
+            exc_str = str(exc)
+            is_fa = any("\u0600" <= c <= "\u06FF" for c in req.message)
+            from openjarvis.engine.cloud_rest import (
+                QUOTA_EXHAUSTED_REPLY_FA,
+                QUOTA_EXHAUSTED_REPLY_EN,
+                is_quota_status_or_text,
+            )
+            if is_quota_status_or_text(None, exc_str):
+                err_text = QUOTA_EXHAUSTED_REPLY_FA if is_fa else QUOTA_EXHAUSTED_REPLY_EN
+            else:
+                err_text = (
+                    "مشکلی در ارتباط با موتور هوش مصنوعی پیش آمد قربان؛ اما امکانات آفلاین در دسترس است."
+                    if is_fa else
+                    "Unable to reach the AI engine, sir. Offline device controls remain fully active."
+                )
+            yield json.dumps({"type": "sentence", "text": err_text}) + "\n"
+            yield json.dumps({"type": "actions", "client_actions": []}) + "\n"
             yield json.dumps({"type": "done"}) + "\n"
             return
 
@@ -2561,7 +2592,22 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
 
         except Exception as exc:
             logger.exception("Streaming failed")
-            yield json.dumps({"type": "sentence", "text": f"I encountered an error: {exc}"}) + "\n"
+            exc_str = str(exc)
+            is_fa = any("\u0600" <= c <= "\u06FF" for c in req.message)
+            from openjarvis.engine.cloud_rest import (
+                QUOTA_EXHAUSTED_REPLY_FA,
+                QUOTA_EXHAUSTED_REPLY_EN,
+                is_quota_status_or_text,
+            )
+            if is_quota_status_or_text(None, exc_str):
+                stream_err_msg = QUOTA_EXHAUSTED_REPLY_FA if is_fa else QUOTA_EXHAUSTED_REPLY_EN
+            else:
+                stream_err_msg = (
+                    "مشکلی در پردازش درخواست پیش آمد قربان؛ اما تمام امکانات آفلاین گوشی در دسترس است."
+                    if is_fa else
+                    "I encountered a processing issue, sir. All offline device controls remain fully operational."
+                )
+            yield json.dumps({"type": "sentence", "text": stream_err_msg}) + "\n"
             yield json.dumps({"type": "actions", "client_actions": []}) + "\n"
             yield json.dumps({"type": "done"}) + "\n"
 
@@ -2603,15 +2649,19 @@ async def vision_endpoint(req: VisionRequest, request: Request = None):
     )
     user_prompt = (req.prompt or "").strip() or default_prompt
 
-    from openjarvis.engine.cloud_rest import analyze_vision_multimodal
-    raw_result = await analyze_vision_multimodal(
-        image_base64=req.image_base64,
-        prompt=user_prompt,
-        api_key=api_key,
-        active_model=active_model,
-        gemini_key=gemini_key,
-    )
-    clean_result = _clean_tts_response(raw_result)
+    try:
+        from openjarvis.engine.cloud_rest import analyze_vision_multimodal
+        raw_result = await analyze_vision_multimodal(
+            image_base64=req.image_base64,
+            prompt=user_prompt,
+            api_key=api_key,
+            active_model=active_model,
+            gemini_key=gemini_key,
+        )
+    except Exception as ex:
+        logger.warning("Vision analysis error: %s", ex)
+        raw_result = "تحلیل تصویر مقدور نبود قربان." if is_persian else "Visual analysis was unable to complete, sir."
+    clean_result = _clean_tts_response(str(raw_result or ""))
 
     _conversation_history.append({"role": "user", "content": f"[Vision: {req.mode}] {user_prompt}"})
     _conversation_history.append({"role": "assistant", "content": clean_result})
@@ -2691,7 +2741,7 @@ async def summarize_notifications_endpoint(req: NotificationSummarizeRequest, re
                     messages=[Message(role=Role.USER, content=prompt)],
                     max_tokens=300,
                 )
-                summary = res.get("content", "").strip()
+                summary = str((res or {}).get("content") or "").strip()
         except Exception as e:
             logger.warning(f"Notification summary LLM call failed: {e}")
 

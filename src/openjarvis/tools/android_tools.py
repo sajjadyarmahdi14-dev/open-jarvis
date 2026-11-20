@@ -1648,16 +1648,15 @@ class AndroidCameraCaptureTool(BaseTool):
                     resp = client.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers)
                     if resp.status_code == 200:
                         data = resp.json()
-                        choices = data.get("choices", [])
-                        if choices:
-                            text = choices[0].get("message", {}).get("content", "")
-                            if text:
-                                return ToolResult(
-                                    tool_name=self.spec.name,
-                                    content=f"Camera photo captured ({out_file}).\nVisual Analysis: {text}",
-                                    success=True,
-                                    data={"image_path": out_file},
-                                )
+                        from openjarvis.engine.cloud_rest import safe_extract_message_content
+                        text = safe_extract_message_content(data).strip()
+                        if text:
+                            return ToolResult(
+                                tool_name=self.spec.name,
+                                content=f"Camera photo captured ({out_file}).\nVisual Analysis: {text}",
+                                success=True,
+                                data={"image_path": out_file},
+                            )
             except Exception as e:
                 logger.debug("OpenRouter vision analysis failed: %s", e)
 

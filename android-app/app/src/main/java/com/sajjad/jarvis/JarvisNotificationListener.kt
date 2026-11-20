@@ -31,7 +31,8 @@ class JarvisNotificationListener : NotificationListenerService() {
         val timestamp: Long,
         val action: Notification.Action?,
         val remoteInput: RemoteInput?,
-        val replyPendingIntent: PendingIntent?
+        val replyPendingIntent: PendingIntent?,
+        val contentIntent: PendingIntent? = null
     )
 
     companion object {
@@ -47,6 +48,40 @@ class JarvisNotificationListener : NotificationListenerService() {
 
         fun getCachedNotifications(): List<CachedNotification> {
             return cache.values.sortedByDescending { it.timestamp }
+        }
+
+        fun dismissLatestNotification(): Boolean {
+            val top = getCachedNotifications().firstOrNull() ?: return false
+            return try {
+                instance?.cancelNotification(top.key)
+                cache.remove(top.key)
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to cancel notification: ${e.message}")
+                false
+            }
+        }
+
+        fun dismissAllNotifications(): Boolean {
+            return try {
+                instance?.cancelAllNotifications()
+                cache.clear()
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to cancel all notifications: ${e.message}")
+                false
+            }
+        }
+
+        fun openLatestNotification(context: Context): Boolean {
+            val top = getCachedNotifications().firstOrNull() ?: return false
+            return try {
+                top.contentIntent?.send()
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to open notification contentIntent: ${e.message}")
+                false
+            }
         }
 
         fun getUnreadNotificationsJson(): JSONArray {
@@ -184,7 +219,8 @@ class JarvisNotificationListener : NotificationListenerService() {
             timestamp = sbn.postTime,
             action = remoteInputAction,
             remoteInput = targetRemoteInput,
-            replyPendingIntent = replyPendingIntent
+            replyPendingIntent = replyPendingIntent,
+            contentIntent = n.contentIntent
         )
 
         cache[sbn.key] = cachedItem

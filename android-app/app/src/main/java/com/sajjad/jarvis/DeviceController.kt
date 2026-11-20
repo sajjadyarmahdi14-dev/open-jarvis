@@ -189,10 +189,71 @@ object DeviceController {
         }
     }
 
+    fun resolveEmergencyNumber(target: String): String? {
+        val clean = target.trim().lowercase(Locale.ROOT).replace("به ", "")
+        val emergencyMap = mapOf(
+            "آمبولانس" to "115",
+            "اورژانس" to "115",
+            "امبولانس" to "115",
+            "ambulance" to "115",
+            "emergency medical" to "115",
+            "medical emergency" to "115",
+            "پلیس" to "110",
+            "کلانتری" to "110",
+            "police" to "110",
+            "cop" to "110",
+            "آتش نشانی" to "125",
+            "آتشنشانی" to "125",
+            "اتش نشانی" to "125",
+            "اتشنشانی" to "125",
+            "fire department" to "125",
+            "firefighter" to "125",
+            "هلال احمر" to "112",
+            "امداد" to "112",
+            "red crescent" to "112",
+            "emergency" to "112",
+            "اورژانس گاز" to "194",
+            "اتفاقات گاز" to "194",
+            "گاز" to "194",
+            "gas emergency" to "194",
+            "برق" to "121",
+            "اتفاقات برق" to "121",
+            "electricity" to "121",
+            "آب" to "122",
+            "اتفاقات آب" to "122",
+            "water" to "122",
+            "پلیس راهور" to "120",
+            "راهور" to "120",
+            "راهنمایی رانندگی" to "120",
+            "traffic police" to "120",
+            "911" to "911",
+            "۹۱۱" to "911",
+            "۱۱۵" to "115",
+            "۱۱۰" to "110",
+            "۱۲۵" to "125",
+            "۱۱۲" to "112",
+            "۱۹۴" to "194",
+            "۱۲۱" to "121",
+            "۱۲۲" to "122",
+            "۱۲۰" to "120"
+        )
+        for ((k, v) in emergencyMap) {
+            if (clean == k || clean.contains(k)) return v
+        }
+        return null
+    }
+
     fun makeCall(context: Context, target: String) {
-        var num = target.trim()
+        val emergency = resolveEmergencyNumber(target)
+        var num = emergency ?: target.trim()
+        val faDigits = charArrayOf('۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹')
+        val arDigits = charArrayOf('٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩')
+        for (i in 0..9) {
+            num = num.replace(faDigits[i], ('0' + i)).replace(arDigits[i], ('0' + i))
+        }
+
         val isDigits = num.replace(" ", "").replace("-", "").replace("+", "").all { it.isDigit() }
-        if (!isDigits) {
+        if (!isDigits && emergency == null) {
             num = findContactNumber(context, num) ?: ""
         }
         if (num.isNotBlank()) {

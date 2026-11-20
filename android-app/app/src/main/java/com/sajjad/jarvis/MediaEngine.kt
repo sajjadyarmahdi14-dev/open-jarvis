@@ -2,6 +2,7 @@ package com.sajjad.jarvis
 
 import android.Manifest
 import android.app.SearchManager
+import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -11,7 +12,11 @@ import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.MediaMetadata
 import android.media.MediaPlayer
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -147,7 +152,7 @@ object MediaEngine {
 
         if (filtered.isNotEmpty()) return filtered
 
-        val queryWords = cleanQuery.split(" ", "_", "-").filter { it.length > 2 }
+        val queryWords = cleanQuery.split(" ", "_", "-").filter { it.length > 1 }
         if (queryWords.isNotEmpty()) {
             val partial = tracks.filter { track ->
                 val full = "${track.title} ${track.artist} ${track.album}".lowercase(Locale.ROOT)
@@ -156,7 +161,8 @@ object MediaEngine {
             if (partial.isNotEmpty()) return partial
         }
 
-        return tracks
+        // Never replay old cached track if user asked for a specific query that was not found locally!
+        return emptyList()
     }
 
     fun findLocalVideo(
@@ -216,7 +222,7 @@ object MediaEngine {
 
         return videos.firstOrNull {
             it.title.lowercase(Locale.ROOT).contains(cleanQuery) || (it.path ?: "").lowercase(Locale.ROOT).contains(cleanQuery)
-        } ?: videos.firstOrNull()
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -532,50 +538,99 @@ object MediaEngine {
 
     fun handleMediaControl(context: Context, command: String, seconds: Int = 30) {
         val cmd = command.trim().lowercase(Locale.ROOT)
+
+        // Layer 1: If Jarvis built-in player is active, control it directly
+        if (JarvisLocalAudioPlayer.isPlaying() || cmd in listOf("play", "resume")) {
+            when (cmd) {
+                "play", "resume" -> {
+                    if (JarvisLocalAudioPlayer.isPlaying()) {
+                        JarvisLocalAudioPlayer.resume(context)
+                        return
+                    }
+                }
+                "pause" -> {
+                    if (JarvisLocalAudioPlayer.isPlaying()) {
+                        JarvisLocalAudioPlayer.pause()
+                        return
+                    }
+                }
+                "stop" -> {
+                    if (JarvisLocalAudioPlayer.isPlaying()) {
+                        JarvisLocalAudioPlayer.stop()
+                        return
+                    }
+                }
+                "next", "skip" -> {
+                    if (JarvisLocalAudioPlayer.isPlaying()) {
+                        JarvisLocalAudioPlayer.next(context)
+                        return
+                    }
+                }
+                "previous", "prev" -> {
+                    if (JarvisLocalAudioPlayer.isPlaying()) {
+                        JarvisLocalAudioPlayer.previous(context)
+                        return
+                    }
+                }
+                "seek_forward", "fast_forward" -> {
+                    if (JarvisLocalAudioPlayer.isPlaying()) {
+                        JarvisLocalAudioPlayer.seekBy(seconds * 1000)
+                        return
+                    }
+                }
+                "seek_backward", "rewind" -> {
+                    if (JarvisLocalAudioPlayer.isPlaying()) {
+                        JarvisLocalAudioPlayer.seekBy(-seconds * 1000)
+                        return
+                    }
+                }
+            }
+        }
+
+        // Layer 2: MediaSessionManager active sessions (Spotify, YouTube, Xiaomi Music, etc.)
+        var handledBySession = false
+        try {
+            val sessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+            val component = ComponentName(context, JarvisNotificationListener::class.java)
+            if (JarvisNotificationListener.isConnected()) {
+                val sessions = sessionManager?.getActiveSessions(component)
+                if (!sessions.isNullOrEmpty()) {
+                    val activeSession = sessions.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+                        ?: sessions.first()
+                    val controls = activeSession.transportControls
+                    when (cmd) {
+                        "play", "resume" -> { controls.play(); handledBySession = true }
+                        "pause" -> { controls.pause(); handledBySession = true }
+                        "stop" -> { controls.stop(); handledBySession = true }
+                        "next", "skip" -> { controls.skipToNext(); handledBySession = true }
+                        "previous", "prev" -> { controls.skipToPrevious(); handledBySession = true }
+                        "seek_forward", "fast_forward" -> {
+                            val pos = activeSession.playbackState?.position ?: 0L
+                            controls.seekTo(pos + seconds * 1000L)
+                            handledBySession = true
+                        }
+                        "seek_backward", "rewind" -> {
+                            val pos = activeSession.playbackState?.position ?: 0L
+                            controls.seekTo(maxOf(0L, pos - seconds * 1000L))
+                            handledBySession = true
+                        }
+                    }
+                    Log.i(TAG, "Media control '$cmd' dispatched via MediaSession (${activeSession.packageName})")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaSession transport control error: ${e.message}")
+        }
+
+        // Layer 3: Fallback to Universal AudioManager Media Key Event (DOWN + UP)
         when (cmd) {
-            "play", "resume" -> {
-                if (JarvisLocalAudioPlayer.isPlaying()) {
-                    JarvisLocalAudioPlayer.resume(context)
-                } else {
-                    dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PLAY)
-                }
-            }
-            "pause" -> {
-                JarvisLocalAudioPlayer.pause()
-                dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
-            }
-            "stop" -> {
-                JarvisLocalAudioPlayer.stop()
-                dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_STOP)
-            }
-            "next", "skip" -> {
-                if (JarvisLocalAudioPlayer.isPlaying()) {
-                    JarvisLocalAudioPlayer.next(context)
-                } else {
-                    dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_NEXT)
-                }
-            }
-            "previous", "prev" -> {
-                if (JarvisLocalAudioPlayer.isPlaying()) {
-                    JarvisLocalAudioPlayer.previous(context)
-                } else {
-                    dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
-                }
-            }
-            "seek_forward", "fast_forward" -> {
-                if (JarvisLocalAudioPlayer.isPlaying()) {
-                    JarvisLocalAudioPlayer.seekBy(seconds * 1000)
-                } else {
-                    dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
-                }
-            }
-            "seek_backward", "rewind" -> {
-                if (JarvisLocalAudioPlayer.isPlaying()) {
-                    JarvisLocalAudioPlayer.seekBy(-seconds * 1000)
-                } else {
-                    dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_REWIND)
-                }
-            }
+            "play", "resume" -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PLAY)
+            "pause" -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
+            "stop" -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_STOP)
+            "next", "skip" -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_NEXT)
+            "previous", "prev" -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+            "seek_forward", "fast_forward" -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
+            "seek_backward", "rewind" -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_REWIND)
             "fullscreen" -> {
                 JarvisAccessibilityService.instance?.let {
                     val root = it.rootInActiveWindow
@@ -590,6 +645,35 @@ object MediaEngine {
                 }
             }
         }
+    }
+
+    fun getActiveMediaInfo(context: Context): Pair<String, String>? {
+        try {
+            val sessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+            val component = ComponentName(context, JarvisNotificationListener::class.java)
+            if (JarvisNotificationListener.isConnected()) {
+                val sessions = sessionManager?.getActiveSessions(component)
+                if (!sessions.isNullOrEmpty()) {
+                    val activeSession = sessions.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+                        ?: sessions.first()
+                    val meta = activeSession.metadata
+                    if (meta != null) {
+                        val title = meta.getString(MediaMetadata.METADATA_KEY_TITLE)
+                            ?: meta.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+                            ?: ""
+                        val artist = meta.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                            ?: meta.getString(MediaMetadata.METADATA_KEY_AUTHOR)
+                            ?: ""
+                        if (title.isNotBlank() || artist.isNotBlank()) {
+                            return Pair(title.trim(), artist.trim())
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getActiveMediaInfo error: ${e.message}")
+        }
+        return null
     }
 
     fun handleVolumeControl(

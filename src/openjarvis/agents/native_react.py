@@ -195,6 +195,7 @@ class NativeReActAgent(ToolUsingAgent):
 
     def _parse_response(self, text: str) -> dict:
         """Parse ReAct structured output."""
+        text = text or ""
         stripped = text.strip()
         fenced = re.fullmatch(
             r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```",
@@ -304,12 +305,12 @@ class NativeReActAgent(ToolUsingAgent):
 
             # Pass tools to engine so native function-calling models can invoke them
             result = self._generate(messages, tools=self._tools if self._tools else None)
-            usage = result.get("usage", {})
+            usage = (result.get("usage") if isinstance(result, dict) else {}) or {}
             for k in total_usage:
-                total_usage[k] += usage.get(k, 0)
+                total_usage[k] += (usage.get(k, 0) or 0)
 
-            content = result.get("content", "")
-            raw_tool_calls = result.get("tool_calls", [])
+            content = (result.get("content") if isinstance(result, dict) else "") or ""
+            raw_tool_calls = (result.get("tool_calls") if isinstance(result, dict) else []) or []
 
             if raw_tool_calls:
                 tc = raw_tool_calls[0]

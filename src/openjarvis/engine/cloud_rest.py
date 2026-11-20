@@ -380,12 +380,92 @@ async def stream_full_gemini_rest(
 # OpenAI-Compatible & OpenRouter REST Helpers
 # ---------------------------------------------------------------------------
 
+QUOTA_EXHAUSTED_REPLY_FA = (
+    "سهمیه روزانه مدل هوش مصنوعی تموم شده قربان؛ ولی تمام دستورات آفلاین گوشی "
+    "مثل موزیک، تماس، دوربین و تنظیمات هنوز کامل کار میکنن. میتونید از تنظیمات مدل رو عوض کنید."
+)
+QUOTA_EXHAUSTED_REPLY_EN = (
+    "Daily AI quota is exhausted, sir. Offline device controls remain fully active—you can switch models in Settings."
+)
+
+
+def safe_get_dict(obj: Any, key: str) -> Dict[str, Any]:
+    """Safely extract a dict from obj[key], returning {} if missing or not a dict."""
+    if not isinstance(obj, dict):
+        return {}
+    val = obj.get(key)
+    return val if isinstance(val, dict) else {}
+
+
+def safe_get_list(obj: Any, key: str) -> List[Any]:
+    """Safely extract a list from obj[key], returning [] if missing or not a list."""
+    if not isinstance(obj, dict):
+        return []
+    val = obj.get(key)
+    return val if isinstance(val, list) else []
+
+
+def safe_extract_message_content(data: Any) -> str:
+    """Never-throw safe extractor for LLM message content string."""
+    if not isinstance(data, dict):
+        return ""
+    choices = safe_get_list(data, "choices")
+    if not choices:
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    msg = safe_get_dict(first, "message")
+    content = msg.get("content")
+    if content is None:
+        return ""
+    return str(content)
+
+
+def safe_extract_tool_calls(data: Any) -> List[Dict[str, Any]]:
+    """Never-throw safe extractor for OpenAI-style tool calls."""
+    if not isinstance(data, dict):
+        return []
+    choices = safe_get_list(data, "choices")
+    if not choices:
+        return []
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    msg = safe_get_dict(first, "message")
+    raw_calls = safe_get_list(msg, "tool_calls")
+    results: List[Dict[str, Any]] = []
+    for tc in raw_calls:
+        if not isinstance(tc, dict):
+            continue
+        fn = safe_get_dict(tc, "function")
+        args_raw = fn.get("arguments", "{}")
+        if isinstance(args_raw, dict):
+            args_str = json.dumps(args_raw)
+        else:
+            args_str = str(args_raw or "{}")
+        results.append({
+            "id": str(tc.get("id") or ""),
+            "name": str(fn.get("name") or ""),
+            "arguments": args_str,
+        })
+    return results
+
+
+def is_quota_status_or_text(status_code: Optional[int], err_text: str = "") -> bool:
+    """Detect if HTTP error or response body represents quota or rate-limit exhaustion."""
+    if status_code in (402, 429):
+        return True
+    t_lower = (err_text or "").lower()
+    return any(k in t_lower for k in ("quota", "insufficient_quota", "rate limit", "credits", "free request limit", "exceeded your current quota"))
+
+
 FREE_MODEL_FALLBACK_POOL: List[str] = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-3-27b-it:free",
+    "google/gemma-3-12b-it:free",
+    "google/gemma-3-4b-it:free",
     "qwen/qwen-2.5-72b-instruct:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-chat:free",
 ]
 
 CURATED_FREE_MODELS: List[Dict[str, Any]] = [
@@ -566,6 +646,7 @@ def generate_openai_compat_rest(
     data = None
     selected_model = initial_model
     last_exc = None
+    saw_quota = False
 
     for candidate in models_to_try:
         cand_payload = dict(payload)
@@ -581,7 +662,10 @@ def generate_openai_compat_rest(
 
         try:
             resp = client.post(url, json=cand_payload, headers=headers)
-            if resp.status_code in (404, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
+            if is_quota_status_or_text(resp.status_code, resp.text):
+                saw_quota = True
+
+            if resp.status_code in (401, 402, 403, 404, 408, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
                 logger.warning("Model %s returned HTTP %d, rotating to next candidate...", candidate, resp.status_code)
                 continue
             if resp.status_code == 400 and "tools" in cand_payload:
@@ -594,15 +678,22 @@ def generate_openai_compat_rest(
 
             resp.raise_for_status()
             cand_data = resp.json()
-            cand_choices = cand_data.get("choices", [])
-            if not cand_choices and candidate != models_to_try[-1]:
-                logger.warning("Model %s returned empty choices, rotating...", candidate)
-                continue
+            if not isinstance(cand_data, dict):
+                if candidate != models_to_try[-1]:
+                    continue
+                cand_data = {}
 
-            msg_obj = cand_choices[0].get("message", {}) if cand_choices else {}
-            has_content = bool(msg_obj.get("content", "").strip())
-            has_tool_calls = bool(msg_obj.get("tool_calls"))
-            if not has_content and not has_tool_calls and candidate != models_to_try[-1]:
+            if "error" in cand_data:
+                err_text = str(cand_data.get("error") or "")
+                if is_quota_status_or_text(resp.status_code, err_text):
+                    saw_quota = True
+                if candidate != models_to_try[-1]:
+                    logger.warning("Model %s returned error body: %s, rotating...", candidate, err_text[:120])
+                    continue
+
+            cand_content = safe_extract_message_content(cand_data).strip()
+            cand_tool_calls = safe_extract_tool_calls(cand_data)
+            if not cand_content and not cand_tool_calls and candidate != models_to_try[-1]:
                 logger.warning("Model %s returned blank content and no tool calls, rotating...", candidate)
                 continue
 
@@ -611,26 +702,44 @@ def generate_openai_compat_rest(
             break
         except httpx.HTTPStatusError as exc:
             last_exc = exc
-            if exc.response.status_code in (400, 404, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
+            err_msg = exc.response.text
+            if is_quota_status_or_text(exc.response.status_code, err_msg):
+                saw_quota = True
+            if exc.response.status_code in (400, 401, 402, 403, 404, 408, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
                 logger.warning("HTTP %d on model %s, rotating...", exc.response.status_code, candidate)
                 continue
-            err_msg = exc.response.text
             if looks_like_context_length_error(err_msg):
                 raise EngineContextLengthError(f"Context length overflow: {err_msg}") from exc
-            if candidate == models_to_try[-1]:
+            if candidate == models_to_try[-1] and not saw_quota:
                 raise EngineConnectionError(f"All models failed. Last error HTTP {exc.response.status_code}: {err_msg}") from exc
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             last_exc = exc
             if candidate != models_to_try[-1]:
                 logger.warning("Timeout/ConnectError on model %s, rotating...", candidate)
                 continue
-            raise EngineConnectionError(f"Connection failed to {url}") from exc
+            if not saw_quota:
+                raise EngineConnectionError(f"Connection failed to {url}") from exc
+
+    is_fa = any("\u0600" <= c <= "\u06FF" for m in messages for c in (getattr(m, "content", "") or ""))
 
     if data is None:
-        if last_exc:
-            raise EngineConnectionError(f"All models in fallback pool failed: {last_exc}")
+        if saw_quota:
+            quota_reply = QUOTA_EXHAUSTED_REPLY_FA if is_fa else QUOTA_EXHAUSTED_REPLY_EN
+            return {
+                "content": quota_reply,
+                "usage": {},
+                "model": selected_model,
+                "finish_reason": "quota_exhausted",
+                "cost_usd": 0.0,
+                "ttft": time.monotonic() - t0,
+            }
+        fallback_reply = (
+            "ارتباط با سرور مدل هوش مصنوعی در حال حاضر مقدور نیست قربان؛ اما تمام امکانات آفلاین گوشی در دسترس است."
+            if is_fa else
+            "Unable to reach the AI model server, sir. All offline device controls remain fully operational."
+        )
         return {
-            "content": "",
+            "content": fallback_reply,
             "usage": {},
             "model": selected_model,
             "finish_reason": "error",
@@ -639,45 +748,50 @@ def generate_openai_compat_rest(
         }
 
     elapsed = time.monotonic() - t0
-    choices = data.get("choices", [])
+    choices = safe_get_list(data, "choices")
     if not choices:
+        if saw_quota:
+            quota_reply = QUOTA_EXHAUSTED_REPLY_FA if is_fa else QUOTA_EXHAUSTED_REPLY_EN
+            return {
+                "content": quota_reply,
+                "usage": safe_get_dict(data, "usage"),
+                "model": data.get("model", selected_model),
+                "finish_reason": "quota_exhausted",
+                "cost_usd": 0.0,
+                "ttft": elapsed,
+            }
         return {
             "content": "",
-            "usage": data.get("usage", {}),
-            "model": data.get("model", model),
+            "usage": safe_get_dict(data, "usage"),
+            "model": data.get("model", selected_model),
             "finish_reason": "error",
             "cost_usd": 0.0,
             "ttft": elapsed,
         }
 
-    choice = choices[0]
-    usage = data.get("usage", {})
+    first_choice = choices[0] if (choices and isinstance(choices[0], dict)) else {}
+    usage = safe_get_dict(data, "usage")
     prompt_tokens = usage.get("prompt_tokens") or estimate_prompt_tokens(messages)
-    completion_tokens = usage.get("completion_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0) or 0
+
+    content = safe_extract_message_content(data)
+    tool_calls = safe_extract_tool_calls(data)
 
     result: Dict[str, Any] = {
-        "content": choice.get("message", {}).get("content") or "",
+        "content": content,
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         },
-        "model": data.get("model", model),
-        "finish_reason": choice.get("finish_reason", "stop"),
+        "model": data.get("model", selected_model),
+        "finish_reason": str(first_choice.get("finish_reason") or "stop"),
         "cost_usd": 0.0,
         "ttft": elapsed,
     }
 
-    raw_tool_calls = choice.get("message", {}).get("tool_calls", [])
-    if raw_tool_calls:
-        result["tool_calls"] = [
-            {
-                "id": tc.get("id", ""),
-                "name": tc.get("function", {}).get("name", ""),
-                "arguments": tc.get("function", {}).get("arguments", "{}"),
-            }
-            for tc in raw_tool_calls
-        ]
+    if tool_calls:
+        result["tool_calls"] = tool_calls
     return result
 
 
@@ -747,6 +861,7 @@ async def stream_full_openai_compat_rest(
 
     stream_started = False
     last_exc = None
+    saw_quota = False
 
     for candidate in models_to_try:
         cand_payload = dict(payload)
@@ -762,15 +877,22 @@ async def stream_full_openai_compat_rest(
 
         try:
             async with async_client.stream("POST", url, json=cand_payload, headers=headers, timeout=6.0) as resp:
+                if is_quota_status_or_text(resp.status_code):
+                    saw_quota = True
+
                 if not resp.is_success:
                     await resp.aread()
                     err_text = resp.text
-                    if resp.status_code in (400, 404, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
+                    if is_quota_status_or_text(resp.status_code, err_text):
+                        saw_quota = True
+                    if resp.status_code in (400, 401, 402, 403, 404, 408, 429, 500, 502, 503, 504) and candidate != models_to_try[-1]:
                         logger.warning("Stream model %s failed HTTP %d, rotating...", candidate, resp.status_code)
                         continue
                     if looks_like_context_length_error(err_text):
                         raise EngineContextLengthError(f"Context length overflow: {err_text}")
-                    raise EngineConnectionError(f"API returned HTTP {resp.status_code}: {err_text}")
+                    if candidate != models_to_try[-1]:
+                        continue
+                    break
 
                 stream_started = True
                 async for line in resp.aiter_lines():
@@ -784,45 +906,51 @@ async def stream_full_openai_compat_rest(
                     except json.JSONDecodeError:
                         continue
 
-                    choices = chunk.get("choices", [])
+                    if not isinstance(chunk, dict):
+                        continue
+
+                    choices = safe_get_list(chunk, "choices")
                     if not choices:
                         continue
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
+                    choice = choices[0] if isinstance(choices[0], dict) else {}
+                    delta = safe_get_dict(choice, "delta")
                     finish = choice.get("finish_reason")
 
                     content = delta.get("content")
-                    if content:
-                        yield StreamChunk(content=content)
+                    if content is not None and str(content):
+                        yield StreamChunk(content=str(content))
 
-                    delta_tc = delta.get("tool_calls")
+                    delta_tc = safe_get_list(delta, "tool_calls")
                     if delta_tc:
                         calls_to_yield = []
                         for tc in delta_tc:
+                            if not isinstance(tc, dict):
+                                continue
                             idx = tc.get("index", 0)
+                            fn_dict = safe_get_dict(tc, "function")
                             if idx not in accumulated_tool_calls:
                                 accumulated_tool_calls[idx] = {
                                     "index": idx,
-                                    "id": tc.get("id", ""),
+                                    "id": str(tc.get("id") or ""),
                                     "type": "function",
                                     "function": {
-                                        "name": tc.get("function", {}).get("name", ""),
-                                        "arguments": tc.get("function", {}).get("arguments", ""),
+                                        "name": str(fn_dict.get("name") or ""),
+                                        "arguments": str(fn_dict.get("arguments") or ""),
                                     },
                                 }
                             else:
                                 curr = accumulated_tool_calls[idx]
                                 if tc.get("id"):
-                                    curr["id"] = tc["id"]
-                                if tc.get("function", {}).get("name"):
-                                    curr["function"]["name"] = tc["function"]["name"]
-                                if tc.get("function", {}).get("arguments"):
-                                    curr["function"]["arguments"] += tc["function"]["arguments"]
+                                    curr["id"] = str(tc["id"])
+                                if fn_dict.get("name"):
+                                    curr["function"]["name"] = str(fn_dict["name"])
+                                if fn_dict.get("arguments"):
+                                    curr["function"]["arguments"] += str(fn_dict["arguments"])
                             calls_to_yield.append(accumulated_tool_calls[idx])
                         yield StreamChunk(tool_calls=calls_to_yield)
 
                     if finish:
-                        yield StreamChunk(finish_reason=finish)
+                        yield StreamChunk(finish_reason=str(finish))
             if stream_started:
                 return
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as exc:
@@ -830,7 +958,20 @@ async def stream_full_openai_compat_rest(
             if not stream_started and candidate != models_to_try[-1]:
                 logger.warning("Stream error on model %s (%s), rotating...", candidate, exc)
                 continue
-            raise EngineConnectionError(f"Stream connection failed: {exc}") from exc
+
+    if not stream_started:
+        is_fa = any("\u0600" <= c <= "\u06FF" for m in messages for c in (getattr(m, "content", "") or ""))
+        if saw_quota:
+            quota_reply = QUOTA_EXHAUSTED_REPLY_FA if is_fa else QUOTA_EXHAUSTED_REPLY_EN
+            yield StreamChunk(content=quota_reply, finish_reason="quota_exhausted")
+            return
+        fallback_reply = (
+            "ارتباط با سرور مدل هوش مصنوعی در حال حاضر مقدور نیست قربان؛ اما تمام امکانات آفلاین گوشی در دسترس است."
+            if is_fa else
+            "Unable to reach the AI model server, sir. All offline device controls remain fully operational."
+        )
+        yield StreamChunk(content=fallback_reply, finish_reason="error")
+        return
 
 
 VISION_MODEL_FALLBACK_POOL = [
@@ -936,12 +1077,9 @@ async def analyze_vision_multimodal(
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    choices = data.get("choices", [])
-                    if choices:
-                        msg = choices[0].get("message", {})
-                        content = (msg.get("content") or "").strip()
-                        if content:
-                            return content
+                    content = safe_extract_message_content(data).strip()
+                    if content:
+                        return content
                 else:
                     logger.warning("Vision model %s failed with HTTP %d: %s", actual_model, resp.status_code, resp.text[:200])
             except Exception as ex:
@@ -951,6 +1089,9 @@ async def analyze_vision_multimodal(
 
 
 __all__ = [
+    "FREE_MODEL_FALLBACK_POOL",
+    "QUOTA_EXHAUSTED_REPLY_EN",
+    "QUOTA_EXHAUSTED_REPLY_FA",
     "VISION_MODEL_FALLBACK_POOL",
     "analyze_vision_multimodal",
     "build_gemini_contents",
@@ -958,7 +1099,12 @@ __all__ = [
     "convert_tools_to_gemini",
     "generate_gemini_rest",
     "generate_openai_compat_rest",
+    "is_quota_status_or_text",
     "normalize_openai_tools",
+    "safe_extract_message_content",
+    "safe_extract_tool_calls",
+    "safe_get_dict",
+    "safe_get_list",
     "stream_full_gemini_rest",
     "stream_full_openai_compat_rest",
 ]
