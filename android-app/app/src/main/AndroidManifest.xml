@@ -18,6 +18,8 @@
 
     <!-- Alarm & Clock Control -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <!-- Camera Vision & Flashlight -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -196,6 +198,26 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Background Timer Service -->
+        <service
+            android:name=".timer.JarvisBackgroundTimerService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Exact Alarm & Timer Broadcast Receiver -->
+        <receiver
+            android:name=".timer.JarvisAlarmReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.sajjad.jarvis.ACTION_TIMER_EXPIRED" />
+                <action android:name="com.sajjad.jarvis.ACTION_ALARM_FIRED" />
+                <action android:name="com.sajjad.jarvis.ACTION_CANCEL_TIMER" />
+                <action android:name="com.sajjad.jarvis.ACTION_DISMISS_ALARM" />
             </intent-filter>
         </receiver>
 

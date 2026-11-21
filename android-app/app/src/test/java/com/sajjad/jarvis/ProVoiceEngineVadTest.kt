@@ -119,13 +119,55 @@ class ProVoiceEngineVadTest {
 
     @Test
     fun testListeningModeBuffersAudioImmediately() {
-        // In LISTENING mode, preRoll (600ms = 19200 bytes) + incoming audio is buffered immediately
-        val preRollBytes = (16000 * 600 / 1000) * 2 // 19200 bytes
-        assertTrue("Pre-roll buffer must be at least 600ms of 16-bit PCM (19200 bytes)", preRollBytes == 19200)
+        // In LISTENING mode, preRoll (800ms = 25600 bytes) + incoming audio is buffered immediately
+        val preRollBytes = (16000 * 800 / 1000) * 2 // 25600 bytes
+        assertTrue("Pre-roll buffer must be at least 800ms of 16-bit PCM (25600 bytes)", preRollBytes == 25600)
 
         val incoming50ms = (16000 * 50 / 1000) * 2 // 1600 bytes
         val totalRecorded = preRollBytes + incoming50ms
-        // Total audio on immediate tap-to-stop is > 20000 bytes (over 650ms), never empty STT!
-        assertTrue("Immediate capture in LISTENING mode is never empty STT", totalRecorded > 16000)
+        // Total audio on immediate tap-to-stop is > 27000 bytes (over 850ms), never empty STT!
+        assertTrue("Immediate capture in LISTENING mode is never empty STT", totalRecorded > 20000)
+    }
+
+    @Test
+    fun testSpeechBandPassFilterAttenuatesBothRumbleAndHiss() {
+        val bpf = ProVoiceEngine.Companion.SpeechBandPassFilter(0.895f, 0.572f)
+        val sampleRate = 16000
+        val count = 1600 // 100ms
+
+        // 100 Hz low rumble
+        val rumbleSamples = ShortArray(count) { i ->
+            (sin(2.0 * PI * 100.0 * i / sampleRate) * 10000.0).toInt().toShort()
+        }
+        // 1000 Hz human speech formant
+        val speechSamples = ShortArray(count) { i ->
+            (sin(2.0 * PI * 1000.0 * i / sampleRate) * 10000.0).toInt().toShort()
+        }
+        // 6000 Hz high cymbal hiss
+        val hissSamples = ShortArray(count) { i ->
+            (sin(2.0 * PI * 6000.0 * i / sampleRate) * 10000.0).toInt().toShort()
+        }
+
+        bpf.reset()
+        val rumbleRms = bpf.apply(rumbleSamples, count)
+
+        bpf.reset()
+        val speechRms = bpf.apply(speechSamples, count)
+
+        bpf.reset()
+        val hissRms = bpf.apply(hissSamples, count)
+
+        assertTrue("Speech RMS ($speechRms) should be significantly higher than rumble RMS ($rumbleRms)", speechRms > rumbleRms * 2.0)
+        assertTrue("Speech RMS ($speechRms) should be significantly higher than hiss RMS ($hissRms)", speechRms > hissRms * 1.5)
+    }
+
+    @Test
+    fun testNaturalPacingIncompleteClauses() {
+        assertTrue(ProVoiceEngine.Companion.isSemanticallyIncomplete("من می‌خواهم که"))
+        assertTrue(ProVoiceEngine.Companion.isSemanticallyIncomplete("send an email to"))
+        assertTrue(ProVoiceEngine.Companion.isSemanticallyIncomplete("بگو به"))
+        assertTrue(ProVoiceEngine.Companion.isSemanticallyIncomplete("set a timer for"))
+        assertFalse(ProVoiceEngine.Companion.isSemanticallyIncomplete("ساعت چنده"))
+        assertFalse(ProVoiceEngine.Companion.isSemanticallyIncomplete("turn on the flashlight"))
     }
 }

@@ -16,6 +16,7 @@ import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -302,6 +303,46 @@ class JarvisVoiceService : Service() {
         val onFinished: (() -> Unit)? = null
     )
     private val speechQueue = Channel<SpeechItem>(Channel.UNLIMITED)
+    private var transientDuckFocusRequest: AudioFocusRequest? = null
+
+    fun duckExternalAndLocalAudio(duck: Boolean) {
+        JarvisLocalAudioPlayer.setDucked(duck)
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        try {
+            if (duck) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    if (transientDuckFocusRequest == null) {
+                        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                            .setAudioAttributes(
+                                AudioAttributes.Builder()
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                                    .build()
+                            )
+                            .setOnAudioFocusChangeListener { /* transient ducking listener */ }
+                            .build()
+                        transientDuckFocusRequest = req
+                        am.requestAudioFocus(req)
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    transientDuckFocusRequest?.let {
+                        am.abandonAudioFocusRequest(it)
+                        transientDuckFocusRequest = null
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    am.abandonAudioFocus(null)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "duckExternalAndLocalAudio error: ${e.message}")
+        }
+    }
     private val pendingSpeechCount = java.util.concurrent.atomic.AtomicInteger(0)
     private var speechQueueJob: Job? = null
 
@@ -417,6 +458,17 @@ class JarvisVoiceService : Service() {
             }
             ACTION_FORCE_LISTEN, ACTION_TRIGGER_LISTEN -> {
                 triggerForceListen()
+                return START_STICKY
+            }
+            JarvisLocalAudioPlayer.ACTION_LOCAL_MEDIA_CONTROL -> {
+                val cmd = intent.getStringExtra(JarvisLocalAudioPlayer.EXTRA_MEDIA_CMD) ?: ""
+                when (cmd) {
+                    "play" -> JarvisLocalAudioPlayer.resume(this)
+                    "pause" -> JarvisLocalAudioPlayer.pause()
+                    "next" -> JarvisLocalAudioPlayer.next(this)
+                    "prev" -> JarvisLocalAudioPlayer.previous(this)
+                    "stop" -> JarvisLocalAudioPlayer.stop()
+                }
                 return START_STICKY
             }
             else -> {
@@ -607,6 +659,7 @@ class JarvisVoiceService : Service() {
                     }
 
                     override fun onSpeechStarted() {
+                        duckExternalAndLocalAudio(true)
                         serviceListener?.onSpeechStarted()
                         val st = if (proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION) "listening_cmd" else "listening_wake"
                         serviceListener?.onWakeStateChanged(st)
@@ -637,6 +690,7 @@ class JarvisVoiceService : Service() {
                     }
 
                     override fun onSttEmpty() {
+                        duckExternalAndLocalAudio(false)
                         broadcastUiUpdate(wakeStatus = "empty_stt")
                         updateNotification("Didn't catch that (empty STT)")
                         JarvisOverlayManager.instance?.updateText("Didn't catch that (empty STT)")
@@ -650,6 +704,7 @@ class JarvisVoiceService : Service() {
                     }
 
                     override fun onStandbyIgnored(transcript: String) {
+                        duckExternalAndLocalAudio(false)
                         Log.i(TAG, "Standby audio ignored: $transcript")
                         updateNotification("Ignored (no wake word): $transcript")
                     }
@@ -903,6 +958,9 @@ class JarvisVoiceService : Service() {
                 isCommandInFlight.set(false)
                 isProcessing = false
                 proVoiceEngine?.notifyProcessing(false)
+                if (!isTtsSpeaking) {
+                    duckExternalAndLocalAudio(false)
+                }
             }
         }
     }
@@ -2210,6 +2268,7 @@ class JarvisVoiceService : Service() {
             isTtsSpeaking = true
             acousticState = AcousticState.SPEAKING
             proVoiceEngine?.notifySpeaking(true)
+            JarvisLocalAudioPlayer.setDucked(true)
             serviceListener?.onTtsStarted()
             broadcastUiUpdate(wakeStatus = "speaking")
             updateNotification("Speaking...")
@@ -2263,6 +2322,8 @@ class JarvisVoiceService : Service() {
                 isProcessing = false
                 acousticState = AcousticState.IDLE
                 proVoiceEngine?.notifySpeaking(false)
+                JarvisLocalAudioPlayer.setDucked(false)
+                duckExternalAndLocalAudio(false)
                 serviceListener?.onTtsFinished()
                 val isConv = proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION
                 val st = if (isServiceMuted) "paused" else if (isConv) "listening_cmd" else "listening_wake"

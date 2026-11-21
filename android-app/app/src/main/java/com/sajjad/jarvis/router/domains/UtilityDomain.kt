@@ -17,6 +17,8 @@ import com.sajjad.jarvis.JarvisCameraActivity
 import com.sajjad.jarvis.LocalCommandRouter.LocalRouteResult
 import com.sajjad.jarvis.ProtocolEngine
 import com.sajjad.jarvis.router.NlpNormalizer
+import com.sajjad.jarvis.timer.JarvisAlarmReceiver
+import com.sajjad.jarvis.timer.JarvisBackgroundTimerService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -264,10 +266,40 @@ object UtilityDomain {
     }
 
     // =========================================================================
-    // Alarms & Timers
+    // Alarms & Timers (Background-First Silent Execution)
     // =========================================================================
     private fun handleAlarmsAndTimers(context: Context, rawText: String, clean: String, lower: String, norm: String, isFa: Boolean): LocalRouteResult {
-        // Set Alarm
+        // Explicit OEM Clock App Launch
+        val openClockWords = listOf("open clock", "launch clock", "open alarms", "ساعت رو باز کن", "اپلیکیشن ساعت", "برنامه ساعت")
+        if (openClockWords.any { norm.contains(it) || lower.contains(it) }) {
+            AppLauncher.launchApp(context, "clock")
+            val reply = if (isFa) "اپلیکیشن ساعت باز شد قربان." else "Opening Clock app, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "clock_open")
+        }
+
+        // Cancel / Stop Timer
+        val cancelTimerWords = listOf(
+            "cancel timer", "stop timer", "clear timer", "dismiss timer", "cancel the timer",
+            "تایمر رو لغو کن", "تایمر را لغو کن", "تایمر رو متوقف کن", "تایمر رو خاموش کن", "لغو تایمر", "متوقف کردن تایمر"
+        )
+        if (cancelTimerWords.any { norm.contains(it) || lower.contains(it) }) {
+            JarvisBackgroundTimerService.cancelTimer(context)
+            val reply = if (isFa) "تایمر لغو شد قربان." else "Timer cancelled, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "clock_timer_cancel")
+        }
+
+        // Stop Active Alarm Ringing
+        val stopAlarmWords = listOf(
+            "stop alarm", "dismiss alarm", "turn off alarm", "cancel alarm",
+            "آلارم رو قطع کن", "آلارم رو خاموش کن", "قطع آلارم", "خاموش کردن آلارم", "ساکت شو"
+        )
+        if (stopAlarmWords.any { norm.contains(it) || lower.contains(it) }) {
+            JarvisAlarmReceiver.stopAlarmTone()
+            val reply = if (isFa) "آلارم متوقف شد قربان." else "Alarm dismissed, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "clock_alarm_dismiss")
+        }
+
+        // Set Alarm (Background Exact Alarm via AlarmManager)
         val alarmMatchEn = Regex("(set an alarm for|alarm for|wake me up at)\\s+(\\d+)(?::(\\d+))?\\s*(am|pm)?").find(lower)
         val alarmMatchFa = Regex("(آلارم بزار برای|ساعت|بیدارم کن ساعت)\\s*(\\d+)(?::(\\d+))?\\s*(صبح|عصر|شب)?").find(NlpNormalizer.normalizeDigits(clean))
         if (alarmMatchEn != null || alarmMatchFa != null) {
@@ -279,12 +311,12 @@ object UtilityDomain {
             if ((amPm == "pm" || amPm == "عصر" || amPm == "شب") && hour < 12) hour += 12
             if ((amPm == "am" || amPm == "صبح") && hour == 12) hour = 0
 
-            DeviceController.setAlarm(context, hour, min, "Jarvis Alarm")
-            val reply = if (isFa) "آلارم برای ساعت $hour:${String.format(Locale.ROOT, "%02d", min)} تنظیم شد قربان." else "Alarm set for $hour:${String.format(Locale.ROOT, "%02d", min)}, sir."
+            JarvisAlarmReceiver.scheduleExactAlarm(context, hour, min, "Jarvis Alarm")
+            val reply = if (isFa) "آلارم برای ساعت $hour:${String.format(Locale.ROOT, "%02d", min)} در پس‌زمینه تنظیم شد قربان." else "Alarm set for $hour:${String.format(Locale.ROOT, "%02d", min)} in background, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "clock_alarm")
         }
 
-        // Set Timer
+        // Set Timer (Background-First Coroutine + Notification Countdown)
         val timerMatchEn = Regex("(set a timer for|timer for)\\s+(\\d+)\\s*(minute|minutes|min|second|seconds|sec)").find(lower)
         val timerMatchFa = Regex("تایمر\\s*(\\d+)\\s*(دقیقه|ثانیه)").find(NlpNormalizer.normalizeDigits(clean))
         if (timerMatchEn != null || timerMatchFa != null) {
@@ -292,8 +324,9 @@ object UtilityDomain {
                 ?: timerMatchFa?.groupValues?.get(1)?.toIntOrNull() ?: 5
             val unit = timerMatchEn?.groupValues?.get(3) ?: timerMatchFa?.groupValues?.get(2) ?: "min"
             val totalSeconds = if (unit.startsWith("sec") || unit.contains("ثانیه")) num else num * 60
-            DeviceController.setTimer(context, totalSeconds, "Jarvis Timer")
-            val reply = if (isFa) "تایمر برای $num $unit تنظیم شد قربان." else "Timer set for $num $unit, sir."
+            val labelStr = "$num $unit"
+            JarvisBackgroundTimerService.startTimer(context, totalSeconds, labelStr)
+            val reply = if (isFa) "تایمر $num $unit در پس‌زمینه آغاز شد قربان." else "Timer for $num $unit running in background, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "clock_timer")
         }
 

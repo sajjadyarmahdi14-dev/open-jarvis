@@ -11,8 +11,8 @@ android {
         applicationId = "com.sajjad.jarvis"
         minSdk = 24
         targetSdk = 35
-        versionCode = 30
-        versionName = "2.5.0"
+        versionCode = 31
+        versionName = "2.5.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -49,6 +49,7 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.media:media:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 

@@ -62,7 +62,7 @@ object CommunicationDomain {
         }
 
         // ---------------------------------------------------------------------
-        // 2. Direct SMS Compose & Send
+        // 2. Direct SMS Compose & Silent Send (Background-First)
         // ---------------------------------------------------------------------
         val smsMatchFa = Regex("^(?:پیامک بزن به|اس ام اس بده به|پیام بده به)\\s+(.+?)\\s+(?:بگو|که)\\s+(.+)$").find(clean)
         val smsMatchEn = Regex("^(?:send sms to|text)\\s+(.+?)\\s+saying\\s+(.+)$").find(lower)
@@ -70,9 +70,15 @@ object CommunicationDomain {
             val target = smsMatchFa?.groupValues?.get(1)?.trim() ?: smsMatchEn?.groupValues?.get(1)?.trim() ?: ""
             val message = smsMatchFa?.groupValues?.get(2)?.trim() ?: smsMatchEn?.groupValues?.get(2)?.trim() ?: ""
             if (target.isNotBlank() && message.isNotBlank()) {
-                DeviceController.sendSms(context, target, message)
-                val reply = if (isFa) "پیامک به $target آماده ارسال شد قربان." else "SMS to $target prepared, sir."
-                return LocalRouteResult(handled = true, spokenFeedback = reply, category = "sms_compose")
+                val sentSilently = DeviceController.sendSmsDirect(context, target, message)
+                if (sentSilently) {
+                    val reply = if (isFa) "پیامک به $target با موفقیت در پس‌زمینه ارسال شد قربان." else "SMS sent to $target in background, sir."
+                    return LocalRouteResult(handled = true, spokenFeedback = reply, category = "sms_sent_silent")
+                } else {
+                    DeviceController.sendSms(context, target, message)
+                    val reply = if (isFa) "پیامک به $target آماده ارسال شد قربان." else "SMS to $target prepared, sir."
+                    return LocalRouteResult(handled = true, spokenFeedback = reply, category = "sms_compose")
+                }
             }
         }
 

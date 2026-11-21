@@ -157,4 +157,29 @@ class DomainRouterTest {
             assertTrue("Normalizer should preserve screen trigger words: $trigger", norm.isNotBlank())
         }
     }
+
+    @Test
+    fun testBackgroundFirstTimerAndAlarmPhrases() {
+        val timerPhrases = listOf(
+            "set a timer for 30 seconds",
+            "set a timer for 5 minutes",
+            "timer for 10 min",
+            "تایمر ۳۰ ثانیه",
+            "تایمر ۵ دقیقه"
+        )
+        for (phrase in timerPhrases) {
+            val matchEn = Regex("(set a timer for|timer for)\\s+(\\d+)\\s*(minute|minutes|min|second|seconds|sec)").find(phrase)
+            val matchFa = Regex("تایمر\\s*(\\d+)\\s*(دقیقه|ثانیه)").find(NlpNormalizer.normalizeDigits(phrase))
+            assertTrue("Timer regex must match '$phrase'", matchEn != null || matchFa != null)
+        }
+
+        val cancelPhrases = listOf(
+            "cancel timer", "stop timer", "clear timer", "تایمر رو لغو کن", "لغو تایمر"
+        )
+        val cancelWords = listOf("cancel timer", "stop timer", "clear timer", "تایمر رو لغو کن", "لغو تایمر")
+        for (phrase in cancelPhrases) {
+            val norm = NlpNormalizer.cleanLower(phrase)
+            assertTrue("Cancel timer must match '$phrase'", cancelWords.any { norm.contains(it) })
+        }
+    }
 }

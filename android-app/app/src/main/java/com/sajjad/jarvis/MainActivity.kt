@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -196,6 +197,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
 
         loadPreferences()
         requestPermissionsAndSetup()
@@ -225,6 +227,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                                 .fillMaxSize()
                                 .statusBarsPadding()
                                 .navigationBarsPadding()
+                                .imePadding()
                         ) {
                             // Top Status Bar
                             JarvisTopBar(

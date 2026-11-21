@@ -3,8 +3,10 @@ package com.sajjad.jarvis
 import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.net.wifi.WifiManager
@@ -44,10 +46,10 @@ class ProVoiceEngine(
         var liveAudioChunkListener: ((ShortArray, Int) -> Unit)? = null
         const val CHUNK_MS = 50
         const val CHUNK_SAMPLES = (SAMPLE_RATE * CHUNK_MS) / 1000 // 800 shorts
-        const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 600) / 1000 // 9600 shorts (600ms pre-roll)
+        const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 800) / 1000 // 12800 shorts (800ms pre-roll)
 
         const val MICRO_PAUSE_PROBE_MS = 450L
-        const val STANDBY_MAX_DURATION_MS = 3200L // Full 1.0s to 3.2s utterance with 600ms pre-roll + 450ms post-roll
+        const val STANDBY_MAX_DURATION_MS = 5500L // 5.5s cap in STANDBY to allow natural calm speech pacing
         const val CONV_MAX_DURATION_MS = 8000L    // 8.0s noisy cap in LISTENING without transcript growth
         const val CONV_EXTENDED_MAX_DURATION_MS = 35000L // Up to 35s if words keep arriving
         const val PERIODIC_PROBE_INTERVAL_MS = 1800L // 1.8s periodic probe in noisy environment
@@ -134,6 +136,72 @@ class ProVoiceEngine(
             }
         }
 
+        /**
+         * Speech-Band Band-Pass Filter (300Hz to 3400Hz).
+         * Attenuates both low engine/bass rumble (<300Hz) and high cymbal/music hiss (>3400Hz)
+         * to protect speech detection and VAD from loud music and street noise.
+         */
+        class SpeechBandPassFilter(
+            val alphaHp: Float = 0.895f, // ~300Hz HPF at 16kHz
+            val alphaLp: Float = 0.572f  // ~3400Hz LPF at 16kHz
+        ) {
+            var prevHpX: Float = 0f
+            var prevHpY: Float = 0f
+            var prevLpY: Float = 0f
+
+            fun reset() {
+                prevHpX = 0f
+                prevHpY = 0f
+                prevLpY = 0f
+            }
+
+            fun apply(samples: ShortArray, count: Int): Double {
+                var sumSq = 0.0
+                var hpX = prevHpX
+                var hpY = prevHpY
+                var lpY = prevLpY
+                val aHp = alphaHp
+                val aLp = alphaLp
+
+                for (i in 0 until count) {
+                    val x = samples[i].toFloat()
+                    val yHp = aHp * (hpY + x - hpX)
+                    hpX = x
+                    hpY = yHp
+                    val yBpf = lpY + aLp * (yHp - lpY)
+                    lpY = yBpf
+                    sumSq += (yBpf * yBpf).toDouble()
+                }
+                prevHpX = hpX
+                prevHpY = hpY
+                prevLpY = lpY
+                return if (count > 0) Math.sqrt(sumSq / count) else 0.0
+            }
+
+            fun filterSamples(samples: ShortArray, count: Int): ShortArray {
+                val out = ShortArray(count)
+                var hpX = prevHpX
+                var hpY = prevHpY
+                var lpY = prevLpY
+                val aHp = alphaHp
+                val aLp = alphaLp
+
+                for (i in 0 until count) {
+                    val x = samples[i].toFloat()
+                    val yHp = aHp * (hpY + x - hpX)
+                    hpX = x
+                    hpY = yHp
+                    val yBpf = lpY + aLp * (yHp - lpY)
+                    lpY = yBpf
+                    out[i] = yBpf.toInt().coerceIn(-32768, 32767).toShort()
+                }
+                prevHpX = hpX
+                prevHpY = hpY
+                prevLpY = lpY
+                return out
+            }
+        }
+
         private val INCOMPLETE_FA_ENDINGS = setOf(
             "و", "که", "به", "با", "از", "رو", "را", "بگو", "بنویس", "بزار", "اممم", "اه", "خب", "برای", "در", "تا", "کن"
         )
@@ -210,6 +278,7 @@ class ProVoiceEngine(
     private var consecutiveZeroAudioFrames = 0
 
     private var audioRecord: AudioRecord? = null
+    private var acousticEchoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private var automaticGainControl: AutomaticGainControl? = null
 
@@ -437,7 +506,7 @@ class ProVoiceEngine(
                     preRollBuffer.clear()
                     utteranceStream.reset()
 
-                    val hpf = HighPassFilter300Hz(0.895f)
+                    val bpf = SpeechBandPassFilter(0.895f, 0.572f)
                     var liveNoiseFloor = 180.0
                     var speechStartTime = 0L
                     var lastSpeechTime = 0L
@@ -508,12 +577,12 @@ class ProVoiceEngine(
                             speechPeakRms = 0.0
                             silenceStartMs = 0L
                             flatNoiseChunks = 0
-                            hpf.reset()
+                            bpf.reset()
                             continue
                         }
 
-                        // Fix 1: Pass samples through 300Hz HPF for VAD and Mic Live Meter (unfiltered PCM kept for STT)
-                        val filteredRms = hpf.apply(readBuffer, readCount)
+                        // Fix 1: Pass samples through 300Hz-3400Hz SpeechBandPassFilter for VAD & Meter
+                        val filteredRms = bpf.apply(readBuffer, readCount)
 
                         // Fix 2: Continuously track rolling live noiseFloor (tracks even while listening)
                         if (filteredRms < liveNoiseFloor) {
@@ -572,8 +641,14 @@ class ProVoiceEngine(
                         }
 
                         if (!isUtteranceInProgress.get()) {
-                            // STANDBY mode: sensitive voice-band VAD threshold for conversational "Jarvis" outdoors
-                            val speechThreshold = maxOf(liveNoiseFloor * 1.30 + 75.0, 160.0)
+                            // STANDBY mode: sensitive voice-band VAD with Music-Active Anti-Loop Guard
+                            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                            val isMusicActive = (am?.isMusicActive == true) || JarvisLocalAudioPlayer.isPlaying()
+                            val speechThreshold = if (isMusicActive) {
+                                maxOf(liveNoiseFloor * 1.55 + 140.0, 320.0)
+                            } else {
+                                maxOf(liveNoiseFloor * 1.30 + 75.0, 160.0)
+                            }
                             val isChunkSpeech = filteredRms > speechThreshold
 
                             if (isChunkSpeech) {
@@ -582,9 +657,10 @@ class ProVoiceEngine(
                                 consecutiveSpeechChunks = maxOf(0, consecutiveSpeechChunks - 1)
                             }
 
-                            val isSpeechActive = consecutiveSpeechChunks >= 2 // >= 100-120ms
+                            val requiredSpeechChunks = if (isMusicActive) 3 else 2
+                            val isSpeechActive = consecutiveSpeechChunks >= requiredSpeechChunks
                             if (isSpeechActive) {
-                                // Wake onset detected! Include full 600ms pre-roll!
+                                // Wake onset detected! Include full 800ms pre-roll!
                                 isUtteranceInProgress.set(true)
                                 speechStartTime = now
                                 lastSpeechTime = now
@@ -668,14 +744,22 @@ class ProVoiceEngine(
                             }
 
                             // -------------------------------------------------------------
-                            // 2. Clean Silence or Flat Noise End-of-Speech (Fix 2)
+                            // 2. Clean Silence or Flat Noise End-of-Speech (Natural Human Pacing Endpointer)
                             // -------------------------------------------------------------
                             val hasSpokenMin = utteranceStream.size() >= (SAMPLE_RATE * 2 * 0.35)
-                            val silenceCutoff = if (isDirectTapToTalk) 1000L else if (!isConvMode) 450L else 600L
-                            val cleanSilenceEnd = hasSpokenMin && (silenceDuration >= silenceCutoff || isFlatNoise)
+                            val isIncomplete = isSemanticallyIncomplete(prevProbeTranscript)
+                            val silenceCutoff = if (isDirectTapToTalk) {
+                                if (isIncomplete) 2600L else 1350L
+                            } else if (isConvMode) {
+                                if (isIncomplete) 2600L else 1350L
+                            } else {
+                                650L
+                            }
+                            val flatNoiseMax = if (isConvMode || isDirectTapToTalk) 27 else 14 // 1350ms vs 700ms
+                            val cleanSilenceEnd = hasSpokenMin && (silenceDuration >= silenceCutoff || flatNoiseChunks >= flatNoiseMax)
 
                             if (cleanSilenceEnd && isUtteranceInProgress.get()) {
-                                Log.i(TAG, "End-of-speech triggered (silenceDur=${silenceDuration}ms, isFlatNoise=$isFlatNoise, peak=$speechPeakRms, floor=$liveNoiseFloor)")
+                                Log.i(TAG, "End-of-speech triggered (silenceDur=${silenceDuration}ms, cutoff=${silenceCutoff}ms, isIncomplete=$isIncomplete, flatNoiseChunks=$flatNoiseChunks)")
                                 val pcmData = utteranceStream.toByteArray()
                                 commitUtterance(pcmData, isConvMode, isDirectTapToTalk, null)
                                 continue
@@ -948,8 +1032,17 @@ class ProVoiceEngine(
 
     private fun attachHardwareEffects(audioSessionId: Int) {
         try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                acousticEchoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply { enabled = true }
+                Log.i(TAG, "Hardware AcousticEchoCanceler enabled on audio session $audioSessionId")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "AcousticEchoCanceler attach error: ${e.message}")
+        }
+        try {
             if (NoiseSuppressor.isAvailable()) {
                 noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply { enabled = true }
+                Log.i(TAG, "Hardware NoiseSuppressor enabled on audio session $audioSessionId")
             }
         } catch (e: Exception) {
             Log.w(TAG, "NoiseSuppressor attach error: ${e.message}")
@@ -957,6 +1050,7 @@ class ProVoiceEngine(
         try {
             if (AutomaticGainControl.isAvailable()) {
                 automaticGainControl = AutomaticGainControl.create(audioSessionId)?.apply { enabled = true }
+                Log.i(TAG, "Hardware AutomaticGainControl enabled on audio session $audioSessionId")
             }
         } catch (e: Exception) {
             Log.w(TAG, "AutomaticGainControl attach error: ${e.message}")
@@ -964,6 +1058,10 @@ class ProVoiceEngine(
     }
 
     private fun releaseAudioRecord() {
+        try {
+            acousticEchoCanceler?.release()
+            acousticEchoCanceler = null
+        } catch (_: Exception) {}
         try {
             noiseSuppressor?.release()
             noiseSuppressor = null

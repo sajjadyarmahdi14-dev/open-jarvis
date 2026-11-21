@@ -109,6 +109,38 @@ object DeviceController {
         return matchedNumber
     }
 
+    fun sendSmsDirect(context: Context, contactOrNumber: String, message: String): Boolean {
+        var num = contactOrNumber.trim()
+        val isDigits = num.replace(" ", "").replace("-", "").replace("+", "").all { it.isDigit() }
+        if (!isDigits) {
+            num = findContactNumber(context, num) ?: num
+        }
+        val cleanPhone = num.replace(" ", "").replace("-", "")
+
+        val hasSendSmsPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED
+        if (hasSendSmsPermission && cleanPhone.any { it.isDigit() }) {
+            try {
+                @Suppress("DEPRECATION")
+                val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    context.getSystemService(SmsManager::class.java)
+                } else {
+                    SmsManager.getDefault()
+                }
+                val parts = smsManager.divideMessage(message)
+                if (parts.size > 1) {
+                    smsManager.sendMultipartTextMessage(cleanPhone, null, parts, null, null)
+                } else {
+                    smsManager.sendTextMessage(cleanPhone, null, message, null, null)
+                }
+                Log.i(TAG, "SMS sent silently in background via SmsManager to $cleanPhone")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "Direct SmsManager failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
     fun sendSms(context: Context, contactOrNumber: String, message: String) {
         var num = contactOrNumber.trim()
         val isDigits = num.replace(" ", "").replace("-", "").replace("+", "").all { it.isDigit() }

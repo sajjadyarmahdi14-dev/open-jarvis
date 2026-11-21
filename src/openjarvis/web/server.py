@@ -228,6 +228,7 @@ CORE_SYSTEM_PROMPT = """\
 You are J.A.R.V.I.S., the hyper-intelligent British AI assistant inspired by Iron Man, running natively on Android with direct hardware and OS omni-control.
 LANGUAGE RULE: You are fully multilingual. You MUST automatically detect the language of the user's input and respond in the EXACT same language. If the user speaks Persian, reply entirely in Persian. If the user speaks English, reply entirely in English.
 LANGUAGE OVERRIDE: If the user explicitly commands you to change your language (e.g., 'From now on speak English', 'فارسی حرف بزن'), you must acknowledge the command in the requested language and use that language for all future responses until instructed otherwise.
+BACKGROUND-FIRST POLICY: Execute actions (setting timers, alarms, media playback, toggling device settings, sending direct SMS) natively and silently in the background without launching external OEM apps, unless the user explicitly commands to open an app (e.g., 'open clock', 'open messages').
 """
 
 _cached_agent = None
@@ -3194,8 +3195,34 @@ _voice_session: Dict[str, Any] = {
 }
 
 
+def _speech_bandpass_filter(shorts: tuple[int, ...] | list[int], framerate: int = 16000) -> list[int]:
+    """Apply gentle speech-band filter (300Hz-3400Hz) to attenuate bass rumble and high hiss."""
+    if not shorts or framerate < 8000:
+        return list(shorts)
+    import math
+    dt = 1.0 / framerate
+    rc_hp = 1.0 / (2.0 * math.pi * 300.0)
+    alpha_hp = rc_hp / (rc_hp + dt)
+    rc_lp = 1.0 / (2.0 * math.pi * 3400.0)
+    alpha_lp = dt / (rc_lp + dt)
+
+    out = []
+    prev_hp_x = 0.0
+    prev_hp_y = 0.0
+    prev_lp_y = 0.0
+    for s in shorts:
+        x = float(s)
+        y_hp = alpha_hp * (prev_hp_y + x - prev_hp_x)
+        prev_hp_x = x
+        prev_hp_y = y_hp
+        y_lp = prev_lp_y + alpha_lp * (y_hp - prev_lp_y)
+        prev_lp_y = y_lp
+        out.append(max(-32768, min(32767, int(y_lp))))
+    return out
+
+
 def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
-    """Calculate duration, RMS, and return peak-normalized WAV (Fix 2: 2)."""
+    """Calculate duration, RMS, and return bandpass-filtered and peak-normalized WAV (Fix 1 & Fix 2)."""
     try:
         import wave, io, math, struct
         try:
@@ -3212,27 +3239,28 @@ def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
             return wav_bytes, duration, 0.0
 
         count = len(frames) // 2
-        shorts = struct.unpack(f"<{count}h", frames[:count * 2])
+        raw_shorts = struct.unpack(f"<{count}h", frames[:count * 2])
         if count == 0:
             return wav_bytes, duration, 0.0
 
+        # Apply 300Hz-3400Hz speech-band BPF to remove rumble and high hiss
+        shorts = _speech_bandpass_filter(raw_shorts, framerate)
+
         rms = math.sqrt(sum(s * s for s in shorts) / count)
-        peak = max(abs(s) for s in shorts)
+        peak = max(abs(s) for s in shorts) if shorts else 0
 
         # Peak normalization: if 80 < peak < 18000, boost linearly to ~24000 (-2.5 dBFS)
-        if 80 < peak < 18000:
-            gain = min(15.0, 24000.0 / peak)
-            clamped = [max(-32768, min(32767, int(s * gain))) for s in shorts]
-            norm_frames = struct.pack(f"<{count}h", *clamped)
-            norm_rms = math.sqrt(sum(s * s for s in clamped) / count)
-            out_buf = io.BytesIO()
-            with wave.open(out_buf, "wb") as out_w:
-                out_w.setparams(params)
-                out_w.writeframes(norm_frames)
+        gain = min(15.0, 24000.0 / peak) if 80 < peak < 18000 else 1.0
+        clamped = [max(-32768, min(32767, int(s * gain))) for s in shorts]
+        norm_frames = struct.pack(f"<{count}h", *clamped)
+        norm_rms = math.sqrt(sum(s * s for s in clamped) / count)
+        out_buf = io.BytesIO()
+        with wave.open(out_buf, "wb") as out_w:
+            out_w.setparams(params)
+            out_w.writeframes(norm_frames)
+        if gain > 1.01:
             logger.info("Server audio normalized: peak %d -> 24000, rms %.1f -> %.1f (gain=%.2f)", peak, rms, norm_rms, gain)
-            return out_buf.getvalue(), duration, norm_rms
-
-        return wav_bytes, duration, rms
+        return out_buf.getvalue(), duration, norm_rms
     except Exception as e:
         logger.debug("Audio normalization skipped: %s", e)
         return wav_bytes, 0.0, 0.0
