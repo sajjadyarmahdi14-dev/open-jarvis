@@ -3,12 +3,15 @@ package com.sajjad.jarvis
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.NotificationManager
+import android.app.admin.DevicePolicyManager
 import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import com.sajjad.jarvis.security.JarvisDeviceAdminReceiver
+import com.sajjad.jarvis.security.SecurityProtocolEngine
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -1635,6 +1638,18 @@ private fun JarvisSettingsDialog(
     var diagnosticTitle by remember { mutableStateOf<String?>(null) }
     var diagnosticMessage by remember { mutableStateOf<String?>(null) }
 
+    var passphraseText by remember { mutableStateOf(SecurityProtocolEngine.getPlainPassphrase(context)) }
+    var pinText by remember { mutableStateOf(SecurityProtocolEngine.getLockscreenPin(context)) }
+    var isPassphraseVisible by remember { mutableStateOf(false) }
+    var telegramBotTokenText by remember {
+        mutableStateOf(prefs.getString("security_telegram_token", "") ?: "")
+    }
+    var telegramChatIdText by remember {
+        mutableStateOf(prefs.getString("security_telegram_chat_id", "") ?: "")
+    }
+    var isTestingTelegram by remember { mutableStateOf(false) }
+    var isAdminActiveState by remember { mutableStateOf(JarvisDeviceAdminReceiver.isAdminActive(context)) }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             color = DarkCard,
@@ -2324,9 +2339,237 @@ private fun JarvisSettingsDialog(
                     )
                 }
 
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.25f))
+
+                // 🛡️ Anti-Theft & Security Vault Section
+                Text(
+                    text = "🛡️ ANTI-THEFT & SECURITY VAULT",
+                    color = CyanNeon,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                // Secret Passphrase
+                Column {
+                    Text(text = "Secret Voice Passphrase (Unlock & Disarm)", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = passphraseText,
+                        onValueChange = { passphraseText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("e.g. 1403 or ironman", color = TextSecondary.copy(alpha = 0.5f), fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyanNeon,
+                            unfocusedBorderColor = CyanNeon.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = CyanNeon
+                        )
+                    )
+                }
+
+                // Lockscreen PIN
+                Column {
+                    Text(text = "Lockscreen PIN / Password (Auto Screen Unlock)", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = pinText,
+                        onValueChange = { pinText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        visualTransformation = if (isPassphraseVisible) androidx.compose.ui.text.input.VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { isPassphraseVisible = !isPassphraseVisible }) {
+                                Icon(
+                                    imageVector = if (isPassphraseVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = "Toggle PIN visibility",
+                                    tint = TextSecondary
+                                )
+                            }
+                        },
+                        placeholder = { Text("e.g. 1234", color = TextSecondary.copy(alpha = 0.5f), fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyanNeon,
+                            unfocusedBorderColor = CyanNeon.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = CyanNeon
+                        )
+                    )
+                }
+
+                // Device Admin Permission Button
+                Button(
+                    onClick = {
+                        if (!isAdminActiveState) {
+                            try {
+                                val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                    putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, JarvisDeviceAdminReceiver.getComponentName(context))
+                                    putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Enables instant screen lock & intruder detection upon failed unlock.")
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Could not open Device Admin settings: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isAdminActiveState) Color(0xFF064E3B) else DarkSurface
+                    ),
+                    border = BorderStroke(0.8.dp, if (isAdminActiveState) Color(0xFF10B981) else CyanNeon.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (isAdminActiveState) "✓ Device Admin Active (Screen Lock & Intruder Alert)" else "🛡️ Activate Device Admin (Screen Lock & Intruder Alert)",
+                        color = if (isAdminActiveState) Color(0xFF34D399) else CyanNeon,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                // Telegram Bot Vault Forwarder
+                Column {
+                    Text(text = "Telegram Forwarder Bot Token", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = telegramBotTokenText,
+                        onValueChange = { telegramBotTokenText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("e.g. 123456:ABC-DEF...", color = TextSecondary.copy(alpha = 0.5f), fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyanNeon,
+                            unfocusedBorderColor = CyanNeon.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = CyanNeon
+                        )
+                    )
+                }
+
+                Column {
+                    Text(text = "Telegram Forwarder Chat ID", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = telegramChatIdText,
+                        onValueChange = { telegramChatIdText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("e.g. 123456789", color = TextSecondary.copy(alpha = 0.5f), fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyanNeon,
+                            unfocusedBorderColor = CyanNeon.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = CyanNeon
+                        )
+                    )
+                }
+
+                // Test Telegram Vault Button
+                Button(
+                    onClick = {
+                        if (telegramBotTokenText.isBlank() || telegramChatIdText.isBlank()) {
+                            Toast.makeText(context, "Enter both Bot Token and Chat ID first!", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        isTestingTelegram = true
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                val server = urlText.trim().removeSuffix("/")
+                                val u = URL("$server/api/security/telegram/config")
+                                val conn = (u.openConnection() as HttpURLConnection).apply {
+                                    requestMethod = "POST"
+                                    doOutput = true
+                                    setRequestProperty("Content-Type", "application/json")
+                                    connectTimeout = 8000
+                                    readTimeout = 8000
+                                }
+                                val payload = JSONObject().apply {
+                                    put("bot_token", telegramBotTokenText.trim())
+                                    put("chat_id", telegramChatIdText.trim())
+                                    put("enabled", true)
+                                    put("test", true)
+                                }
+                                conn.outputStream.bufferedWriter().use { it.write(payload.toString()) }
+                                val code = conn.responseCode
+                                val ok = code in 200..299
+                                val respStr = try {
+                                    if (ok) conn.inputStream.bufferedReader().use { it.readText() }
+                                    else conn.errorStream.bufferedReader().use { it.readText() }
+                                } catch (_: Exception) { "" }
+                                conn.disconnect()
+                                withContext(Dispatchers.Main) {
+                                    isTestingTelegram = false
+                                    if (ok) {
+                                        Toast.makeText(context, "⚡ Telegram Vault test passed! Check your Telegram.", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        Toast.makeText(context, "Telegram test failed: $respStr", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    isTestingTelegram = false
+                                    Toast.makeText(context, "Connection error: ${e.message}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(0.8.dp, CyanNeon.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isTestingTelegram
+                ) {
+                    Text(
+                        text = if (isTestingTelegram) "⚡ Testing Telegram Vault..." else "⚡ Test Telegram Vault Forwarder",
+                        color = CyanNeon,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.25f))
+
                 // Save Button
                 Button(
-                    onClick = { onSave(urlText, modelText, apiKeyText) },
+                    onClick = {
+                        SecurityProtocolEngine.setPassphrase(context, passphraseText)
+                        SecurityProtocolEngine.setLockscreenPin(context, pinText)
+                        prefs.edit()
+                            .putString("security_telegram_token", telegramBotTokenText.trim())
+                            .putString("security_telegram_chat_id", telegramChatIdText.trim())
+                            .apply()
+
+                        if (telegramBotTokenText.isNotBlank() && telegramChatIdText.isNotBlank()) {
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    val server = urlText.trim().removeSuffix("/")
+                                    val u = URL("$server/api/security/telegram/config")
+                                    val conn = (u.openConnection() as HttpURLConnection).apply {
+                                        requestMethod = "POST"
+                                        doOutput = true
+                                        setRequestProperty("Content-Type", "application/json")
+                                        connectTimeout = 5000
+                                        readTimeout = 5000
+                                    }
+                                    val payload = JSONObject().apply {
+                                        put("bot_token", telegramBotTokenText.trim())
+                                        put("chat_id", telegramChatIdText.trim())
+                                        put("enabled", true)
+                                        put("test", false)
+                                    }
+                                    conn.outputStream.bufferedWriter().use { it.write(payload.toString()) }
+                                    conn.responseCode
+                                    conn.disconnect()
+                                } catch (_: Exception) {}
+                            }
+                        }
+                        onSave(urlText, modelText, apiKeyText)
+                    },
                     colors = ButtonDefaults.buttonColors(containerColor = CyanNeon),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()

@@ -221,6 +221,24 @@
             </intent-filter>
         </receiver>
 
+        <!-- Iron Man Anti-Theft Device Admin Receiver -->
+        <receiver
+            android:name=".security.JarvisDeviceAdminReceiver"
+            android:label="JARVIS Anti-Theft Protection"
+            android:description="@string/device_admin_description"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policy" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLED" />
+                <action android:name="android.app.action.ACTION_PASSWORD_FAILED" />
+                <action android:name="android.app.action.ACTION_PASSWORD_SUCCEEDED" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

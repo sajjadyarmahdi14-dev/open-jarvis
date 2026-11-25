@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 import json
 import logging
@@ -534,7 +534,7 @@ def _handle_fast_path(
 ) -> Optional[Dict[str, Any]]:
     """Instant local fast-path (<50ms) for high-frequency direct Android commands and greetings."""
     import re
-    from datetime import datetime
+    from datetime import datetime, timezone
     from openjarvis.tools.android_tools import (
         AndroidBatteryTool,
         AndroidLaunchAppTool,
@@ -2382,7 +2382,7 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
     if detected_photo_target or any(k in req.message.lower() for k in ["photo of", "picture of", "image of", "عکس"]):
         try:
             from openjarvis.web_intel import search_images, web_search, format_search_context
-            from datetime import datetime
+            from datetime import datetime, timezone
             query_target = detected_photo_target or req.message
             today_str = datetime.now().strftime("%Y-%m-%d")
             found_images = await search_images(query_target, max_results=3)
@@ -2616,7 +2616,7 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
         if detected_photo_target or any(k in req.message.lower() for k in ["photo of", "picture of", "image of", "عکس"]):
             try:
                 from openjarvis.web_intel import search_images, web_search, format_search_context
-                from datetime import datetime
+                from datetime import datetime, timezone
                 query_target = detected_photo_target or req.message
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 found_stream_images = await search_images(query_target, max_results=3)
@@ -3168,6 +3168,132 @@ async def vision_live_endpoint(req: LiveVisionRequest, request: Request = None):
         "prompt": user_prompt,
         "foreground_app": req.foreground_app,
         "status": "success",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Iron Man Anti-Theft & Security Evidence Vault Endpoints
+# ---------------------------------------------------------------------------
+
+class SecurityLocationRequest(BaseModel):
+    latitude: float
+    longitude: float
+    accuracy: Optional[float] = None
+    speed: Optional[float] = None
+    battery: Optional[int] = None
+    device_id: Optional[str] = None
+
+
+class SecurityTelegramConfigRequest(BaseModel):
+    bot_token: str
+    chat_id: str
+    enabled: Optional[bool] = True
+    test: Optional[bool] = False
+
+
+class SecurityCommandRequest(BaseModel):
+    command: str
+    parameters: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/security/evidence")
+async def security_evidence_endpoint(
+    file: UploadFile = File(...),
+    evidence_type: str = Form("audio"),
+    session_id: Optional[str] = Form(None),
+    battery: Optional[int] = Form(None),
+    latitude: Optional[float] = Form(None),
+    longitude: Optional[float] = Form(None),
+):
+    """Store silent photo or 5s rolling audio evidence and forward to Telegram."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+    vault = SecurityEvidenceVault.get_instance()
+    file_bytes = await file.read()
+    metadata = {
+        "session_id": session_id,
+        "battery": battery,
+        "latitude": latitude,
+        "longitude": longitude,
+        "received_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = vault.save_evidence(
+        file_bytes=file_bytes,
+        filename=file.filename or f"evidence_{int(time.time())}",
+        evidence_type=evidence_type,
+        metadata=metadata,
+    )
+    return result
+
+
+@app.post("/api/security/location")
+async def security_location_endpoint(req: SecurityLocationRequest):
+    """Record location breadcrumb and forward pin + map link to Telegram."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+    vault = SecurityEvidenceVault.get_instance()
+    result = vault.save_location(req.model_dump())
+    return result
+
+
+@app.post("/api/security/telegram/config")
+async def security_telegram_config_endpoint(req: SecurityTelegramConfigRequest):
+    """Save Telegram bot token & chat_id, and optionally trigger test ping."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+    vault = SecurityEvidenceVault.get_instance()
+    status = vault.save_telegram_config(
+        bot_token=req.bot_token,
+        chat_id=req.chat_id,
+        enabled=req.enabled if req.enabled is not None else True,
+    )
+    if req.test:
+        test_res = await vault.test_telegram_connection()
+        status["test_result"] = test_res
+    if req.bot_token and req.chat_id:
+        try:
+            vault.start_polling_loop()
+        except Exception:
+            pass
+    return status
+
+
+@app.get("/api/security/telegram/status")
+async def security_telegram_status_endpoint():
+    """Get Telegram alert forwarder status."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+    vault = SecurityEvidenceVault.get_instance()
+    return vault.get_telegram_status()
+
+
+@app.get("/api/security/commands")
+async def security_get_commands_endpoint(pop: bool = True):
+    """Fetch pending remote security commands dispatched via Telegram bot."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+    vault = SecurityEvidenceVault.get_instance()
+    if pop:
+        cmds = vault.pop_pending_commands()
+    else:
+        cmds = vault.peek_pending_commands()
+    return {"commands": cmds, "count": len(cmds)}
+
+
+@app.post("/api/security/command")
+async def security_dispatch_command_endpoint(req: SecurityCommandRequest):
+    """Queue a security command for the client device."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+    vault = SecurityEvidenceVault.get_instance()
+    cmd_obj = vault.add_pending_command(req.command, req.parameters)
+    return {"status": "queued", "command": cmd_obj}
+
+
+@app.get("/api/security/status")
+async def security_status_endpoint():
+    """Summary of security vault."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+    vault = SecurityEvidenceVault.get_instance()
+    return {
+        "status": "active",
+        "vault_dir": vault.base_dir,
+        "telegram": vault.get_telegram_status(),
+        "pending_commands_count": len(vault.peek_pending_commands()),
     }
 
 

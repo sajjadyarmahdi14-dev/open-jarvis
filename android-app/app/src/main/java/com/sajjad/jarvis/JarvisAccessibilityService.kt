@@ -11,11 +11,13 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.sajjad.jarvis.security.SecurityProtocolEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -87,8 +89,166 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
+    private var lastLockdownActionTime = 0L
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Active event stream receiver
+        if (event == null) return
+
+        // Anti-Power-Off & Anti-QuickSettings Tamper Shield during Iron Man Lockdown
+        if (SecurityProtocolEngine.isLockdownActive) {
+            handleLockdownTamperShield(event)
+        }
+    }
+
+    private fun handleLockdownTamperShield(event: AccessibilityEvent) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLockdownActionTime < 350L) return
+
+        val eventType = event.eventType
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            return
+        }
+
+        val pkg = event.packageName?.toString() ?: ""
+        val cls = event.className?.toString() ?: ""
+
+        val texts = mutableListOf<String>()
+        event.text?.forEach { texts.add(it.toString()) }
+        event.contentDescription?.let { texts.add(it.toString()) }
+        val textBlob = texts.joinToString(" ").lowercase(Locale.ROOT)
+
+        val isSystemUi = pkg.contains("systemui", ignoreCase = true) || pkg.contains("android", ignoreCase = true)
+
+        val isPowerMenu = cls.contains("GlobalActions", ignoreCase = true) ||
+                cls.contains("PowerDialog", ignoreCase = true) ||
+                cls.contains("Shutdown", ignoreCase = true) ||
+                textBlob.contains("power off") ||
+                textBlob.contains("restart") ||
+                textBlob.contains("reboot") ||
+                textBlob.contains("خاموش") ||
+                textBlob.contains("راه‌اندازی مجدد") ||
+                textBlob.contains("ریستارت")
+
+        val isQuickSettings = cls.contains("NotificationPanelView", ignoreCase = true) ||
+                cls.contains("NotificationShade", ignoreCase = true) ||
+                cls.contains("QSPanel", ignoreCase = true) ||
+                cls.contains("QuickStatusBar", ignoreCase = true) ||
+                cls.contains("QSContainer", ignoreCase = true) ||
+                textBlob.contains("airplane mode") ||
+                textBlob.contains("flight mode") ||
+                textBlob.contains("حالت پرواز") ||
+                textBlob.contains("حالت هواپیما") ||
+                textBlob.contains("quick settings") ||
+                textBlob.contains("تنظیمات سریع")
+
+        if (isPowerMenu || (isSystemUi && isQuickSettings)) {
+            Log.w(TAG, "Tamper Shield: Slamming shut power menu / quick settings during lockdown!")
+            lastLockdownActionTime = now
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            serviceScope.launch {
+                delay(100L)
+                performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+            }
+        }
+    }
+
+    /**
+     * Unlocks device screen by swiping up and entering PIN via accessibility node injection or digit keypad taps.
+     */
+    fun unlockWithPin(pin: String): Boolean {
+        val dm = resources.displayMetrics
+        val startY = dm.heightPixels * 0.82f
+        val endY = dm.heightPixels * 0.20f
+        val centerX = dm.widthPixels * 0.50f
+
+        val path = Path().apply {
+            moveTo(centerX, startY)
+            lineTo(centerX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 250)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        dispatchGesture(gesture, null, null)
+        Log.i(TAG, "unlockWithPin: dispatched swipe-up gesture")
+
+        if (pin.isBlank()) return true
+
+        serviceScope.launch {
+            delay(500L)
+            val root = rootInActiveWindow
+
+            // 1. Try finding editable text field (Password / PIN input)
+            val inputNode = findEditableNode(root)
+            if (inputNode != null) {
+                val args = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, pin)
+                }
+                inputNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                delay(200L)
+                findNodeByPredicate(rootInActiveWindow) { n ->
+                    val t = (n.text?.toString() ?: "") + " " + (n.contentDescription?.toString() ?: "")
+                    t.equals("enter", ignoreCase = true) || t.equals("ok", ignoreCase = true) ||
+                            t.equals("done", ignoreCase = true) || t.contains("ورود") || t.contains("تایید")
+                }?.let { clickNodeOrParent(it) }
+                return@launch
+            }
+
+            // 2. Fallback: Digit keypad buttons
+            for (ch in pin) {
+                val digitStr = ch.toString()
+                val digitNode = findNodeByPredicate(rootInActiveWindow) { n ->
+                    val t = n.text?.toString()?.trim() ?: ""
+                    val d = n.contentDescription?.toString()?.trim() ?: ""
+                    t == digitStr || d == digitStr || d.startsWith(digitStr)
+                }
+                if (digitNode != null) {
+                    clickNodeOrParent(digitNode)
+                }
+                delay(120L)
+            }
+            delay(200L)
+            findNodeByPredicate(rootInActiveWindow) { n ->
+                val t = (n.text?.toString() ?: "") + " " + (n.contentDescription?.toString() ?: "")
+                t.equals("enter", ignoreCase = true) || t.equals("ok", ignoreCase = true) ||
+                        t.equals("done", ignoreCase = true) || t.contains("ورود") || t.contains("تایید")
+            }?.let { clickNodeOrParent(it) }
+        }
+        return true
+    }
+
+    /**
+     * Toggles Wi-Fi or Mobile Data via Connectivity Panel automation.
+     */
+    fun toggleQuickSettingOrConnectivity(target: String): Boolean {
+        try {
+            DeviceController.openConnectivityPanel(this)
+            serviceScope.launch {
+                delay(600L)
+                val root = rootInActiveWindow
+                val toggle = findNodeByPredicate(root) { node ->
+                    val text = (node.text?.toString() ?: "") + " " + (node.contentDescription?.toString() ?: "")
+                    if (target == "wifi") {
+                        text.contains("Wi‑Fi", ignoreCase = true) ||
+                                text.contains("Wi-Fi", ignoreCase = true) ||
+                                text.contains("وای فای", ignoreCase = true) ||
+                                text.contains("وای‌فای", ignoreCase = true)
+                    } else {
+                        text.contains("Mobile data", ignoreCase = true) ||
+                                text.contains("داده همراه", ignoreCase = true) ||
+                                text.contains("اینترنت همراه", ignoreCase = true) ||
+                                text.contains("دیتا", ignoreCase = true)
+                    }
+                }
+                if (toggle != null) {
+                    clickNodeOrParent(toggle)
+                    Log.i(TAG, "toggleQuickSettingOrConnectivity: clicked toggle for $target")
+                }
+            }
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "toggleQuickSettingOrConnectivity failed: ${e.message}")
+            return false
+        }
     }
 
     override fun onInterrupt() {

@@ -13,9 +13,11 @@ import android.provider.CalendarContract
 import android.util.Log
 import com.sajjad.jarvis.AppLauncher
 import com.sajjad.jarvis.DeviceController
+import com.sajjad.jarvis.JarvisAccessibilityService
 import com.sajjad.jarvis.JarvisCameraActivity
 import com.sajjad.jarvis.LocalCommandRouter.LocalRouteResult
 import com.sajjad.jarvis.ProtocolEngine
+import com.sajjad.jarvis.security.SecurityProtocolEngine
 import com.sajjad.jarvis.router.NlpNormalizer
 import com.sajjad.jarvis.timer.JarvisAlarmReceiver
 import com.sajjad.jarvis.timer.JarvisBackgroundTimerService
@@ -104,6 +106,12 @@ object UtilityDomain {
         // ---------------------------------------------------------------------
         val telemRes = handleTelemetry(context, lower, norm, isFa)
         if (telemRes.handled) return telemRes
+
+        // ---------------------------------------------------------------------
+        // 7.5 Anti-Theft & Iron Man Security Protocols & Evidence Suite
+        // ---------------------------------------------------------------------
+        val secRes = handleSecurityProtocols(context, clean, lower, norm, isFa)
+        if (secRes.handled) return secRes
 
         // ---------------------------------------------------------------------
         // 8. Iron Man Protocols
@@ -565,6 +573,126 @@ object UtilityDomain {
                 else "No network connection detected, sir."
             }
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "telemetry_connectivity")
+        }
+
+        return LocalRouteResult(handled = false)
+    }
+
+    // =========================================================================
+    // Iron Man Anti-Theft & Security Protocols Suite
+    // =========================================================================
+    private fun handleSecurityProtocols(
+        context: Context,
+        clean: String,
+        lower: String,
+        norm: String,
+        isFa: Boolean
+    ): LocalRouteResult {
+        // Protocol 1: Lock Phone
+        if (norm.contains("lock my phone") || norm.contains("lock the phone") || norm.contains("lock phone") ||
+            norm.contains("lock screen") || norm.contains("قفل کن") || norm.contains("گوشیم رو قفل کن") ||
+            norm.contains("گوشی رو قفل کن") || norm.contains("صفحه رو قفل کن") || norm.contains("قفل کردن گوشی")
+        ) {
+            SecurityProtocolEngine.lockPhone(context, isFa)
+            val reply = if (isFa) "دستگاه قفل شد قربان." else "Device locked, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "security_lock")
+        }
+
+        // Protocol 2: All Systems Down
+        if (norm.contains("all systems down") || norm.contains("shutdown all systems") ||
+            norm.contains("تمام سیستم‌ها خاموش") || norm.contains("تمام سیستمها خاموش") ||
+            norm.contains("پروتکل خاموشی کامل") || norm.contains("پروتکل خاموشی")
+        ) {
+            SecurityProtocolEngine.executeAllSystemsDown(context, isFa)
+            return LocalRouteResult(handled = true, category = "security_all_systems_down")
+        }
+
+        // Protocol 3: Protocol Blackbox / Red Alert
+        if (norm.contains("protocol blackbox") || norm.contains("blackbox protocol") ||
+            norm.contains("red alert") || norm.contains("blackbox") ||
+            norm.contains("جعبه سیاه") || norm.contains("پروتکل جعبه سیاه") ||
+            norm.contains("پروتکل ضد سرقت") || norm.contains("وضعیت قرمز")
+        ) {
+            SecurityProtocolEngine.executeBlackboxProtocol(context, isFa)
+            return LocalRouteResult(handled = true, category = "security_blackbox")
+        }
+
+        // Protocol 4: Protocol Siren
+        if (norm.contains("protocol siren") || norm.contains("siren protocol") ||
+            norm.contains("activate siren") || norm.contains("alarm siren") ||
+            norm.contains("پروتکل آژیر") || norm.contains("آژیر خطر") ||
+            norm.contains("آژیر پلیس") || norm.contains("روشن کردن آژیر")
+        ) {
+            SecurityProtocolEngine.executeSirenProtocol(context, isFa)
+            return LocalRouteResult(handled = true, category = "security_siren")
+        }
+
+        // Protocol 5: Voice Screen Unlock
+        if (norm.contains("unlock my phone") || norm.contains("unlock the phone") ||
+            norm.contains("unlock phone") || norm.contains("unlock device") ||
+            norm.contains("قفل گوشی رو باز کن") || norm.contains("قفل گوشیم رو باز کن") ||
+            norm.contains("گوشیم رو باز کن") || norm.contains("قفل رو باز کن") ||
+            norm.contains("باز کردن قفل")
+        ) {
+            SecurityProtocolEngine.requestUnlockPhone(context, isFa)
+            return LocalRouteResult(handled = true, category = "security_unlock_request")
+        }
+
+        // Protocol 6: Protocol Stand Down
+        if (norm.contains("protocol stand down") || norm.contains("stand down protocol") ||
+            norm.contains("stand down") || norm.contains("لغو وضعیت اضطراری") ||
+            norm.contains("همه چیز عادیه") || norm.contains("همه چی عادیه") ||
+            norm.contains("غیرفعال کردن پروتکل")
+        ) {
+            SecurityProtocolEngine.requestStandDown(context, isFa)
+            return LocalRouteResult(handled = true, category = "security_standdown_request")
+        }
+
+        // Ad-hoc 1: Silent Evidence Photo Capture & Vault Upload
+        if (norm.contains("عکس دزد") || norm.contains("عکس بگیر بفرست") ||
+            norm.contains("عکس مخفیانه") || norm.contains("بیصدا عکس بگیر") ||
+            norm.contains("بی صدا عکس بگیر") || norm.contains("بی‌صدا عکس بگیر") ||
+            norm.contains("silent photo") || norm.contains("silent picture") ||
+            norm.contains("intruder photo")
+        ) {
+            SecurityProtocolEngine.captureBothSilentPhotosAndUpload(context, reason = "ad_hoc_command")
+            val reply = if (isFa) "عکس مخفیانه ثبت و به صندوق امنیتی ارسال شد قربان." else "Silent photos captured and uploaded to security vault, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "security_silent_photo")
+        }
+
+        // Ad-hoc 2: 5-Second Rolling Audio Evidence Vault Loop
+        if (norm.contains("هر ۵ ثانیه صدا") || norm.contains("هر 5 ثانیه صدا") ||
+            norm.contains("ضبط صدا بفرست") || norm.contains("حلقه ضبط صدا") ||
+            norm.contains("شروع ضبط امنیتی") || norm.contains("audio evidence loop") ||
+            norm.contains("rolling audio")
+        ) {
+            SecurityProtocolEngine.startRollingAudioEvidenceLoop(context)
+            val reply = if (isFa) "حلقه ضبط امنیتی هر ۵ ثانیه فعال گردید قربان." else "Rolling 5-second audio evidence loop activated, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "security_audio_loop")
+        }
+
+        // Connectivity automation: Wi-Fi toggle
+        if (norm.contains("روشن کن وای فای") || norm.contains("وای فای رو روشن کن") ||
+            norm.contains("روشن کردن وای فای") || norm.contains("روشن کن وای‌فای") ||
+            norm.contains("وای‌فای رو روشن کن") || norm.contains("turn on wifi") ||
+            norm.contains("enable wifi")
+        ) {
+            JarvisAccessibilityService.instance?.toggleQuickSettingOrConnectivity("wifi")
+                ?: DeviceController.openConnectivityPanel(context)
+            val reply = if (isFa) "در حال روشن کردن وای‌فای قربان." else "Toggling Wi-Fi connectivity, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "quick_settings_wifi")
+        }
+
+        // Connectivity automation: Mobile Data toggle
+        if (norm.contains("روشن کن دیتا") || norm.contains("دیتا رو روشن کن") ||
+            norm.contains("روشن کردن دیتا") || norm.contains("داده همراه رو روشن کن") ||
+            norm.contains("اینترنت همراه رو روشن کن") || norm.contains("turn on mobile data") ||
+            norm.contains("turn on data") || norm.contains("enable mobile data")
+        ) {
+            JarvisAccessibilityService.instance?.toggleQuickSettingOrConnectivity("data")
+                ?: DeviceController.openConnectivityPanel(context)
+            val reply = if (isFa) "در حال روشن کردن داده همراه قربان." else "Toggling Mobile Data connectivity, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "quick_settings_data")
         }
 
         return LocalRouteResult(handled = false)

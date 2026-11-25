@@ -20,4 +20,5 @@
     <string name="voice_action_unmute">Unmute</string>
     <string name="voice_action_stop">Stop</string>
     <string name="accessibility_service_desc">Enables J.A.R.V.I.S. deep in-app automation, screen reading, typing, camera shutter clicks, and UI navigation.</string>
+    <string name="device_admin_description">Iron Man Anti-Theft Protection: monitors failed unlock attempts, captures intruder photos, and locks the screen.</string>
 </resources>

@@ -9,6 +9,7 @@ import com.sajjad.jarvis.router.domains.NotificationDomain
 import com.sajjad.jarvis.router.domains.PhoneDomain
 import com.sajjad.jarvis.router.domains.SystemAndAppDomain
 import com.sajjad.jarvis.router.domains.UtilityDomain
+import com.sajjad.jarvis.security.SecurityProtocolEngine
 import org.json.JSONObject
 import java.util.Locale
 
@@ -42,6 +43,17 @@ object LocalCommandRouter {
         val lower = clean.lowercase(Locale.ROOT)
 
         try {
+            // Security Protocol Passphrase Interception (Screen Unlock / Stand Down)
+            val secState = SecurityProtocolEngine.currentState
+            if (secState == SecurityProtocolEngine.SecurityState.AWAITING_PASSPHRASE_FOR_UNLOCK) {
+                SecurityProtocolEngine.handlePassphraseForUnlock(context, clean, isFa)
+                return LocalRouteResult(handled = true, category = "security_unlock_passphrase")
+            }
+            if (secState == SecurityProtocolEngine.SecurityState.AWAITING_PASSPHRASE_FOR_STANDDOWN) {
+                SecurityProtocolEngine.handlePassphraseForStandDown(context, clean, isFa)
+                return LocalRouteResult(handled = true, category = "security_standdown_passphrase")
+            }
+
             // 0. Session, Wake Word & Standby Control
             val sessionRes = handleSessionAndWake(context, clean, lower, isFa)
             if (sessionRes.handled) return sessionRes
