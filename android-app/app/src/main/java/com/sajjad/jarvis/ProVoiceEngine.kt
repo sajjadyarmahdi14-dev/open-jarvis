@@ -44,6 +44,9 @@ class ProVoiceEngine(
 
         @Volatile
         var liveAudioChunkListener: ((ShortArray, Int) -> Unit)? = null
+
+        @Volatile
+        var voiceRecordListener: ((ShortArray, Int) -> Unit)? = null
         const val CHUNK_MS = 50
         const val CHUNK_SAMPLES = (SAMPLE_RATE * CHUNK_MS) / 1000 // 800 shorts
         const val PRE_ROLL_SAMPLES = (SAMPLE_RATE * 800) / 1000 // 12800 shorts (800ms pre-roll)
@@ -533,8 +536,9 @@ class ProVoiceEngine(
                         }
                         consecutiveZeroReads = 0
 
-                        // Live audio continuous listener tap
+                        // Live audio continuous listener tap & Voice Recorder Engine tap
                         liveAudioChunkListener?.invoke(readBuffer, readCount)
+                        voiceRecordListener?.invoke(readBuffer, readCount)
 
                         val now = SystemClock.elapsedRealtime()
 

@@ -58,6 +58,12 @@ object UtilityDomain {
         val norm = NlpNormalizer.cleanLower(rawText)
 
         // ---------------------------------------------------------------------
+        // 0. Voice Memo / Background Recorder Engine
+        // ---------------------------------------------------------------------
+        val recRes = handleVoiceRecorder(context, clean, lower, norm, isFa)
+        if (recRes.handled) return recRes
+
+        // ---------------------------------------------------------------------
         // 1. Pro Camera Controls
         // ---------------------------------------------------------------------
         val camRes = handleCameraControls(context, rawText, clean, lower, norm, isFa)
@@ -130,11 +136,82 @@ object UtilityDomain {
         }
     }
 
+    private fun parseZoomValue(text: String): Float? {
+        val norm = NlpNormalizer.cleanLower(text)
+        val normDigits = NlpNormalizer.normalizeDigits(norm)
+
+        // Persian phrase mappings: "زوم ۲", "۲ برابر زوم", "زوم دو برابر", "زوم ۲ برابر"
+        if (normDigits.contains("دو برابر") || normDigits.contains("۲ برابر") || normDigits.contains("زوم ۲") || normDigits.contains("زوم 2")) return 2.0f
+        if (normDigits.contains("سه برابر") || normDigits.contains("۳ برابر") || normDigits.contains("زوم ۳") || normDigits.contains("زوم 3")) return 3.0f
+        if (normDigits.contains("چهار برابر") || normDigits.contains("۴ برابر") || normDigits.contains("زوم ۴") || normDigits.contains("زوم 4")) return 4.0f
+        if (normDigits.contains("پنج برابر") || normDigits.contains("۵ برابر") || normDigits.contains("زوم ۵") || normDigits.contains("زوم 5")) return 5.0f
+
+        // English patterns: "zoom x2", "zoom 2x", "x2", "2x", "zoom to 2", "zoom 2", "zoom 2.5x"
+        val enRegex = Regex("(?:zoom\\s+(?:to\\s+)?)?(?:x\\s*(\\d+(?:\\.\\d+)?)|(\\d+(?:\\.\\d+)?)\\s*x|(?:zoom\\s+(?:to\\s+)?)(\\d+(?:\\.\\d+)?))")
+        val enMatch = enRegex.find(norm)
+        if (enMatch != null) {
+            val v = enMatch.groupValues[1].ifBlank { enMatch.groupValues[2].ifBlank { enMatch.groupValues[3] } }
+            val f = v.toFloatOrNull()
+            if (f != null && f > 0f) return f
+        }
+
+        val faRegex = Regex("(?:زوم\\s+)?(\\d+(?:\\.\\d+)?)\\s*(?:برابر)?")
+        val faMatch = faRegex.find(normDigits)
+        if (faMatch != null) {
+            val f = faMatch.groupValues[1].toFloatOrNull()
+            if (f != null && f > 0f) return f
+        }
+        return null
+    }
+
+    private fun handleVoiceRecorder(context: Context, clean: String, lower: String, norm: String, isFa: Boolean): LocalRouteResult {
+        // Stop recording
+        val stopTriggers = listOf(
+            "stop voice recording", "stop recording voice", "stop voice memo", "stop recording",
+            "ضبط صدا رو قطع کن", "ضبط رو تموم کن", "ضبط صدا رو متوقف کن", "متوقف کردن ضبط صدا",
+            "قطع ضبط صدا", "ضبط صدا تموم", "پایان ضبط صدا"
+        )
+        if (stopTriggers.any { norm.contains(it) || lower.contains(it) }) {
+            if (com.sajjad.jarvis.VoiceRecorderEngine.isRecording) {
+                val res = com.sajjad.jarvis.VoiceRecorderEngine.stopRecording(context, isFa = isFa)
+                val reply = if (res != null) {
+                    if (isFa) "ضبط صدا متوقف و ذخیره شد قربان." else "Voice recording saved, sir."
+                } else {
+                    if (isFa) "ضبط صدا در حال اجرا نبود قربان." else "No voice recording in progress, sir."
+                }
+                return LocalRouteResult(handled = true, spokenFeedback = reply, category = "voice_recorder_stop")
+            }
+        }
+
+        // Start recording
+        val startTriggers = listOf(
+            "voice record", "start voice recording", "record my voice", "record audio", "record voice memo",
+            "voice memo", "start recording audio", "صدام رو ضبط کن", "ضبط صدا", "شروع کن صدا ضبط کن",
+            "صدا ضبط کن", "یه یادداشت صوتی ضبط کن", "یک یادداشت صوتی ضبط کن", "صدای من رو ضبط کن"
+        )
+        if (startTriggers.any { norm.contains(it) || lower.contains(it) }) {
+            val started = com.sajjad.jarvis.VoiceRecorderEngine.startRecording(context, isFa = isFa)
+            val reply = if (started) {
+                if (isFa) "شروع ضبط یادداشت صوتی قربان." else "Starting voice recording memo now, sir."
+            } else {
+                if (isFa) "ضبط صدا قبلاً شروع شده است قربان." else "Voice recording already running, sir."
+            }
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "voice_recorder_start")
+        }
+
+        return LocalRouteResult(handled = false)
+    }
+
     private fun handleCameraControls(context: Context, rawText: String, clean: String, lower: String, norm: String, isFa: Boolean): LocalRouteResult {
+        val extractedZoom = parseZoomValue(rawText)
+
         // Selfie
         val selfieWords = listOf("take a selfie", "take selfie", "selfie", "عکس سلفی بگیر", "یه سلفی بگیر", "سلفی بگیر", "سلفی بنداز", "عکس از خودت بگیر")
         if (selfieWords.any { norm.contains(it) || lower.contains(it) }) {
             val act = JSONObject().put("mode", "photo").put("lens", "front").put("capture", true)
+            if (extractedZoom != null) {
+                act.put("zoom", extractedZoom.toDouble()).put("target_zoom", extractedZoom.toDouble())
+            }
             launchCameraAction(context, act)
             val reply = if (isFa) "در حال گرفتن عکس سلفی قربان." else "Taking selfie now, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_selfie")
@@ -147,6 +224,9 @@ object UtilityDomain {
             val sec = timerMatchEn?.groupValues?.get(2)?.toIntOrNull()
                 ?: timerMatchFa?.groupValues?.get(2)?.toIntOrNull() ?: 3
             val act = JSONObject().put("mode", "photo").put("capture", true).put("timer_seconds", sec)
+            if (extractedZoom != null) {
+                act.put("zoom", extractedZoom.toDouble()).put("target_zoom", extractedZoom.toDouble())
+            }
             launchCameraAction(context, act)
             val reply = if (isFa) "عکس با تایمر $sec ثانیه‌ای ثبت خواهد شد قربان." else "Photo timer set for $sec seconds, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_timed_photo")
@@ -156,8 +236,15 @@ object UtilityDomain {
         val photoWords = listOf("take a photo", "take photo", "take picture", "shoot photo", "capture photo", "snap photo", "عکس بگیر", "یه عکس بگیر", "عکس بنداز", "یک عکس بگیر", "تصویر بگیر")
         if (photoWords.any { norm.contains(it) || lower.contains(it) }) {
             val act = JSONObject().put("mode", "photo").put("lens", "back").put("capture", true)
+            if (extractedZoom != null) {
+                act.put("zoom", extractedZoom.toDouble()).put("target_zoom", extractedZoom.toDouble())
+            }
             launchCameraAction(context, act)
-            val reply = if (isFa) "در حال ثبت عکس قربان." else "Capturing photo, sir."
+            val reply = if (extractedZoom != null) {
+                if (isFa) "در حال ثبت عکس با زوم ${extractedZoom}x قربان." else "Capturing photo with ${extractedZoom}x zoom, sir."
+            } else {
+                if (isFa) "در حال ثبت عکس قربان." else "Capturing photo, sir."
+            }
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_photo")
         }
 
@@ -165,6 +252,9 @@ object UtilityDomain {
         val videoWords = listOf("record a video", "record video", "start recording video", "take video", "فیلم بگیر", "فیلمبرداری کن", "ویدیو بگیر", "شروع فیلمبرداری", "ضبط ویدیو")
         if (videoWords.any { norm.contains(it) || lower.contains(it) }) {
             val act = JSONObject().put("mode", "video").put("capture", true)
+            if (extractedZoom != null) {
+                act.put("zoom", extractedZoom.toDouble()).put("target_zoom", extractedZoom.toDouble())
+            }
             launchCameraAction(context, act)
             val reply = if (isFa) "در حال ضبط ویدیو قربان." else "Recording video, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_video")
@@ -183,7 +273,15 @@ object UtilityDomain {
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_stop_video")
         }
 
-        // Zoom Controls
+        // Standalone Numeric Zoom Controls ("zoom x2", "2x", "زوم ۲", "۲ برابر زوم")
+        if (extractedZoom != null) {
+            val act = JSONObject().put("zoom", extractedZoom.toDouble()).put("target_zoom", extractedZoom.toDouble())
+            launchCameraAction(context, act)
+            val reply = if (isFa) "بزرگنمایی روی ${extractedZoom}x تنظیم شد قربان." else "Zoom set to ${extractedZoom}x, sir."
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "camera_zoom")
+        }
+
+        // Zoom In / Zoom Out Controls
         if (norm.contains("zoom in") || norm.contains("زوم کن") || norm.contains("بزرگنمایی کن")) {
             launchCameraAction(context, JSONObject().put("zoom", "zoom_in"))
             val reply = if (isFa) "بزرگنمایی دوربین افزایش یافت قربان." else "Zooming in, sir."

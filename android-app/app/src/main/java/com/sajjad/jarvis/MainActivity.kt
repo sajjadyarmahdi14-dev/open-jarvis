@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -15,14 +16,18 @@ import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -31,6 +36,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -55,7 +61,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -95,11 +103,17 @@ private val AmberWarning = Color(0xFFF59E0B)
 private val TextPrimary = Color(0xFFF8FAFC)
 private val TextSecondary = Color(0xFF94A3B8)
 
+data class ChatImage(
+    val url: String,
+    val caption: String = ""
+)
+
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val turnId: String = "",
     val isUser: Boolean,
     val text: String,
+    val images: List<ChatImage> = emptyList(),
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -339,6 +353,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
 
     override fun onResume() {
         super.onResume()
+        JarvisOverlayManager.instance?.setMainActivityForeground(true)
         JarvisVoiceService.serviceListener = this
         val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
         val bgListening = prefs.getBoolean("bg_listening_enabled", true)
@@ -349,6 +364,11 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
             JarvisVoiceService.startRecordingIfPermitted(applicationContext)
         }
         isServiceActiveState.value = JarvisVoiceService.isServiceRunning
+    }
+
+    override fun onPause() {
+        super.onPause()
+        JarvisOverlayManager.instance?.setMainActivityForeground(false)
     }
 
     override fun onDestroy() {
@@ -453,9 +473,14 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         }
     }
 
-    private fun handleAssistantMessage(response: String, turnId: String = "", isAppend: Boolean = false) {
+    private fun handleAssistantMessage(
+        response: String,
+        turnId: String = "",
+        isAppend: Boolean = false,
+        images: List<ChatImage> = emptyList()
+    ) {
         val clean = response.trim()
-        if (clean.isBlank()) return
+        if (clean.isBlank() && images.isEmpty()) return
         runOnUiThread {
             if (turnId.isNotBlank()) {
                 val existingIndex = messagesState.indexOfLast { !it.isUser && it.turnId == turnId }
@@ -467,15 +492,16 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                     } else {
                         clean
                     }
-                    messagesState[existingIndex] = existing.copy(text = updatedText)
+                    val updatedImages = if (images.isNotEmpty()) images else existing.images
+                    messagesState[existingIndex] = existing.copy(text = updatedText, images = updatedImages)
                     return@runOnUiThread
                 }
             }
             val recentDup = messagesState.lastOrNull { !it.isUser }
-            if (recentDup != null && recentDup.text == clean && (System.currentTimeMillis() - recentDup.timestamp) < 2000L) {
+            if (recentDup != null && recentDup.text == clean && images.isEmpty() && (System.currentTimeMillis() - recentDup.timestamp) < 2000L) {
                 return@runOnUiThread
             }
-            messagesState.add(ChatMessage(turnId = turnId, isUser = false, text = clean))
+            messagesState.add(ChatMessage(turnId = turnId, isUser = false, text = clean, images = images))
         }
     }
 
@@ -691,8 +717,8 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                 if (currentKey.isNotBlank()) {
                     conn.setRequestProperty("Authorization", "Bearer $currentKey")
                 }
-                conn.connectTimeout = 6000
-                conn.readTimeout = 25000
+                conn.connectTimeout = 10000
+                conn.readTimeout = 30000
                 conn.doOutput = true
 
                 val (batteryPct, isCharging) = getBatteryTelemetry()
@@ -710,9 +736,23 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                     val json = JSONObject(respStr)
                     val reply = json.optString("response", "Done, sir.")
                     val clientActions = json.optJSONArray("client_actions")
+                    val imagesArray = json.optJSONArray("images")
+                    val chatImages = mutableListOf<ChatImage>()
+                    if (imagesArray != null) {
+                        for (i in 0 until imagesArray.length()) {
+                            val imgObj = imagesArray.optJSONObject(i)
+                            if (imgObj != null) {
+                                val u = imgObj.optString("url")
+                                val cap = imgObj.optString("caption")
+                                if (u.isNotBlank()) {
+                                    chatImages.add(ChatImage(url = u, caption = cap))
+                                }
+                            }
+                        }
+                    }
 
                     withContext(Dispatchers.Main) {
-                        handleAssistantMessage(reply, turnId, false)
+                        handleAssistantMessage(reply, turnId, false, chatImages)
                         isProcessingState.value = false
                         voiceStateText.value = "STANDBY: Say \"Jarvis\""
                     }
@@ -1288,6 +1328,138 @@ private fun ChatMessageBubble(msg: ChatMessage) {
                     fontSize = 14.sp,
                     lineHeight = 20.sp
                 )
+                if (msg.images.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (img in msg.images) {
+                            InlineChatImageItem(img)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineChatImageItem(img: ChatImage) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var bitmap by remember(img.url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var isLoading by remember(img.url) { mutableStateOf(true) }
+    var isFailed by remember(img.url) { mutableStateOf(false) }
+
+    LaunchedEffect(img.url) {
+        withContext(Dispatchers.IO) {
+            try {
+                val u = URL(img.url)
+                val conn = u.openConnection() as HttpURLConnection
+                conn.connectTimeout = 8000
+                conn.readTimeout = 12000
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Mobile)")
+                if (conn.responseCode in 200..299) {
+                    val bytes = conn.inputStream.use { it.readBytes() }
+                    val b = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    withContext(Dispatchers.Main) {
+                        bitmap = b
+                        isLoading = false
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        isFailed = true
+                        isLoading = false
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    isFailed = true
+                    isLoading = false
+                }
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF0A131F))
+                .clickable {
+                    try {
+                        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(Uri.parse(img.url), "image/*")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(viewIntent)
+                    } catch (_: Exception) {}
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = CyanNeon,
+                    strokeWidth = 2.dp
+                )
+            } else if (bitmap != null) {
+                Image(
+                    bitmap = bitmap!!.asImageBitmap(),
+                    contentDescription = img.caption.ifBlank { "Jarvis Image" },
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if (isFailed) {
+                Text("Image unavailable", color = CyanDim, fontSize = 11.sp)
+            }
+        }
+
+        if (bitmap != null) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = img.caption.take(28),
+                    color = CyanDim,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = {
+                        val b = bitmap ?: return@TextButton
+                        try {
+                            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                            val fileName = "JARVIS_IMG_$timeStamp.jpg"
+                            val values = ContentValues().apply {
+                                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Jarvis")
+                                }
+                            }
+                            val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                            if (uri != null) {
+                                context.contentResolver.openOutputStream(uri)?.use { out ->
+                                    b.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, out)
+                                }
+                                Toast.makeText(context, "Saved to Pictures/Jarvis", Toast.LENGTH_SHORT).show()
+                            }
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Failed to save: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text("💾 Save", color = CyanNeon, fontSize = 11.sp)
+                }
+            }
+        }
+    }
             }
         }
     }
@@ -1459,6 +1631,7 @@ private fun JarvisSettingsDialog(
     var availableModels by remember { mutableStateOf(CuratedFreeModels) }
 
     var isTestingMic by remember { mutableStateOf(false) }
+    var isTestingScreenCapture by remember { mutableStateOf(false) }
     var diagnosticTitle by remember { mutableStateOf<String?>(null) }
     var diagnosticMessage by remember { mutableStateOf<String?>(null) }
 
@@ -1888,6 +2061,54 @@ private fun JarvisSettingsDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("📷 Test Camera Photo Capture", color = VioletAccent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                // 🖥 Test Screen Watch Capture Button
+                Button(
+                    onClick = {
+                        val accessService = JarvisAccessibilityService.instance
+                        if (accessService == null) {
+                            diagnosticTitle = "Accessibility Service Required"
+                            diagnosticMessage = "Jarvis Accessibility Service is OFF.\n\nTo enable zero-popup screen capture:\nOpen Settings -> Accessibility -> Downloaded apps -> Jarvis and turn it ON."
+                            return@Button
+                        }
+                        isTestingScreenCapture = true
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                val b64 = accessService.captureScreenBase64Suspend()
+                                withContext(Dispatchers.Main) {
+                                    isTestingScreenCapture = false
+                                    if (!b64.isNullOrBlank()) {
+                                        val byteCount = android.util.Base64.decode(b64, android.util.Base64.DEFAULT).size
+                                        diagnosticTitle = "🖥 Screen Capture Success"
+                                        diagnosticMessage = "• Screenshot captured successfully via Accessibility API!\n• Image Size: ${byteCount / 1024} KB (Base64 JPEG)\n• Zero-popup Screen Vision is fully operational!"
+                                    } else {
+                                        diagnosticTitle = "🖥 Screen Capture Failed"
+                                        diagnosticMessage = "takeScreenshot returned null.\nVerify android:canTakeScreenshot='true' in accessibility config and grant Accessibility permissions."
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    isTestingScreenCapture = false
+                                    diagnosticTitle = "🖥 Screen Capture Error"
+                                    diagnosticMessage = "Exception capturing screenshot: ${e.message}"
+                                }
+                            }
+                        }
+                    },
+                    enabled = !isTestingScreenCapture,
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurface),
+                    border = BorderStroke(1.dp, CyanNeon),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isTestingScreenCapture) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = CyanNeon, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Capturing Screen...", color = CyanNeon, fontSize = 13.sp)
+                    } else {
+                        Text("🖥 Test Screen Watch Capture", color = CyanNeon, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
 
                 if (diagnosticTitle != null && diagnosticMessage != null) {

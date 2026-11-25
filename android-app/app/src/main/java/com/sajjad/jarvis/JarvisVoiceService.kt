@@ -300,8 +300,10 @@ class JarvisVoiceService : Service() {
     @Volatile private var accumulatedTranscript = ""
     data class SpeechItem(
         val text: String,
+        val generationId: Long = 0L,
         val onFinished: (() -> Unit)? = null
     )
+    val speechGenerationId = java.util.concurrent.atomic.AtomicLong(1L)
     private val speechQueue = Channel<SpeechItem>(Channel.UNLIMITED)
     private var transientDuckFocusRequest: AudioFocusRequest? = null
 
@@ -348,7 +350,7 @@ class JarvisVoiceService : Service() {
 
     private val streamingHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
     private var activeStreamCall: Call? = null
@@ -659,7 +661,7 @@ class JarvisVoiceService : Service() {
                     }
 
                     override fun onSpeechStarted() {
-                        duckExternalAndLocalAudio(true)
+                        // FIX 1: NEVER duck music volume or request transient audio focus on raw VAD triggers in STANDBY!
                         serviceListener?.onSpeechStarted()
                         val st = if (proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION) "listening_cmd" else "listening_wake"
                         serviceListener?.onWakeStateChanged(st)
@@ -675,6 +677,8 @@ class JarvisVoiceService : Service() {
                     }
 
                     override fun onWakeAlone(isFa: Boolean) {
+                        // Duck music cleanly once wake word is confirmed
+                        duckExternalAndLocalAudio(true)
                         playActivationChime()
                         val reply = if (isFa) "در خدمت شما هستم قربان. گوش می‌دهم." else "At your service, sir. I'm listening."
                         val turnId = UUID.randomUUID().toString()
@@ -686,6 +690,8 @@ class JarvisVoiceService : Service() {
                     }
 
                     override fun onCommandCaptured(transcript: String, wavBytes: ByteArray, isFa: Boolean, turnId: String, createdAtMs: Long) {
+                        // Duck music cleanly once command is confirmed
+                        duckExternalAndLocalAudio(true)
                         dispatchVadUtteranceDirect(transcript, wavBytes, isFa, turnId, createdAtMs)
                     }
 
@@ -1266,9 +1272,10 @@ class JarvisVoiceService : Service() {
     fun triggerForceListen() {
         if (isServiceMuted) return
         if (isTtsSpeaking || acousticState == AcousticState.SPEAKING) {
-            triggerBargeInAbort()
+            triggerHardStop(speakAck = false)
             return
         }
+        duckExternalAndLocalAudio(true)
         playActivationChime()
         isCommandInFlight.set(false)
         isProcessing = false
@@ -1287,31 +1294,57 @@ class JarvisVoiceService : Service() {
     }
 
     /**
+     * Instant Hard Stop — Flush Entire TTS Queue & Cancel In-Flight Streams (Fix 3)
+     */
+    fun triggerHardStop(speakAck: Boolean = false, isFa: Boolean = false) {
+        val newGen = speechGenerationId.incrementAndGet()
+        Log.i(TAG, "HARD STOP triggered! New speechGenerationId=$newGen")
+
+        try { activeStreamCall?.cancel(); activeStreamCall = null } catch (_: Exception) {}
+        try { fillerJob?.cancel(); fillerJob = null } catch (_: Exception) {}
+
+        // Drain and discard entire speech queue channel
+        while (speechQueue.tryReceive().isSuccess) {}
+        pendingSpeechCount.set(0)
+
+        // Immediately stop and reset active MediaPlayer
+        try {
+            activeMediaPlayer?.apply {
+                if (isPlaying) stop()
+                reset()
+                release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "activeMediaPlayer reset error: ${e.message}")
+        }
+        activeMediaPlayer = null
+
+        isTtsSpeaking = false
+        isProcessing = false
+        isCommandInFlight.set(false)
+        isUtteranceActive = false
+        acousticState = AcousticState.IDLE
+        proVoiceEngine?.notifySpeaking(false)
+        proVoiceEngine?.triggerStandby()
+        JarvisLocalAudioPlayer.setDucked(false)
+        duckExternalAndLocalAudio(false)
+        serviceListener?.onTtsFinished()
+        broadcastUiUpdate(wakeStatus = "active")
+        JarvisOverlayManager.instance?.updateState("standby", "Standby")
+        updateNotification("J.A.R.V.I.S. Standby — Say 'Jarvis' anytime")
+
+        if (speakAck) {
+            val ack = if (isFa) "به حالت استندبای رفتم قربان." else "Standing by, sir."
+            enqueueSpeech(ack)
+        }
+    }
+
+    /**
      * Layer 4: Immediate Graceful Barge-In Abort
      */
     fun triggerBargeInAbort() {
-        try {
-            activeStreamCall?.cancel()
-            activeStreamCall = null
-            fillerJob?.cancel()
-            fillerJob = null
-            stopCurrentPlayback()
-            isTtsSpeaking = false
-            isProcessing = false
-            isCommandInFlight.set(false)
-            isUtteranceActive = true
-            acousticState = AcousticState.LISTENING
-            currentVadMode = VadMode.ACTIVE_COMMAND
-            awakeUntilTimestamp = System.currentTimeMillis() + 20000L
-            proVoiceEngine?.triggerInstantTapToTalk()
-            serviceListener?.onTtsFinished()
-            serviceListener?.onSpeechStarted()
-            serviceListener?.onWakeStateChanged("listening_cmd")
-            broadcastUiUpdate(wakeStatus = "listening_cmd")
-            updateNotification("Listening for command...")
-        } catch (e: Exception) {
-            Log.w(TAG, "triggerBargeInAbort error: ${e.message}")
-        }
+        triggerHardStop(speakAck = false)
+    }
     }
 
     private fun pcmToWav(pcmData: ByteArray, sampleRate: Int = SAMPLE_RATE): ByteArray {
@@ -2227,12 +2260,13 @@ class JarvisVoiceService : Service() {
             onFinished?.invoke()
             return
         }
+        val gen = speechGenerationId.get()
         val sentences = splitIntoSpeechSentences(clean)
         for (i in sentences.indices) {
             val isLast = (i == sentences.size - 1)
             val cb = if (isLast) onFinished else null
             pendingSpeechCount.incrementAndGet()
-            speechQueue.trySend(SpeechItem(sentences[i], cb))
+            speechQueue.trySend(SpeechItem(sentences[i], gen, cb))
         }
     }
 
@@ -2240,7 +2274,23 @@ class JarvisVoiceService : Service() {
         var clean = text.replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "")
         clean = clean.replace(Regex("<think>[\\s\\S]*$", RegexOption.IGNORE_CASE), "")
         clean = clean.replace(Regex("```[\\s\\S]*?```"), "")
-        clean = clean.replace(Regex("[*_#`]"), "")
+        clean = clean.replace(Regex("`[^`]+`"), "")
+        // Replace markdown links: [label](https://...) -> label (or empty if photo/image label)
+        clean = clean.replace(Regex("\\[([^\\]]+)\\]\\((?:https?://|www\\.)[^\\)]+\\)")) { mr ->
+            val label = mr.groupValues[1].trim()
+            val low = label.lowercase(Locale.ROOT)
+            if (low.startsWith("photo of") || low.startsWith("image of") || low.startsWith("picture of") || low.startsWith("image") || label.startsWith("عکس") || label.startsWith("تصویر")) {
+                ""
+            } else {
+                label
+            }
+        }
+        clean = clean.replace(Regex("\\[([^\\]]+)\\]\\([^\\)]+\\)"), "$1")
+        // Strip raw URLs
+        clean = clean.replace(Regex("https?://\\S+"), "")
+        clean = clean.replace(Regex("www\\.\\S+"), "")
+        // Strip markdown formatting (*, #, `, ~, _)
+        clean = clean.replace(Regex("[*_#~]"), "")
         return clean.trim()
     }
 
@@ -2258,9 +2308,18 @@ class JarvisVoiceService : Service() {
     }
 
     private suspend fun processSpeechItem(item: SpeechItem) {
+        if (item.generationId != speechGenerationId.get()) {
+            Log.i(TAG, "Dropping stale speech item gen=${item.generationId} != current=${speechGenerationId.get()}: '${item.text}'")
+            val rem = pendingSpeechCount.decrementAndGet()
+            if (rem <= 0) pendingSpeechCount.set(0)
+            return
+        }
+
         val text = item.text.trim()
         if (text.isBlank()) {
             item.onFinished?.invoke()
+            val rem = pendingSpeechCount.decrementAndGet()
+            if (rem <= 0) pendingSpeechCount.set(0)
             return
         }
 
@@ -2269,6 +2328,7 @@ class JarvisVoiceService : Service() {
             acousticState = AcousticState.SPEAKING
             proVoiceEngine?.notifySpeaking(true)
             JarvisLocalAudioPlayer.setDucked(true)
+            duckExternalAndLocalAudio(true)
             serviceListener?.onTtsStarted()
             broadcastUiUpdate(wakeStatus = "speaking")
             updateNotification("Speaking...")
@@ -2295,13 +2355,18 @@ class JarvisVoiceService : Service() {
         }
 
         var played = false
-        if (cachedFile != null && cachedFile.exists() && cachedFile.length() > 500) {
-            played = playLocalMp3File(cachedFile)
+        if (cachedFile != null && cachedFile.exists() && cachedFile.length() > 500 && item.generationId == speechGenerationId.get()) {
+            played = playLocalMp3File(cachedFile, item.generationId)
         }
 
-        if (!played) {
+        if (!played && item.generationId == speechGenerationId.get()) {
             // 2. Play from disk SHA-256 cache or fetch from POST <serverUrl>/api/tts via MediaPlayer
-            played = playViaMediaPlayerPost(text, isFa)
+            played = playViaMediaPlayerPost(text, isFa, item.generationId)
+        }
+
+        if (item.generationId != speechGenerationId.get()) {
+            Log.i(TAG, "Speech item aborted mid-flight due to generation increment")
+            return
         }
 
         if (!played) {
@@ -2357,7 +2422,8 @@ class JarvisVoiceService : Service() {
         } catch (_: Exception) {}
     }
 
-    private suspend fun playViaMediaPlayerPost(text: String, isFa: Boolean): Boolean = withContext(Dispatchers.IO) {
+    private suspend fun playViaMediaPlayerPost(text: String, isFa: Boolean, generationId: Long = 0L): Boolean = withContext(Dispatchers.IO) {
+        if (generationId != 0L && generationId != speechGenerationId.get()) return@withContext false
         val clean = text.trim()
         if (clean.isBlank()) return@withContext true
 
@@ -2367,7 +2433,7 @@ class JarvisVoiceService : Service() {
 
         // 1. Immediate play from local disk MP3 cache (<30ms)
         if (cachedFile.exists() && cachedFile.length() > 200) {
-            val ok = playLocalMp3File(cachedFile)
+            val ok = playLocalMp3File(cachedFile, generationId)
             if (ok) return@withContext true
         }
 
@@ -2378,6 +2444,7 @@ class JarvisVoiceService : Service() {
         val server = getServerUrl().removeSuffix("/")
 
         for (attempt in 1..2) {
+            if (generationId != 0L && generationId != speechGenerationId.get()) return@withContext false
             var conn: HttpURLConnection? = null
             try {
                 val url = URL("$server/api/tts")
@@ -2412,7 +2479,7 @@ class JarvisVoiceService : Service() {
                     if (tempFile.length() > 200) {
                         tempFile.renameTo(cachedFile)
                         pruneTtsCache(ttsDir, maxFiles = 100)
-                        return@withContext playLocalMp3File(cachedFile)
+                        return@withContext playLocalMp3File(cachedFile, generationId)
                     } else {
                         tempFile.delete()
                     }
@@ -2446,31 +2513,24 @@ class JarvisVoiceService : Service() {
     }
 
     private fun stopCurrentPlayback() {
-        try {
-            activeMediaPlayer?.let {
-                if (it.isPlaying) it.stop()
-                it.release()
-            }
-        } catch (_: Exception) {}
-        activeMediaPlayer = null
-        while (true) {
-            val polled = speechQueue.tryReceive()
-            if (polled.isFailure) break
-        }
-        pendingSpeechCount.set(0)
-        proVoiceEngine?.notifySpeaking(false)
+        triggerHardStop(speakAck = false)
     }
 
-    private suspend fun playLocalMp3File(file: File): Boolean = withContext(Dispatchers.Main) {
+    private suspend fun playLocalMp3File(file: File, generationId: Long = 0L): Boolean = withContext(Dispatchers.Main) {
+        if (generationId != 0L && generationId != speechGenerationId.get()) return@withContext false
         val completed = CompletableDeferred<Boolean>()
         try {
             try {
                 activeMediaPlayer?.let {
                     if (it.isPlaying) it.stop()
+                    it.reset()
                     it.release()
                 }
             } catch (_: Exception) {}
             activeMediaPlayer = null
+
+            if (generationId != 0L && generationId != speechGenerationId.get()) return@withContext false
+
             val mp = MediaPlayer().apply {
                 setDataSource(file.absolutePath)
                 setAudioAttributes(

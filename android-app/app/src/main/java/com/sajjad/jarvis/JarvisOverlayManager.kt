@@ -39,6 +39,9 @@ class JarvisOverlayManager(private val context: Context) {
         var instance: JarvisOverlayManager? = null
             private set
 
+        @Volatile
+        var isMainActivityForeground: Boolean = false
+
         fun init(context: Context): JarvisOverlayManager {
             val existing = instance
             if (existing != null) return existing
@@ -183,8 +186,11 @@ class JarvisOverlayManager(private val context: Context) {
             setOnClickListener {
                 val service = JarvisVoiceService.instance
                 if (service?.isTtsSpeaking == true || service?.acousticState == JarvisVoiceService.AcousticState.SPEAKING) {
-                    Log.i(TAG, "HUD pill tapped during speaking: Triggering Barge-In abort!")
-                    service.triggerBargeInAbort()
+                    Log.i(TAG, "HUD pill tapped during speaking: Triggering Hard Stop!")
+                    service.triggerHardStop(speakAck = true, isFa = false)
+                } else if (com.sajjad.jarvis.VoiceRecorderEngine.isRecording) {
+                    Log.i(TAG, "HUD pill tapped during voice memo: Stopping voice recorder!")
+                    com.sajjad.jarvis.VoiceRecorderEngine.stopRecording(context)
                 } else if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
                     Log.i(TAG, "HUD pill tapped during live audio listening: Stopping and asking!")
                     com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(context)
@@ -266,8 +272,18 @@ class JarvisOverlayManager(private val context: Context) {
     // Public State Management API (All Main-Thread Serialized)
     // -------------------------------------------------------------------------
 
+    fun setMainActivityForeground(foreground: Boolean) {
+        isMainActivityForeground = foreground
+        mainHandler.post {
+            if (foreground) {
+                overlayView?.animate()?.cancel()
+                overlayView?.visibility = View.GONE
+            }
+        }
+    }
+
     fun showOverlay() {
-        if (!canDraw() || windowManager == null) return
+        if (isMainActivityForeground || !canDraw() || windowManager == null) return
         mainHandler.post {
             // Cancel any pending auto-hide or fade-out
             mainHandler.removeCallbacks(hideRunnable)
@@ -364,6 +380,14 @@ class JarvisOverlayManager(private val context: Context) {
         }
     }
 
+    fun updateVoiceRecorderPill(text: String) {
+        mainHandler.post {
+            subtitleText?.text = text.trim()
+            orbView?.setStateColor(Color.parseColor("#FF1744")) // Red = Voice Memo
+            showOverlay()
+        }
+    }
+
     /**
      * Update state and auto-show / schedule auto-hide accordingly.
      * Keeps HUD continuously visible throughout LISTENING, ACTIVE_CONVERSATION, THINKING, SPEAKING, and AGENT_WORKING.
@@ -385,6 +409,10 @@ class JarvisOverlayManager(private val context: Context) {
                 }
                 "speaking" -> {
                     orbView?.setStateColor(Color.parseColor("#00E676")) // Neon Green = Speaking
+                    showOverlay()
+                }
+                "voice_recording" -> {
+                    orbView?.setStateColor(Color.parseColor("#FF1744")) // Red = Voice Recording
                     showOverlay()
                 }
                 "agent_working" -> {

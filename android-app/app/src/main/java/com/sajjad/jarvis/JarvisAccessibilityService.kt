@@ -158,19 +158,149 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     fun clickSendButton(): Boolean {
         val root = rootInActiveWindow ?: return false
-        val sendKeywords = listOf("send", "ارسال", "search", "جستجو", "submit", "تایید")
+        val sendKeywords = listOf("send", "ارسال", "send_button", "send_btn", "send button", "ic_send")
 
         val match = findNodeByPredicate(root) { n ->
             val text = (n.text?.toString() ?: "").lowercase(Locale.ROOT)
             val desc = (n.contentDescription?.toString() ?: "").lowercase(Locale.ROOT)
             val viewId = (n.viewIdResourceName ?: "").lowercase(Locale.ROOT)
-            sendKeywords.any { k -> text.contains(k) || desc.contains(k) || viewId.contains(k) }
+            sendKeywords.any { k -> desc.contains(k) || viewId.contains(k) || text == k }
         }
 
         if (match != null) {
             return clickNodeOrParent(match)
         }
         return false
+    }
+
+    fun openTelegramSavedMessages(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        // 1. Look for direct "Saved Messages" / "پیام‌های ذخیره شده"
+        val matchDirect = findNodeByPredicate(root) { n ->
+            val text = (n.text?.toString() ?: "").lowercase(Locale.ROOT)
+            val desc = (n.contentDescription?.toString() ?: "").lowercase(Locale.ROOT)
+            text.contains("saved messages") || text.contains("پیام‌های ذخیره") ||
+                    desc.contains("saved messages") || desc.contains("پیام‌های ذخیره")
+        }
+        if (matchDirect != null) {
+            return clickNodeOrParent(matchDirect)
+        }
+
+        // 2. Open drawer / menu if available
+        val menuBtn = findNodeByPredicate(root) { n ->
+            val desc = (n.contentDescription?.toString() ?: "").lowercase(Locale.ROOT)
+            val text = (n.text?.toString() ?: "").lowercase(Locale.ROOT)
+            desc.contains("open navigation") || desc.contains("menu") || text.contains("منو")
+        }
+        if (menuBtn != null) {
+            clickNodeOrParent(menuBtn)
+            Thread.sleep(300)
+            val rootDrawer = rootInActiveWindow
+            if (rootDrawer != null) {
+                val matchInDrawer = findNodeByPredicate(rootDrawer) { n ->
+                    val text = (n.text?.toString() ?: "").lowercase(Locale.ROOT)
+                    text.contains("saved messages") || text.contains("پیام‌های ذخیره")
+                }
+                if (matchInDrawer != null) {
+                    return clickNodeOrParent(matchInDrawer)
+                }
+            }
+        }
+        return false
+    }
+
+    suspend fun sendVerifiedMessage(targetApp: String, literalMessage: String): Pair<Boolean, String> = withContext(Dispatchers.Main) {
+        val cleanText = UtteranceStitcher.sanitizeLiteralText(literalMessage)
+        var targetEditNode: AccessibilityNodeInfo? = null
+
+        // Poll for up to 3.0 seconds (15 * 200ms) for an active EditText
+        for (i in 0 until 15) {
+            delay(200)
+            val root = rootInActiveWindow ?: continue
+            targetEditNode = findEditableNode(root) ?: root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (targetEditNode != null) break
+        }
+
+        if (targetEditNode == null) {
+            Log.w(TAG, "sendVerifiedMessage: No editable chat input found in $targetApp")
+            return@withContext Pair(false, "Chat input box not found")
+        }
+
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cleanText)
+        }
+        val textSet = targetEditNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        if (!textSet) {
+            Log.w(TAG, "sendVerifiedMessage: ACTION_SET_TEXT failed in $targetApp")
+            return@withContext Pair(false, "Could not set message text in input")
+        }
+        delay(350)
+
+        // Locate and click the send button
+        val sendClicked = clickSendButton()
+        if (!sendClicked) {
+            Log.w(TAG, "sendVerifiedMessage: Send button could not be clicked in $targetApp")
+            return@withContext Pair(false, "Send button not found or click failed")
+        }
+
+        // Wait 400ms and verify the EditText is cleared
+        delay(400)
+        val rootAfter = rootInActiveWindow
+        val editAfter = if (rootAfter != null) findEditableNode(rootAfter) else null
+        val currentText = editAfter?.text?.toString() ?: ""
+
+        if (currentText.isBlank() || !currentText.contains(cleanText)) {
+            Log.i(TAG, "sendVerifiedMessage: Send verified! Input box cleared.")
+            return@withContext Pair(true, "Message verified sent")
+        } else {
+            Log.w(TAG, "sendVerifiedMessage: Input box still holds text after send click!")
+            return@withContext Pair(false, "Send click did not clear the input box")
+        }
+    }
+
+    suspend fun verifyAndSendEmailCompose(expectedBody: String): Boolean = withContext(Dispatchers.Main) {
+        delay(600)
+        val root = rootInActiveWindow ?: return@withContext false
+
+        // Check if body is empty in compose screen, fill if needed
+        val editNodes = mutableListOf<AccessibilityNodeInfo>()
+        fun collectEdit(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            if (node.isEditable || node.className?.toString()?.contains("EditText", ignoreCase = true) == true) {
+                editNodes.add(node)
+            }
+            for (i in 0 until node.childCount) {
+                collectEdit(node.getChild(i))
+            }
+        }
+        collectEdit(root)
+
+        // Usually last editable node in Email compose is the message body
+        if (editNodes.isNotEmpty()) {
+            val bodyNode = editNodes.last()
+            val currentText = bodyNode.text?.toString() ?: ""
+            if (currentText.isBlank() && expectedBody.isNotBlank()) {
+                val args = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expectedBody)
+                }
+                bodyNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                delay(300)
+            }
+        }
+
+        // Click Send button (top action bar in Gmail/Email)
+        val sendBtn = findNodeByPredicate(root) { n ->
+            val desc = (n.contentDescription?.toString() ?: "").lowercase(Locale.ROOT)
+            val text = (n.text?.toString() ?: "").lowercase(Locale.ROOT)
+            val viewId = (n.viewIdResourceName ?: "").lowercase(Locale.ROOT)
+            desc.contains("send") || desc.contains("ارسال") || viewId.contains("send_action") || viewId.contains("send") || text == "send" || text == "ارسال"
+        }
+        if (sendBtn != null) {
+            val clicked = clickNodeOrParent(sendBtn)
+            Log.i(TAG, "verifyAndSendEmailCompose: Clicked send button ($clicked)")
+            return@withContext clicked
+        }
+        return@withContext false
     }
 
     // -------------------------------------------------------------------------
@@ -439,7 +569,15 @@ class JarvisAccessibilityService : AccessibilityService() {
 
                     override fun onFailure(errorCode: Int) {
                         JarvisOverlayManager.instance?.setTemporarilyHidden(false)
-                        Log.w(TAG, "takeScreenshot failed with error code: $errorCode")
+                        val errStr = when (errorCode) {
+                            1 -> "INTERNAL_ERROR"
+                            2 -> "NO_END_OF_FRAME"
+                            3 -> "INTERVAL_TIME_SHORT"
+                            4 -> "INVALID_DISPLAY"
+                            5 -> "INVALID_WINDOW"
+                            else -> "UNKNOWN"
+                        }
+                        Log.w(TAG, "takeScreenshot failed with error code: $errorCode ($errStr)")
                         onResult(null)
                     }
                 })

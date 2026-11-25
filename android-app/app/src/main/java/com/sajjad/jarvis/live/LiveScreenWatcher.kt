@@ -66,12 +66,12 @@ object LiveScreenWatcher {
         val accessService = JarvisAccessibilityService.instance
         val isFa = isPersian(initialQuestion ?: "")
 
-        // If Accessibility service is not running, prompt user to enable it in Settings
+        // If Accessibility service is not running, prompt user to enable it in Settings with clear Xiaomi/HyperOS path
         if (accessService == null) {
             val msg = if (isFa) {
-                "لطفاً دسترسی سرویس دستیار (Accessibility) را در تنظیمات فعال کنید تا بتوانم صفحه را ببینم قربان."
+                "سرویس دسترسی‌پذیری خاموش است؛ در تنظیمات به بخش Downloaded apps رفته و Jarvis را روشن کنید قربان."
             } else {
-                "Please enable the Jarvis Accessibility service in Settings so I can view your screen, sir."
+                "Jarvis Accessibility service is off; in Settings, open Downloaded apps and enable Jarvis, sir."
             }
             JarvisVoiceService.instance?.speakBritish(msg)
             onSpokenReply?.invoke(msg)

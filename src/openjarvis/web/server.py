@@ -324,7 +324,10 @@ def _get_or_create_agent():
 
 
 def _clean_tts_response(text: str) -> str:
-    """Strip reasoning tokens <think>...</think> and markdown syntax for clean spoken voice."""
+    """Strip reasoning tokens, raw URLs, markdown links, and syntax for clean spoken voice.
+
+    Edge-TTS MUST NEVER speak 'https', 'forward slash', 'dot com', or raw URLs aloud.
+    """
     import re
     if not text:
         return ""
@@ -332,12 +335,29 @@ def _clean_tts_response(text: str) -> str:
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
     # Strip unclosed think tag at the end if tokens were exhausted
     cleaned = re.sub(r"<think>[\s\S]*$", "", cleaned, flags=re.IGNORECASE)
+    # Strip code blocks and inline code
     cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
-    cleaned = re.sub(r"[*_#`]", "", cleaned)
+    cleaned = re.sub(r"`[^`]+`", "", cleaned)
+    # Replace markdown links: [label](https://...) -> label (or empty if photo/image label)
+    def _replace_md_link(m: re.Match) -> str:
+        label = m.group(1).strip()
+        low = label.lower()
+        if low.startswith("photo of") or low.startswith("image of") or low.startswith("picture of") or low.startswith("image") or label.startswith("عکس") or label.startswith("تصویر"):
+            return ""
+        return label
+    cleaned = re.sub(r"\[([^\]]+)\]\((?:https?://|www\.)[^\)]+\)", _replace_md_link, cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", cleaned)
+    # Strip ALL raw URLs
+    cleaned = re.sub(r"https?://\S+", "", cleaned)
+    cleaned = re.sub(r"www\.\S+", "", cleaned)
+    # Strip markdown formatting (*, #, `, ~, _)
+    cleaned = re.sub(r"[*#~_]", "", cleaned)
     cleaned = cleaned.strip()
     if not cleaned and "<think>" in text:
         # If everything was inside <think>, extract the last complete sentence from the thinking block as a fallback
         think_content = re.sub(r"</?think>", "", text, flags=re.IGNORECASE).strip()
+        think_content = re.sub(r"https?://\S+", "", think_content)
+        think_content = re.sub(r"www\.\S+", "", think_content)
         sentences = [s.strip() for s in re.split(r"[.!?؛؟\n]+", think_content) if s.strip()]
         if sentences:
             cleaned = sentences[-1]
@@ -379,7 +399,8 @@ def parse_camera_intent(message: str, is_persian: Optional[bool] = None) -> Opti
     """Deterministic parser for camera capture and control intents across Persian and English."""
     if not message:
         return None
-    norm = message.lower().strip()
+    fa_digits_map = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+    norm = message.lower().strip().translate(fa_digits_map)
     if is_persian is None:
         is_persian = any("\u0600" <= c <= "\u06FF" for c in message)
 
@@ -388,8 +409,9 @@ def parse_camera_intent(message: str, is_persian: Optional[bool] = None) -> Opti
         r"snap\s+(?:a\s+|an\s+|my\s+|our\s+)?(?:photo|picture|pic)|"
         r"capture\s+(?:a\s+|an\s+)?(?:photo|picture|pic|video)|"
         r"shoot\s+(?:a\s+|an\s+)?(?:photo|picture|video)|"
-        r"record\s+(?:a\s+)?video|stop\s+(?:video|recording)|zoom\s+(?:in|out))\b|"
-        r"(?:عکس\s*بگیر|یه\s*عکس\s*بگیر|عکس\s*بنداز|یه\s*عکس\s*بنداز|از\s*من\s*عکس\s*بگیر|سلفی\s*بگیر|فیلم\s*بگیر|فیلمبرداری\s*(?:کن|شروع\s*کن)|ویدیو\s*(?:بگیر|ضبط\s*کن)|فیلمبرداری\s*رو\s*(?:قطع|متوقف)\s*کن|زوم\s*کن|عکس\s*برداری\s*کن|عکس\s*ثبت\s*کن)|"
+        r"record\s+(?:a\s+)?video|stop\s+(?:video|recording)|"
+        r"zoom\s+(?:in|out|to|\d+|x\d+|\d+x)|\b\d+(?:\.\d+)?x\b|\bx\d+(?:\.\d+)?\b)\b|"
+        r"(?:عکس\s*بگیر|یه\s*عکس\s*بگیر|عکس\s*بنداز|یه\s*عکس\s*بنداز|از\s*من\s*عکس\s*بگیر|سلفی\s*بگیر|فیلم\s*بگیر|فیلمبرداری\s*(?:کن|شروع\s*کن)|ویدیو\s*(?:بگیر|ضبط\s*کن)|فیلمبرداری\s*رو\s*(?:قطع|متوقف)\s*کن|زوم\s*کن|زوم\s*\d+|عکس\s*برداری\s*کن|عکس\s*ثبت\s*کن|زوم\s*(?:\d+|دو|سه|چهار|پنج)?\s*برابر|برابر\s*زوم)|"
         r"(?:(?:عکس|تصویر).*(?:بگیر|بنداز|ثبت کن|بردار))|"
         r"(?:(?:take|snap|capture).*(?:photo|picture|pic|selfie|video))"
     )
@@ -420,11 +442,42 @@ def parse_camera_intent(message: str, is_persian: Optional[bool] = None) -> Opti
     elif "۱۰" in norm or ("10" in norm and any(w in norm for w in ("timer", "تایمر"))):
         timer = 10
 
-    zoom = "keep"
-    if "zoom in" in norm or "زوم کن" in norm:
-        zoom = "zoom_in"
-    elif "zoom out" in norm:
-        zoom = "zoom_out"
+    zoom: Any = "keep"
+    target_zoom: Optional[float] = None
+
+    # Persian word mappings for zoom
+    fa_num_words = {"یک": 1.0, "دو": 2.0, "سه": 3.0, "چهار": 4.0, "پنج": 5.0, "شش": 6.0, "هشت": 8.0, "ده": 10.0}
+    m_fa_word = re.search(r"زوم\s*(یک|دو|سه|چهار|پنج|شش|هشت|ده)\s*برابر|(یک|دو|سه|چهار|پنج|شش|هشت|ده)\s*برابر\s*زوم", norm)
+    if m_fa_word:
+        w = m_fa_word.group(1) or m_fa_word.group(2)
+        target_zoom = fa_num_words.get(w, 2.0)
+        zoom = target_zoom
+    else:
+        # Match "zoom x2", "zoom 2x", "x2", "2x", "zoom to 2", "zoom 2", "زوم ۲", "۲ برابر زوم"
+        m_z = (
+            re.search(r"\bzoom\s+(?:to\s+)?x\s*(\d+(?:\.\d+)?)\b", norm) or
+            re.search(r"\bzoom\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*x?\b", norm) or
+            re.search(r"\b(\d+(?:\.\d+)?)\s*x\s+zoom\b", norm) or
+            re.search(r"\bx(\d+(?:\.\d+)?)\b", norm) or
+            re.search(r"\b(\d+(?:\.\d+)?)\s*x\b", norm) or
+            re.search(r"زوم\s*(\d+(?:\.\d+)?)", norm) or
+            re.search(r"(\d+(?:\.\d+)?)\s*برابر\s*زوم", norm)
+        )
+        if m_z:
+            val_str = next((g for g in m_z.groups() if g is not None), None)
+            if val_str:
+                try:
+                    val = float(val_str)
+                    target_zoom = val
+                    zoom = val
+                except ValueError:
+                    pass
+
+    if zoom == "keep":
+        if "zoom in" in norm or "زوم کن" in norm or "بزرگنمایی کن" in norm:
+            zoom = "zoom_in"
+        elif "zoom out" in norm or "کوچکنمایی کن" in norm or "زوم اوت" in norm:
+            zoom = "zoom_out"
 
     flash = "keep"
     if any(w in norm for w in ("flash on", "فلش روشن")):
@@ -442,6 +495,8 @@ def parse_camera_intent(message: str, is_persian: Optional[bool] = None) -> Opti
         reply = f"با تایمر {timer} ثانیه عکس می‌گیرم قربان." if is_persian else f"Taking a photo with a {timer} second timer, sir."
     elif lens == "front":
         reply = "در حال گرفتن عکس سلفی هستم قربان." if is_persian else "Taking a selfie now, sir."
+    elif target_zoom is not None and target_zoom > 1.0:
+        reply = f"با زوم {target_zoom:g}x عکس می‌گیرم قربان." if is_persian else f"Taking a photo with {target_zoom:g}x zoom, sir."
     elif capture:
         reply = "در حال ثبت عکس هستم قربان." if is_persian else "Capturing photo now, sir."
     else:
@@ -453,6 +508,7 @@ def parse_camera_intent(message: str, is_persian: Optional[bool] = None) -> Opti
         "lens": lens,
         "timer_seconds": timer,
         "zoom": zoom,
+        "target_zoom": target_zoom,
         "flash": flash,
         "capture": capture,
     }
@@ -1292,15 +1348,37 @@ def _handle_fast_path(
             "fast_path": True,
         }
 
-    # Send Messenger (Telegram / WhatsApp)
-    m_msg_en = re.search(r"\b(?:send\s+(?:a\s+)?(?:telegram|whatsapp)|(?:telegram|whatsapp)\s+message)\s+(?:message\s+)?(?:to\s+)?([a-zA-Z0-9_@+ -]+?)\s+(?:saying|message|that)?\s*(.+)$", norm)
-    if m_msg_en:
-        app_name = "whatsapp" if "whatsapp" in norm else "telegram"
-        contact = m_msg_en.group(1).strip()
-        message = sanitize_literal_text(m_msg_en.group(2).strip())
-        reply = f"Sending {app_name.capitalize()} message to {contact}, sir."
+    # Send Messenger (Telegram / WhatsApp / iGap / Bale / Eitaa)
+    m_msg_alt = re.search(r"\b(?:send\s+(?:a\s+)?(.+?)\s+to\s+(.+?)\s+(?:in|on|via)\s+(telegram|whatsapp|igap|bale|eitaa))\b", norm)
+    m_msg_en = re.search(r"\b(?:send\s+(?:a\s+)?(?:telegram|whatsapp|igap|bale|eitaa)|(?:telegram|whatsapp|igap|bale|eitaa)\s+message)\s+(?:message\s+)?(?:to\s+)?([^\s]+.*?)\s+(?:saying|message|that|say)?\s*(.+)$", norm)
+    m_msg_fa = re.search(r"(?:پیام\s*بده|پیام\s*بفرست|ارسال\s*پیام)\s+(?:به\s+)?(.+?)\s*(?:توی|در)\s*(تلگرام|واتساپ|ایگپ|بله|ایتا)\s*(?:بگو|که|با متن)?\s*(.+)?$", msg)
+
+    if m_msg_alt or m_msg_en or m_msg_fa:
+        if m_msg_alt:
+            app_name = m_msg_alt.group(3).strip().lower()
+            contact = m_msg_alt.group(2).strip()
+            message = sanitize_literal_text(m_msg_alt.group(1).strip())
+        elif m_msg_en:
+            app_raw = m_msg_en.group(1) or ("whatsapp" if "whatsapp" in norm else "telegram")
+            app_name = app_raw.strip().lower()
+            contact = m_msg_en.group(2).strip()
+            message = sanitize_literal_text(m_msg_en.group(3).strip())
+        else:
+            contact = m_msg_fa.group(1).strip()
+            app_raw = m_msg_fa.group(2) or "تلگرام"
+            app_map = {"تلگرام": "telegram", "واتساپ": "whatsapp", "ایگپ": "igap", "بله": "bale", "ایتا": "eitaa"}
+            app_name = app_map.get(app_raw.strip(), "telegram")
+            message = sanitize_literal_text((m_msg_fa.group(3) or "").strip())
+
+        # Normalize target
+        if contact.lower() in ("my saved messages", "saved messages", "saved message", "پیام های ذخیره شده", "پیام‌های ذخیره شده"):
+            contact = "Saved Messages"
+
+        # Anti-Fake-Confirmation: Server MUST NEVER say "Message sent!" prematurely!
+        # Android ActionDispatcher will verify actual send click and speak the honest result.
         return {
-            "response": reply,
+            "response": "",
+            "pre_speech": "",
             "tool_calls": [{"name": "send_messenger", "content": f"{app_name} message to {contact}", "success": True}],
             "turns": 1,
             "client_actions": [{"type": "send_messenger", "app": app_name, "contact": contact, "message": message}],
@@ -2288,6 +2366,38 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
     except Exception as e:
         logger.debug("Active audio context injection notice: %s", e)
 
+    # Photo / Picture Request Hook (Fix 2)
+    found_images: List[Dict[str, str]] = []
+    photo_patterns = [
+        r"\b(?:give\s+me\s+(?:a\s+)?photo\s+of|show\s+me\s+(?:a\s+)?(?:picture|photo|pic|image)\s+of|photo\s+of|picture\s+of|image\s+of)\s+(.+)",
+        r"(?:عکس|تصویر)\s+(.+?)(?:\s+(?:رو\s+نشون\s+بده|رو\s+بفرست|نشون\s+بده|بفرست))?$",
+    ]
+    detected_photo_target = None
+    for pp in photo_patterns:
+        m_ph = re.search(pp, req.message, re.IGNORECASE)
+        if m_ph:
+            detected_photo_target = m_ph.group(1).strip()
+            break
+
+    if detected_photo_target or any(k in req.message.lower() for k in ["photo of", "picture of", "image of", "عکس"]):
+        try:
+            from openjarvis.web_intel import search_images, web_search, format_search_context
+            from datetime import datetime
+            query_target = detected_photo_target or req.message
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            found_images = await search_images(query_target, max_results=3)
+            web_results = await web_search(f"{query_target} {today_str}", max_results=3)
+            input_text = (
+                f"[CURRENT DATE: {today_str}]\n"
+                f"[REAL WEB SEARCH RESULTS]:\n{format_search_context(web_results)}\n"
+                f"[CRITICAL IMAGE RULE]: Real verified photos have been retrieved and will be displayed inline directly in the chat UI. "
+                f"You MUST NEVER invent, hallucinate, or output fake URLs or markdown links! "
+                f"Concisely summarize who/what the subject is in 2-3 spoken sentences based strictly on the search results.\n\n"
+                f"{input_text}"
+            )
+        except Exception as e:
+            logger.debug(f"Photo intel search notice: {e}")
+
     try:
         # Run agent in background thread so async event loop and ping checks are never blocked!
         result = await asyncio.to_thread(agent.run, input=input_text, context=context)
@@ -2349,6 +2459,7 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
             "tool_calls": tool_calls,
             "turns": result.turns,
             "client_actions": client_actions,
+            "images": found_images,
         }
     except Exception as exc:
         logger.exception("Agent run failed")
@@ -2489,6 +2600,38 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
         except Exception as e:
             logger.debug("Active audio context stream injection notice: %s", e)
 
+        # Photo / Picture Request Hook for streaming (Fix 2)
+        found_stream_images: List[Dict[str, str]] = []
+        photo_patterns = [
+            r"\b(?:give\s+me\s+(?:a\s+)?photo\s+of|show\s+me\s+(?:a\s+)?(?:picture|photo|pic|image)\s+of|photo\s+of|picture\s+of|image\s+of)\s+(.+)",
+            r"(?:عکس|تصویر)\s+(.+?)(?:\s+(?:رو\s+نشون\s+بده|رو\s+بفرست|نشون\s+بده|بفرست))?$",
+        ]
+        detected_photo_target = None
+        for pp in photo_patterns:
+            m_ph = re.search(pp, req.message, re.IGNORECASE)
+            if m_ph:
+                detected_photo_target = m_ph.group(1).strip()
+                break
+
+        if detected_photo_target or any(k in req.message.lower() for k in ["photo of", "picture of", "image of", "عکس"]):
+            try:
+                from openjarvis.web_intel import search_images, web_search, format_search_context
+                from datetime import datetime
+                query_target = detected_photo_target or req.message
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                found_stream_images = await search_images(query_target, max_results=3)
+                web_results = await web_search(f"{query_target} {today_str}", max_results=3)
+                input_text = (
+                    f"[CURRENT DATE: {today_str}]\n"
+                    f"[REAL WEB SEARCH RESULTS]:\n{format_search_context(web_results)}\n"
+                    f"[CRITICAL IMAGE RULE]: Real verified photos have been retrieved and will be displayed inline directly in the chat UI. "
+                    f"You MUST NEVER invent, hallucinate, or output fake URLs or markdown links! "
+                    f"Concisely summarize who/what the subject is in 2-3 spoken sentences based strictly on the search results.\n\n"
+                    f"{input_text}"
+                )
+            except Exception as e:
+                logger.debug(f"Photo intel stream search notice: {e}")
+
         system_prompt = (
             "You are J.A.R.V.I.S., a witty, razor-sharp, hyper-competent AI assistant with the personality of Tony Stark's iconic AI. "
             "Keep spoken answers natural, concise, and helpful. "
@@ -2510,6 +2653,8 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
         accumulated_client_actions = []
 
         try:
+            if found_stream_images:
+                yield json.dumps({"type": "images", "images": found_stream_images}) + "\n"
             async for chunk in engine.stream_full(messages, model=model):
                 delta = chunk.content or ""
                 if chunk.tool_calls:

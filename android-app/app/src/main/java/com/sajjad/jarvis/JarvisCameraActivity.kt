@@ -156,8 +156,8 @@ class JarvisCameraActivity : ComponentActivity() {
         val mode = act.optString("mode", "").lowercase(Locale.ROOT)
         val lens = act.optString("lens", "").lowercase(Locale.ROOT)
         val timer = act.optInt("timer_seconds", -1)
-        val zoom = act.optDouble("zoom", -1.0)
-        val zoomStr = act.optString("zoom", "").lowercase(Locale.ROOT)
+        val zoom = act.optDouble("zoom", act.optDouble("target_zoom", act.optDouble("targetZoom", -1.0)))
+        val zoomStr = act.optString("zoom", act.optString("target_zoom", act.optString("targetZoom", ""))).lowercase(Locale.ROOT)
         val flash = act.optString("flash", "").lowercase(Locale.ROOT)
         val filter = act.optString("effect", act.optString("filter", "")).lowercase(Locale.ROOT)
         val capture = act.optBoolean("capture", false)
@@ -190,14 +190,24 @@ class JarvisCameraActivity : ComponentActivity() {
                 timerSecondsState.value = timer
             }
 
+            var zoomAdjusted = false
             if (zoom > 0) {
                 setZoomRatio(zoom.toFloat())
+                zoomAdjusted = true
             } else if (zoomStr == "zoom_in") {
                 setZoomRatio((zoomRatioState.floatValue * 1.5f).coerceAtMost(8.0f))
+                zoomAdjusted = true
             } else if (zoomStr == "zoom_out") {
                 setZoomRatio((zoomRatioState.floatValue / 1.5f).coerceAtLeast(1.0f))
+                zoomAdjusted = true
             } else if (zoomStr == "reset") {
                 setZoomRatio(1.0f)
+            } else {
+                val parsed = zoomStr.replace("x", "").trim().toFloatOrNull()
+                if (parsed != null && parsed > 0f) {
+                    setZoomRatio(parsed)
+                    zoomAdjusted = true
+                }
             }
 
             when (flash) {
@@ -226,6 +236,10 @@ class JarvisCameraActivity : ComponentActivity() {
             }
 
             if (capture) {
+                // If zoom was adjusted, wait 400ms for optical/digital zoom transition to settle!
+                if (zoomAdjusted) {
+                    delay(400)
+                }
                 triggerCapture()
             }
         }
@@ -233,9 +247,16 @@ class JarvisCameraActivity : ComponentActivity() {
 
     private fun handleIncomingAction(intent: Intent?) {
         val actionJson = intent?.getStringExtra(EXTRA_CAMERA_ACTION)
+        val directZoom = intent?.getFloatExtra("target_zoom", intent.getFloatExtra("targetZoom", 0f)) ?: 0f
+        if (directZoom > 0f) {
+            setZoomRatio(directZoom)
+        }
         if (!actionJson.isNullOrBlank()) {
             try {
                 val act = JSONObject(actionJson)
+                if (directZoom > 0f && !act.has("zoom")) {
+                    act.put("zoom", directZoom.toDouble())
+                }
                 if (cameraProvider == null || (imageCapture == null && videoCapture == null)) {
                     Log.i(TAG, "Camera not bound yet. Storing pending command: $act")
                     pendingAction = act
@@ -311,7 +332,10 @@ class JarvisCameraActivity : ComponentActivity() {
     }
 
     private fun setZoomRatio(ratio: Float) {
-        val clamped = ratio.coerceIn(1.0f, 8.0f)
+        val zoomState = camera?.cameraInfo?.zoomState?.value
+        val minRatio = zoomState?.minZoomRatio ?: 1.0f
+        val maxRatio = zoomState?.maxZoomRatio ?: 8.0f
+        val clamped = ratio.coerceIn(minRatio, maxRatio)
         zoomRatioState.floatValue = clamped
         camera?.cameraControl?.setZoomRatio(clamped)
     }

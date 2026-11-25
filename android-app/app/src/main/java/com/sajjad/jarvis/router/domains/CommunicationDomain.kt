@@ -50,14 +50,19 @@ object CommunicationDomain {
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "email_open")
         }
 
-        // Direct Email Compose ("send email to <x> saying <y>")
-        val emailMatch = Regex("(?:send email to|email)\\s+([^\\s]+@[^\\s]+)(?:\\s+(?:saying|about)\\s+(.+))?").find(lower)
-            ?: Regex("(?:ایمیل بزن به|ایمیل بفرست به)\\s+([^\\s]+@[^\\s]+)(?:\\s+(?:با متن|بگو)?\\s*(.+))?").find(clean)
+        // Direct Email Compose ("send email to <x> saying <y>" / "send email to <x> say <y>")
+        val emailMatch = Regex("(?:send email to|email to|email)\\s+([^\\s]+@[^\\s]+)(?:\\s+(?:saying|say|about|with body|body|text)\\s+(.+))?").find(lower)
+            ?: Regex("(?:ایمیل بزن به|ایمیل بفرست به|ارسال ایمیل به)\\s+([^\\s]+@[^\\s]+)(?:\\s+(?:با متن|بگو|متن|پیام)?\\s*(.+))?").find(clean)
         if (emailMatch != null) {
             val recipient = emailMatch.groupValues[1].trim()
             val body = emailMatch.groupValues.getOrNull(2)?.trim() ?: ""
-            DeviceController.sendEmail(context, recipient, "Jarvis Message", body)
-            val reply = if (isFa) "در حال ارسال ایمیل به $recipient قربان." else "Opening email composer for $recipient, sir."
+            val autoSend = norm.contains("send email") || norm.contains("ایمیل بفرست") || norm.contains("ارسال کن")
+            DeviceController.sendEmail(context, recipient, "Jarvis Message", body, autoSend = autoSend)
+            val reply = if (autoSend && com.sajjad.jarvis.JarvisAccessibilityService.instance != null) {
+                if (isFa) "در حال ارسال ایمیل به $recipient قربان." else "Sending email to $recipient, sir."
+            } else {
+                if (isFa) "پیش‌نویس ایمیل با پیام شما آماده شد قربان—روی ارسال بزنید." else "Email draft with your message is ready, sir—tap Send."
+            }
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "email_compose")
         }
 

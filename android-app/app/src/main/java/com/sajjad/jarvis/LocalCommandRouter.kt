@@ -134,21 +134,22 @@ object LocalCommandRouter {
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "wake_session")
         }
 
-        // Stop / Cancel / Shut up / Sleep
+        // Stop / Cancel / Shut up / Sleep (Fix 3: Instant Hard Stop)
         val stopPatterns = listOf(
-            "stop", "cancel", "shut up", "wait", "be quiet", "silence", "stop listening",
+            "stop", "shut up", "quiet", "be quiet", "cancel", "wait", "silence", "stop listening",
             "go to sleep", "sleep mode", "mute yourself", "standby", "that's all jarvis",
-            "استپ", "صبر کن", "وایسا", "وایستا", "ساکت شو", "خفه شو", "کافیه", "بس کن",
-            "خاموش شو", "گوش نده", "دیگه گوش نده", "برو استندبای", "استندبای", "بخواب",
-            "فعلا جارویس", "خداحافظ جارویس", "خداحافظ"
+            "بسه", "ساکت شو", "وایسا", "وایستا", "قطع کن", "استپ", "صبر کن", "خفه شو",
+            "کافیه", "بس کن", "خاموش شو", "گوش نده", "دیگه گوش نده", "برو استندبای",
+            "استندبای", "بخواب", "فعلا جارویس", "خداحافظ جارویس", "خداحافظ"
         )
-        if (stopPatterns.any { lower == it || lower.startsWith("$it ") || lower.endsWith(" $it") }) {
+        if (stopPatterns.any { lower == it || lower.startsWith("$it ") || lower.endsWith(" $it") || norm == it || norm.startsWith("$it ") || norm.endsWith(" $it") }) {
             try {
                 MediaEngine.handleMediaControl(context, "pause")
                 JarvisCameraActivity.instance?.finish()
             } catch (_: Exception) {}
-            val reply = if (isFa) "به حالت استندبای رفتم قربان." else "Standing by, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "session_stop")
+            // Instant hard stop flushes speech queue, cancels streams & increments generation ID
+            JarvisVoiceService.instance?.triggerHardStop(speakAck = true, isFa = isFa)
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "session_stop")
         }
 
         // Repeat last reply
@@ -201,12 +202,14 @@ object LocalCommandRouter {
             }
         }
 
-        // 3. Live Screen Watching Start
+        // 3. Live Screen Watching Start (Fix 9)
         val screenStartWords = listOf(
-            "صفحه گوشیم رو نگاه کن", "صفحه رو نگاه کن", "به اسکرینم نگاه کن", "اسکرینم رو ببین", "صفحهام رو ببین", "صفحه‌ام رو ببین",
+            "صفحه گوشیم رو نگاه کن", "به صفحه گوشیم نگاه کن", "صفحمو ببین", "اسکرینم رو نگاه کن",
+            "صفحه رو ببین", "صفحه گوشیمو ببین", "به اسکرینم نگاه کن", "اسکرینم رو ببین",
+            "صفحهام رو ببین", "صفحه‌ام رو ببین", "صفحه رو نگاه کن",
             "watch my screen", "look at my screen", "start watching my screen"
         )
-        if (screenStartWords.any { norm == it || norm.contains(it) }) {
+        if (screenStartWords.any { norm == it || norm.contains(it) || lower.contains(it) }) {
             var question: String? = null
             for (trigger in screenStartWords) {
                 if (norm.contains(trigger)) {
@@ -221,12 +224,14 @@ object LocalCommandRouter {
             return LocalRouteResult(handled = true, spokenFeedback = null, category = "live_screen_start")
         }
 
-        // 4. Live Audio Listening Start
+        // 4. Live Audio Listening Start (Fix 9)
         val audioStartWords = listOf(
-            "به این گوش کن", "به این آهنگ گوش کن", "به این ویدیو گوش کن", "گوش کن ببین چی میگه", "گوش کن این چه آهنگیه",
+            "به این گوش کن", "به این آهنگ گوش کن", "به این ویدیو گوش کن", "ببین این چی میگه",
+            "گوش کن ببین چه آهنگیه", "گوش کن این چه آهنگیه", "گوش کن ببین چی میگه",
+            "گوش کن", "به این گوش بده", "گوش بده ببین چی میگه",
             "listen to this", "listen to this song", "listen to this video", "listen to the audio"
         )
-        if (audioStartWords.any { norm == it || norm.contains(it) }) {
+        if (audioStartWords.any { norm == it || norm.contains(it) || lower.contains(it) }) {
             var question: String? = null
             for (trigger in audioStartWords) {
                 if (norm.contains(trigger)) {

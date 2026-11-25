@@ -179,44 +179,138 @@ object DeviceController {
         AppLauncher.launchWithOverlayFallback(context, smsIntent)
     }
 
-    fun sendEmail(context: Context, recipient: String, subject: String, body: String) {
+    fun resolveInstalledTelegramPackage(context: Context): String {
+        val candidates = listOf(
+            "org.telegram.messenger",
+            "org.telegram.messenger.web",
+            "org.telegram.plus",
+            "org.telegram.messenger.beta",
+            "nekox.messenger",
+            "org.thunderdog.challegram"
+        )
+        val pm = context.packageManager
+        for (pkg in candidates) {
+            try {
+                pm.getPackageInfo(pkg, 0)
+                return pkg
+            } catch (_: Exception) {}
+        }
+        return "org.telegram.messenger"
+    }
+
+    fun resolveInstalledWhatsAppPackage(context: Context): String {
+        val candidates = listOf("com.whatsapp", "com.whatsapp.w4b")
+        val pm = context.packageManager
+        for (pkg in candidates) {
+            try {
+                pm.getPackageInfo(pkg, 0)
+                return pkg
+            } catch (_: Exception) {}
+        }
+        return "com.whatsapp"
+    }
+
+    fun sendEmail(context: Context, recipient: String, subject: String, body: String, autoSend: Boolean = false) {
         val cleanRecipient = recipient.trim()
-        val emailIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$cleanRecipient")).apply {
-            putExtra(Intent.EXTRA_SUBJECT, subject)
+        val cleanSubject = subject.ifBlank { "Jarvis Message" }
+        // Fix 5: RFC mailto query params AND explicit extras ensure body is filled across Gmail, Outlook & Xiaomi Mail
+        val encodedUri = "mailto:${Uri.encode(cleanRecipient)}?subject=${Uri.encode(cleanSubject)}&body=${Uri.encode(body)}"
+        val emailIntent = Intent(Intent.ACTION_SENDTO, Uri.parse(encodedUri)).apply {
+            putExtra(Intent.EXTRA_EMAIL, arrayOf(cleanRecipient))
+            putExtra(Intent.EXTRA_SUBJECT, cleanSubject)
             putExtra(Intent.EXTRA_TEXT, body)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         AppLauncher.launchWithOverlayFallback(context, emailIntent)
-        Log.i(TAG, "Opened email compose intent for $cleanRecipient")
+        Log.i(TAG, "Opened email compose intent for $cleanRecipient with body: '$body'")
+
+        if (autoSend && JarvisAccessibilityService.isServiceRunning()) {
+            JarvisAccessibilityService.instance?.let { service ->
+                service.serviceScope.launch {
+                    delay(1200)
+                    service.verifyAndSendEmailCompose(body)
+                }
+            }
+        }
     }
 
-    fun sendMessenger(context: Context, app: String, contact: String, message: String) {
+    fun sendMessenger(
+        context: Context,
+        app: String,
+        contact: String,
+        message: String,
+        onVerified: ((Boolean, String) -> Unit)? = null
+    ) {
         val appLower = app.lowercase(Locale.ROOT)
+        val accessService = JarvisAccessibilityService.instance
+
+        if (accessService == null) {
+            val err = "Accessibility service is off; cannot send message automatically."
+            Log.w(TAG, err)
+            onVerified?.invoke(false, err)
+            return
+        }
+
         if (appLower.contains("whatsapp")) {
+            val pkg = resolveInstalledWhatsAppPackage(context)
             val num = findContactNumber(context, contact) ?: contact
-            val cleanPhone = num.replace("+", "").replace(" ", "").replace("-", "")
-            val waIntent = Intent(Intent.ACTION_VIEW).apply {
-                data = Uri.parse("https://api.whatsapp.com/send?phone=$cleanPhone&text=${Uri.encode(message)}")
-                setPackage("com.whatsapp")
+            val cleanDigits = num.replace("+", "").replace(" ", "").replace("-", "")
+            val waUri = if (cleanDigits.isNotBlank() && cleanDigits.any { it.isDigit() }) {
+                Uri.parse("https://api.whatsapp.com/send?phone=$cleanDigits&text=${Uri.encode(message)}")
+            } else {
+                Uri.parse("https://api.whatsapp.com/send?text=${Uri.encode(message)}")
+            }
+            val waIntent = Intent(Intent.ACTION_VIEW, waUri).apply {
+                setPackage(pkg)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             AppLauncher.launchWithOverlayFallback(context, waIntent)
-        } else if (appLower.contains("telegram")) {
-            val tgIntent = Intent(Intent.ACTION_VIEW).apply {
-                val cleanUser = contact.removePrefix("@").trim()
-                data = Uri.parse("tg://resolve?domain=$cleanUser")
-                setPackage("org.telegram.messenger")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+            accessService.serviceScope.launch {
+                val result = accessService.sendVerifiedMessage(pkg, message)
+                onVerified?.invoke(result.first, result.second)
             }
-            AppLauncher.launchWithOverlayFallback(context, tgIntent)
-            if (JarvisAccessibilityService.isServiceRunning()) {
-                JarvisAccessibilityService.instance?.typeText(message, autoSend = true)
+        } else if (appLower.contains("telegram")) {
+            val pkg = resolveInstalledTelegramPackage(context)
+            val cleanTarget = contact.trim()
+
+            val isSavedMessages = cleanTarget.equals("Saved Messages", ignoreCase = true) ||
+                    cleanTarget.contains("saved", ignoreCase = true) ||
+                    cleanTarget.contains("ذخیره", ignoreCase = true)
+
+            if (isSavedMessages) {
+                AppLauncher.launchApp(context, "telegram")
+                accessService.serviceScope.launch {
+                    delay(800)
+                    val openedSaved = accessService.openTelegramSavedMessages()
+                    if (openedSaved) {
+                        val result = accessService.sendVerifiedMessage(pkg, message)
+                        onVerified?.invoke(result.first, result.second)
+                    } else {
+                        onVerified?.invoke(false, "Could not open Saved Messages in Telegram")
+                    }
+                }
+            } else {
+                val cleanUser = cleanTarget.removePrefix("https://t.me/").removePrefix("t.me/").removePrefix("@").trim()
+                val tgIntent = Intent(Intent.ACTION_VIEW).apply {
+                    data = Uri.parse("tg://resolve?domain=$cleanUser")
+                    setPackage(pkg)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                AppLauncher.launchWithOverlayFallback(context, tgIntent)
+
+                accessService.serviceScope.launch {
+                    val result = accessService.sendVerifiedMessage(pkg, message)
+                    onVerified?.invoke(result.first, result.second)
+                }
             }
         } else {
-            // General messenger app launcher
+            // Third-party messengers: iGap, Eitaa, Bale, Rubika, etc.
             AppLauncher.launchApp(context, app)
-            if (JarvisAccessibilityService.isServiceRunning()) {
-                JarvisAccessibilityService.instance?.typeText(message, autoSend = false)
+            accessService.serviceScope.launch {
+                delay(1200)
+                val result = accessService.sendVerifiedMessage(app, message)
+                onVerified?.invoke(result.first, result.second)
             }
         }
     }

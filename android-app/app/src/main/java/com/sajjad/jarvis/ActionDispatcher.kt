@@ -209,20 +209,49 @@ object ActionDispatcher {
                     lastActionResult = "SMS sent to $target"
                     true
                 }
-                "android_send_email", "send_email" -> {
+                "android_send_email", "send_email", "email" -> {
                     val recipient = act.optString("recipient", act.optString("to", ""))
                     val subject = act.optString("subject", "Jarvis Message")
                     val body = act.optString("body", act.optString("message", ""))
-                    DeviceController.sendEmail(context, recipient, subject, body)
-                    lastActionResult = "Email composer opened for $recipient"
+                    val autoSend = act.optBoolean("auto_send", act.optBoolean("send", false))
+                    DeviceController.sendEmail(context, recipient, subject, body, autoSend = autoSend)
+                    val reply = if (autoSend && JarvisAccessibilityService.instance != null) {
+                        if (isFa) "در حال ارسال ایمیل به $recipient قربان." else "Sending email to $recipient, sir."
+                    } else {
+                        if (isFa) "پیش‌نویس ایمیل با پیام شما آماده شد قربان—روی ارسال بزنید." else "Email draft with your message is ready, sir—tap Send."
+                    }
+                    onFeedback?.invoke(reply)
+                    lastActionResult = "Email processed for $recipient"
                     true
                 }
-                "android_telegram_action", "send_messenger" -> {
+                "android_telegram_action", "send_messenger", "send_whatsapp_action", "telegram_send", "whatsapp_send" -> {
                     val app = act.optString("app", "telegram")
-                    val contact = act.optString("contact", "")
-                    val msg = act.optString("message", "")
-                    DeviceController.sendMessenger(context, app, contact, msg)
-                    lastActionResult = "Sent $app message to $contact"
+                    val contact = act.optString("contact", act.optString("recipient", ""))
+                    val msg = act.optString("message", act.optString("body", ""))
+
+                    // Fix 4: Ironclad Anti-Fake-Confirmation Rule
+                    if (JarvisAccessibilityService.instance == null) {
+                        val noAccessMsg = if (isFa) {
+                            "سرویس دسترسی‌پذیری (Accessibility) خاموش است؛ برای ارسال پیام داخل برنامه‌ها ابتدا آن را روشن کنید."
+                        } else {
+                            "Accessibility service is off, sir. Please enable it so I can send messages inside apps."
+                        }
+                        onFeedback?.invoke(noAccessMsg)
+                        JarvisVoiceService.instance?.speakBritish(noAccessMsg)
+                        lastActionResult = "Accessibility disabled"
+                        return false
+                    }
+
+                    DeviceController.sendMessenger(context, app, contact, msg) { success, details ->
+                        val reply = if (success) {
+                            if (isFa) "پیام با موفقیت به $contact ارسال شد قربان." else "Message sent to $contact, sir."
+                        } else {
+                            if (isFa) "ارسال پیام به $contact انجام نشد: $details" else "Could not send message to $contact: $details"
+                        }
+                        onFeedback?.invoke(reply)
+                        JarvisVoiceService.instance?.speakBritish(reply)
+                    }
+                    lastActionResult = "Dispatched verified messenger flow for $contact"
                     true
                 }
 

@@ -276,6 +276,131 @@ async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     return results[:max_results]
 
 
+async def search_images(query: str, max_results: int = 3) -> List[Dict[str, str]]:
+    """Search for verified, real image URLs using free, keyless public sources.
+
+    Sources:
+    1. DuckDuckGo Image API (vqd token + i.js endpoint)
+    2. Wikipedia / Wikimedia Commons API (pageimages & imageinfo)
+    Returns: List of verified items [{"url": "https://...", "caption": "..."}]
+    All returned items are strictly verified via HTTP HEAD / content-type == image/*
+    so broken or hallucinated URLs are NEVER returned.
+    """
+    clean_q = query.strip()
+    # Strip common photo prompt prefixes
+    clean_q = re.sub(r"^(?:give\s+me\s+)?(?:a\s+)?(?:photo|picture|pic|image)\s+of\s+", "", clean_q, flags=re.IGNORECASE)
+    clean_q = re.sub(r"^(?:show\s+me\s+)?(?:a\s+)?(?:photo|picture|pic|image)\s+of\s+", "", clean_q, flags=re.IGNORECASE)
+    clean_q = re.sub(r"^(?:عکس|تصویر)\s+(?:از\s+)?", "", clean_q)
+    clean_q = re.sub(r"\s+(?:رو\s+نشون\s+بده|رو\s+بفرست|نشون\s+بده|بفرست)$", "", clean_q).strip()
+
+    if not clean_q:
+        clean_q = query.strip()
+
+    candidates: List[Dict[str, str]] = []
+    headers = {"User-Agent": USER_AGENT}
+
+    # 1. Try DuckDuckGo Image Search via vqd + i.js
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+            token_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(clean_q)}&iar=images&iax=images&ia=images"
+            token_resp = await client.get(token_url)
+            vqd = None
+            if token_resp.status_code == 200:
+                m_vqd = re.search(r'vqd=([0-9-]+)', token_resp.text) or re.search(r'vqd="([^"]+)"', token_resp.text)
+                if m_vqd:
+                    vqd = m_vqd.group(1)
+
+            if vqd:
+                api_url = f"https://duckduckgo.com/i.js?l=us-en&o=json&q={urllib.parse.quote_plus(clean_q)}&vqd={vqd}&f=,,,&p=1"
+                api_headers = {
+                    "User-Agent": USER_AGENT,
+                    "Referer": "https://duckduckgo.com/",
+                    "Accept": "application/json",
+                }
+                api_resp = await client.get(api_url, headers=api_headers)
+                if api_resp.status_code == 200:
+                    data = api_resp.json()
+                    for item in data.get("results", []):
+                        img_url = item.get("image")
+                        title = item.get("title") or clean_q
+                        if img_url and img_url.startswith("http") and not any(c["url"] == img_url for c in candidates):
+                            candidates.append({"url": img_url, "caption": title})
+                        if len(candidates) >= max_results * 3:
+                            break
+    except Exception as e:
+        logger.debug(f"DDG image search notice: {e}")
+
+    # 2. Try Wikipedia PageImages API (Fast, authoritative, high-res)
+    try:
+        is_fa = any("\u0600" <= c <= "\u06FF" for c in clean_q)
+        langs = ["fa", "en"] if is_fa else ["en"]
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": WIKI_USER_AGENT}, follow_redirects=True) as client:
+            for lang in langs:
+                wiki_url = (
+                    f"https://{lang}.wikipedia.org/w/api.php?action=query&generator=search"
+                    f"&gsrsearch={urllib.parse.quote_plus(clean_q)}&gsrlimit=3"
+                    f"&prop=pageimages|extracts&piprop=original|thumbnail&pithumbsize=1000&format=json"
+                )
+                wiki_resp = await client.get(wiki_url)
+                if wiki_resp.status_code == 200:
+                    pages = wiki_resp.json().get("query", {}).get("pages", {})
+                    for _, page in pages.items():
+                        orig = page.get("original", {}).get("source")
+                        thumb = page.get("thumbnail", {}).get("source")
+                        src = orig or thumb
+                        title = page.get("title") or clean_q
+                        if src and src.startswith("http") and not any(c["url"] == src for c in candidates):
+                            candidates.append({"url": src, "caption": title})
+    except Exception as e:
+        logger.debug(f"Wikipedia pageimages search notice: {e}")
+
+    # 3. Try Wikimedia Commons API
+    if len(candidates) < max_results:
+        try:
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": WIKI_USER_AGENT}, follow_redirects=True) as client:
+                commons_url = (
+                    f"https://commons.wikimedia.org/w/api.php?action=query&generator=search"
+                    f"&gsrsearch={urllib.parse.quote_plus(clean_q)}&gsrnamespace=6&prop=imageinfo"
+                    f"&iiprop=url&iiurlwidth=1000&format=json"
+                )
+                commons_resp = await client.get(commons_url)
+                if commons_resp.status_code == 200:
+                    pages = commons_resp.json().get("query", {}).get("pages", {})
+                    for _, page in pages.items():
+                        imageinfo = page.get("imageinfo", [])
+                        if imageinfo:
+                            src = imageinfo[0].get("thumburl") or imageinfo[0].get("url")
+                            title = page.get("title") or clean_q
+                            if src and src.startswith("http") and not any(c["url"] == src for c in candidates):
+                                candidates.append({"url": src, "caption": title})
+        except Exception as e:
+            logger.debug(f"Wikimedia commons search notice: {e}")
+
+    # 4. Strictly Verify candidate URLs via HTTP HEAD / Content-Type image/*
+    verified: List[Dict[str, str]] = []
+    async with httpx.AsyncClient(timeout=3.5, headers=headers, follow_redirects=True) as verify_client:
+        for cand in candidates:
+            url = cand["url"]
+            try:
+                head_resp = await verify_client.head(url)
+                ct = head_resp.headers.get("content-type", "").lower()
+                if head_resp.status_code == 200 and ("image" in ct or ct.startswith("image/")):
+                    verified.append(cand)
+                elif head_resp.status_code in (403, 405):
+                    # Some CDNs block HEAD, try range GET 0-1024
+                    get_resp = await verify_client.get(url, headers={"Range": "bytes=0-1024"})
+                    ct_get = get_resp.headers.get("content-type", "").lower()
+                    if get_resp.status_code in (200, 206) and ("image" in ct_get or ct_get.startswith("image/")):
+                        verified.append(cand)
+            except Exception:
+                continue
+
+            if len(verified) >= max_results:
+                break
+
+    return verified[:max_results]
+
+
 def format_search_context(results: List[Dict[str, str]]) -> str:
     """Format search snippets for inclusion in LLM prompt context."""
     if not results:
