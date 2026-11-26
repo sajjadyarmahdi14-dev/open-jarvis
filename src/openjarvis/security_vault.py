@@ -268,6 +268,36 @@ class SecurityEvidenceVault:
         except Exception as e:
             return {"status": "error", "message": f"Network exception: {str(e)}"}
 
+    async def send_telegram_text(self, text: str, parse_mode: Optional[str] = "HTML") -> Dict[str, Any]:
+        """Forward a text alert, brain-dump note, or clipboard item to configured Telegram chat."""
+        clean_msg = (text or "").strip()
+        if not clean_msg:
+            return {"status": "error", "forwarded": False, "message": "Empty text"}
+
+        bot_token = self.config.get("bot_token", "")
+        chat_id = self.config.get("chat_id", "")
+        if not bot_token or not chat_id or not self.config.get("enabled", True):
+            return {"status": "skipped", "forwarded": False, "message": "Telegram Vault not configured or disabled."}
+
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload: Dict[str, Any] = {"chat_id": chat_id, "text": clean_msg}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    return {"status": "sent", "forwarded": True}
+                if parse_mode:
+                    # Retry without parse_mode in case text contained raw < or & characters
+                    resp2 = await client.post(url, json={"chat_id": chat_id, "text": clean_msg})
+                    if resp2.status_code == 200:
+                        return {"status": "sent", "forwarded": True}
+                return {"status": "error", "forwarded": False, "message": f"HTTP {resp.status_code}"}
+        except Exception as e:
+            logger.debug(f"send_telegram_text exception: {e}")
+            return {"status": "error", "forwarded": False, "message": str(e)}
+
     # -------------------------------------------------------------------------
     # Remote Bot Commands & Polling
     # -------------------------------------------------------------------------

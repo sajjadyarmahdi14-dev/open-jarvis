@@ -66,6 +66,12 @@ object UtilityDomain {
         if (recRes.handled) return recRes
 
         // ---------------------------------------------------------------------
+        // 0.5 Companion Suite (Protocol Escape, Daily Briefing, Clipboard & Notes)
+        // ---------------------------------------------------------------------
+        val compRes = handleCompanionSuite(context, rawText, clean, lower, norm, isFa)
+        if (compRes.handled) return compRes
+
+        // ---------------------------------------------------------------------
         // 1. Pro Camera Controls
         // ---------------------------------------------------------------------
         val camRes = handleCameraControls(context, rawText, clean, lower, norm, isFa)
@@ -170,6 +176,77 @@ object UtilityDomain {
             if (f != null && f > 0f) return f
         }
         return null
+    }
+
+    // =========================================================================
+    // Companion Suite (Protocol Escape, Daily Briefing, Clipboard & Quick Notes)
+    // =========================================================================
+    private fun handleCompanionSuite(
+        context: Context,
+        rawText: String,
+        clean: String,
+        lower: String,
+        norm: String,
+        isFa: Boolean
+    ): LocalRouteResult {
+        // Feature 2: Protocol Escape (Fake Incoming Call)
+        val fakeCall = com.sajjad.jarvis.FakeCallActivity.parseFakeCallIntent(rawText, isFa)
+        if (fakeCall != null) {
+            val resolvedCaller = fakeCall.callerName?.takeIf { it.isNotBlank() }
+                ?: com.sajjad.jarvis.FakeCallActivity.getConfiguredCaller(context, fakeCall.isPersian)
+            com.sajjad.jarvis.FakeCallActivity.scheduleFakeCall(
+                context,
+                fakeCall.delaySeconds,
+                resolvedCaller,
+                fakeCall.isPersian
+            )
+            val reply = if (fakeCall.isPersian) {
+                if (fakeCall.delaySeconds > 0) {
+                    "پروتکل فرار فعال شد؛ تا ${fakeCall.delaySeconds} ثانیه دیگر از طرف $resolvedCaller تماس برقرار می‌شود قربان."
+                } else {
+                    "در حال برقراری تماس جعلی از طرف $resolvedCaller قربان."
+                }
+            } else {
+                if (fakeCall.delaySeconds > 0) {
+                    "Protocol Escape armed, sir. Expect a call from $resolvedCaller in ${fakeCall.delaySeconds} seconds."
+                } else {
+                    "Placing incoming call from $resolvedCaller now, sir."
+                }
+            }
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "protocol_escape_fake_call")
+        }
+
+        // Feature 3: Executive Daily Briefing
+        val briefingTriggers = listOf(
+            "گزارش روز", "خلاصه امروز", "گزارش صبح", "گزارش صبحگاهی",
+            "daily briefing", "morning briefing", "executive briefing"
+        )
+        if (briefingTriggers.any { norm.contains(it) || lower.contains(it) }) {
+            com.sajjad.jarvis.DailyBriefingEngine.deliverExecutiveBriefing(context, isFa)
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "daily_briefing", suppressFallbackSpeech = true)
+        }
+
+        // Feature 4A: Smart Background Clipboard Actions
+        val clipAction = com.sajjad.jarvis.ClipboardAndNotesEngine.detectClipboardAction(norm)
+        if (clipAction != null) {
+            com.sajjad.jarvis.ClipboardAndNotesEngine.handleClipboardCommand(context, clipAction, isFa)
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "clipboard_action", suppressFallbackSpeech = true)
+        }
+
+        // Feature 4B: Read Today's Notes (0 tokens)
+        if (com.sajjad.jarvis.ClipboardAndNotesEngine.isReadNotesTrigger(norm)) {
+            com.sajjad.jarvis.ClipboardAndNotesEngine.readTodayNotes(context, isFa)
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "notes_read", suppressFallbackSpeech = true)
+        }
+
+        // Feature 4C: Save Brain Dump Quick Note (0 tokens)
+        val quickNoteText = com.sajjad.jarvis.ClipboardAndNotesEngine.extractQuickNoteText(rawText, isFa)
+        if (!quickNoteText.isNullOrBlank()) {
+            com.sajjad.jarvis.ClipboardAndNotesEngine.saveQuickNote(context, quickNoteText, isFa)
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "notes_save", suppressFallbackSpeech = true)
+        }
+
+        return LocalRouteResult(handled = false)
     }
 
     private fun handleVoiceRecorder(context: Context, clean: String, lower: String, norm: String, isFa: Boolean): LocalRouteResult {
@@ -604,7 +681,7 @@ object UtilityDomain {
             norm.contains("پروتکل خاموشی کامل") || norm.contains("پروتکل خاموشی")
         ) {
             SecurityProtocolEngine.executeAllSystemsDown(context, isFa)
-            return LocalRouteResult(handled = true, category = "security_all_systems_down")
+            return LocalRouteResult(handled = true, category = "security_all_systems_down", suppressFallbackSpeech = true)
         }
 
         // Protocol 3: Protocol Blackbox / Red Alert
@@ -614,7 +691,7 @@ object UtilityDomain {
             norm.contains("پروتکل ضد سرقت") || norm.contains("وضعیت قرمز")
         ) {
             SecurityProtocolEngine.executeBlackboxProtocol(context, isFa)
-            return LocalRouteResult(handled = true, category = "security_blackbox")
+            return LocalRouteResult(handled = true, category = "security_blackbox", suppressFallbackSpeech = true)
         }
 
         // Protocol 4: Protocol Siren
@@ -624,7 +701,7 @@ object UtilityDomain {
             norm.contains("آژیر پلیس") || norm.contains("روشن کردن آژیر")
         ) {
             SecurityProtocolEngine.executeSirenProtocol(context, isFa)
-            return LocalRouteResult(handled = true, category = "security_siren")
+            return LocalRouteResult(handled = true, category = "security_siren", suppressFallbackSpeech = true)
         }
 
         // Protocol 5: Voice Screen Unlock
@@ -635,7 +712,7 @@ object UtilityDomain {
             norm.contains("باز کردن قفل")
         ) {
             SecurityProtocolEngine.requestUnlockPhone(context, isFa)
-            return LocalRouteResult(handled = true, category = "security_unlock_request")
+            return LocalRouteResult(handled = true, category = "security_unlock_request", suppressFallbackSpeech = true)
         }
 
         // Protocol 6: Protocol Stand Down
@@ -645,7 +722,7 @@ object UtilityDomain {
             norm.contains("غیرفعال کردن پروتکل")
         ) {
             SecurityProtocolEngine.requestStandDown(context, isFa)
-            return LocalRouteResult(handled = true, category = "security_standdown_request")
+            return LocalRouteResult(handled = true, category = "security_standdown_request", suppressFallbackSpeech = true)
         }
 
         // Ad-hoc 1: Silent Evidence Photo Capture & Vault Upload
@@ -880,7 +957,8 @@ object UtilityDomain {
     }
 
     private fun getServerUrl(context: Context): String {
-        val prefs = context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
-        return prefs.getString("server_url", "http://185.204.1.230:8000") ?: "http://185.204.1.230:8000"
+        val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        val raw = prefs.getString("server_url", "http://104.252.175.159:8765") ?: "http://104.252.175.159:8765"
+        return raw.trim().removeSuffix("/")
     }
 }

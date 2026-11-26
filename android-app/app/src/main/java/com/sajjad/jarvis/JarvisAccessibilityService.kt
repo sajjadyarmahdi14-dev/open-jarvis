@@ -3,21 +3,31 @@ package com.sajjad.jarvis
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.camera2.CameraCharacteristics
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Display
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.sajjad.jarvis.security.SecurityProtocolEngine
+import com.sajjad.jarvis.security.SilentCameraCapturer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -90,6 +100,197 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     private var lastLockdownActionTime = 0L
+    private val volumeStateMachine = VolumeTriggerStateMachine()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingLongPressRunnable: Runnable? = null
+
+    override fun onKeyEvent(event: KeyEvent?): Boolean {
+        if (event == null) return super.onKeyEvent(event)
+
+        // Never intercept hardware keys during active Iron Man security lockdown
+        if (SecurityProtocolEngine.isLockdownActive) {
+            return super.onKeyEvent(event)
+        }
+
+        val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        volumeStateMachine.doubleTapEnabled = prefs.getBoolean(
+            VolumeTriggerStateMachine.PREF_STEALTH_DOUBLE_TAP,
+            true
+        )
+        volumeStateMachine.longPressAction = VolumeTriggerStateMachine.LongPressAction.fromPref(
+            prefs.getString(VolumeTriggerStateMachine.PREF_STEALTH_LONG_PRESS, "off")
+        )
+
+        val mappedAction = when (event.action) {
+            KeyEvent.ACTION_DOWN -> VolumeTriggerStateMachine.ACTION_DOWN
+            KeyEvent.ACTION_UP -> VolumeTriggerStateMachine.ACTION_UP
+            else -> return super.onKeyEvent(event)
+        }
+        val mappedKey = when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN -> VolumeTriggerStateMachine.KEYCODE_VOLUME_DOWN
+            KeyEvent.KEYCODE_VOLUME_UP -> VolumeTriggerStateMachine.KEYCODE_VOLUME_UP
+            else -> event.keyCode
+        }
+
+        if (mappedAction == VolumeTriggerStateMachine.ACTION_UP) {
+            pendingLongPressRunnable?.let { mainHandler.removeCallbacks(it) }
+            pendingLongPressRunnable = null
+        }
+
+        val actionResult = volumeStateMachine.onKeyEvent(
+            keyCode = mappedKey,
+            action = mappedAction,
+            repeatCount = event.repeatCount,
+            eventTimeMs = SystemClock.elapsedRealtime()
+        )
+
+        // Schedule 750ms hold timer on fresh Volume Down press for screen-off reliability
+        if (mappedKey == VolumeTriggerStateMachine.KEYCODE_VOLUME_DOWN &&
+            mappedAction == VolumeTriggerStateMachine.ACTION_DOWN &&
+            event.repeatCount == 0 &&
+            actionResult == VolumeTriggerStateMachine.VolumeAction.PASS_THROUGH &&
+            volumeStateMachine.longPressAction != VolumeTriggerStateMachine.LongPressAction.OFF
+        ) {
+            val capturedDownTs = volumeStateMachine.lastDownMs
+            pendingLongPressRunnable?.let { mainHandler.removeCallbacks(it) }
+            val runnable = Runnable {
+                val holdAction = volumeStateMachine.onLongPressTimeout(capturedDownTs)
+                if (holdAction != VolumeTriggerStateMachine.VolumeAction.PASS_THROUGH) {
+                    executeStealthVolumeAction(holdAction)
+                }
+            }
+            pendingLongPressRunnable = runnable
+            mainHandler.postDelayed(runnable, VolumeTriggerStateMachine.LONG_PRESS_HOLD_MS)
+        }
+
+        return when (actionResult) {
+            VolumeTriggerStateMachine.VolumeAction.PASS_THROUGH -> super.onKeyEvent(event)
+            VolumeTriggerStateMachine.VolumeAction.CONSUME_ONLY -> {
+                pendingLongPressRunnable?.let { mainHandler.removeCallbacks(it) }
+                pendingLongPressRunnable = null
+                true
+            }
+            else -> {
+                pendingLongPressRunnable?.let { mainHandler.removeCallbacks(it) }
+                pendingLongPressRunnable = null
+                executeStealthVolumeAction(actionResult)
+                true
+            }
+        }
+    }
+
+    private fun executeStealthVolumeAction(action: VolumeTriggerStateMachine.VolumeAction) {
+        when (action) {
+            VolumeTriggerStateMachine.VolumeAction.TRIGGER_STEALTH_LISTEN -> {
+                Log.i(TAG, "Stealth Hardware Trigger: Double-Tap Volume Down -> Active Listening (no wake-word)")
+                fireHapticPulse(35L)
+                val svc = JarvisVoiceService.instance
+                if (svc != null) {
+                    svc.triggerStealthListen()
+                } else {
+                    try {
+                        val intent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
+                            this.action = JarvisVoiceService.ACTION_STEALTH_LISTEN
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed launching stealth voice listener: ${e.message}")
+                    }
+                }
+            }
+            VolumeTriggerStateMachine.VolumeAction.TRIGGER_LONG_PRESS_SHUTTER -> {
+                Log.i(TAG, "Stealth Hardware Trigger: Long-Press Volume Down -> Silent Background Camera2 Shutter")
+                fireHapticPulse(45L)
+                serviceScope.launch(Dispatchers.IO) {
+                    val photoBytes = SilentCameraCapturer.capturePhoto(
+                        applicationContext,
+                        CameraCharacteristics.LENS_FACING_BACK
+                    )
+                    if (photoBytes != null) {
+                        saveStealthPhotoToGallery(photoBytes)
+                        fireHapticPulse(25L)
+                    }
+                }
+            }
+            VolumeTriggerStateMachine.VolumeAction.TRIGGER_LONG_PRESS_MEMO -> {
+                Log.i(TAG, "Stealth Hardware Trigger: Long-Press Volume Down -> Quick Voice Memo Toggle")
+                fireHapticPulse(45L)
+                val isFa = Locale.getDefault().language == "fa"
+                if (VoiceRecorderEngine.isRecording) {
+                    VoiceRecorderEngine.stopRecording(applicationContext, isFa = isFa)
+                } else {
+                    VoiceRecorderEngine.startRecording(applicationContext, isFa = isFa)
+                }
+            }
+            else -> {}
+        }
+    }
+
+    private fun fireHapticPulse(durationMs: Long) {
+        try {
+            val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vib?.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vib?.vibrate(durationMs)
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun saveStealthPhotoToGallery(jpegBytes: ByteArray) {
+        try {
+            val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date())
+            val fileName = "JARVIS_STEALTH_$ts.jpg"
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/Jarvis")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return
+            contentResolver.openOutputStream(uri)?.use { out -> out.write(jpegBytes) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+            }
+            Log.i(TAG, "Silent background photo saved to DCIM/Jarvis/$fileName")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed saving stealth photo to gallery: ${e.message}")
+        }
+    }
+
+    /**
+     * Background Clipboard Privacy Fallback: extracts currently focused/selected text from active window.
+     */
+    fun extractClipboardFallbackText(): String? {
+        val root = rootInActiveWindow ?: return null
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findEditableNode(root)
+        if (focused != null) {
+            val txt = focused.text?.toString()?.trim()
+            if (!txt.isNullOrBlank()) {
+                val start = focused.textSelectionStart
+                val end = focused.textSelectionEnd
+                if (start in 0 until txt.length && end in (start + 1)..txt.length) {
+                    return txt.substring(start, end).trim()
+                }
+                return txt
+            }
+        }
+        return null
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return

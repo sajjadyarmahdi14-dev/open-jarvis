@@ -23,6 +23,9 @@ object PhoneDomain {
     private const val TAG = "PhoneDomain"
 
     fun handle(context: Context, rawText: String, clean: String, lower: String, isFa: Boolean): LocalRouteResult {
+        if (com.sajjad.jarvis.FakeCallActivity.parseFakeCallIntent(rawText, isFa) != null) {
+            return LocalRouteResult(handled = false)
+        }
         val norm = NlpNormalizer.cleanLower(rawText)
 
         // ---------------------------------------------------------------------

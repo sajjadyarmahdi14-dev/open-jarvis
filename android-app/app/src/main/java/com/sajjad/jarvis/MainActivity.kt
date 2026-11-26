@@ -676,11 +676,31 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         val localResult = LocalCommandRouter.route(applicationContext, clean)
         if (localResult.handled) {
             val isFa = clean.any { it in '\u0600'..'\u06FF' }
-            val reply = localResult.spokenFeedback ?: (if (isFa) "انجام شد قربان." else "Done, sir.")
-            handleAssistantMessage(reply, turnId, false)
-            speakText(reply)
+            val replyText = localResult.spokenFeedback
+            if (!replyText.isNullOrBlank()) {
+                handleAssistantMessage(replyText, turnId, false)
+                speakText(replyText)
+            } else if (!localResult.suppressFallbackSpeech) {
+                val fallback = if (isFa) "انجام شد قربان." else "Done, sir."
+                handleAssistantMessage(fallback, turnId, false)
+                speakText(fallback)
+            }
             isProcessingState.value = false
             voiceStateText.value = "STANDBY: Say \"Jarvis\""
+            return
+        }
+
+        // Active Language Coach / Live Interpreter Mode
+        if (LanguageModeManager.isActive) {
+            isProcessingState.value = true
+            voiceStateText.value = "LANGUAGE MODE (${LanguageModeManager.targetLanguage.uppercase(Locale.ROOT)})"
+            LanguageModeManager.handleUserTurn(applicationContext, clean, turnId) { reply, _ ->
+                runOnUiThread {
+                    handleAssistantMessage(reply, turnId, false)
+                    isProcessingState.value = false
+                    voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                }
+            }
             return
         }
 
@@ -1463,9 +1483,6 @@ private fun InlineChatImageItem(img: ChatImage) {
             }
         }
     }
-            }
-        }
-    }
 }
 
 @Composable
@@ -1649,6 +1666,38 @@ private fun JarvisSettingsDialog(
     }
     var isTestingTelegram by remember { mutableStateOf(false) }
     var isAdminActiveState by remember { mutableStateOf(JarvisDeviceAdminReceiver.isAdminActive(context)) }
+
+    // Companion Suite (v2.6.0) Settings
+    var stealthDoubleTapEnabled by remember {
+        mutableStateOf(prefs.getBoolean(VolumeTriggerStateMachine.PREF_STEALTH_DOUBLE_TAP, true))
+    }
+    var stealthLongPressMode by remember {
+        mutableStateOf(prefs.getString(VolumeTriggerStateMachine.PREF_STEALTH_LONG_PRESS, "off") ?: "off")
+    }
+    var fakeCallCallerName by remember {
+        mutableStateOf(prefs.getString(FakeCallActivity.PREF_FAKE_CALL_CALLER, "") ?: "")
+    }
+    var autoMorningBriefingEnabled by remember {
+        mutableStateOf(prefs.getBoolean(DailyBriefingEngine.PREF_AUTO_MORNING_BRIEFING, true))
+    }
+    var briefingCityText by remember {
+        mutableStateOf(prefs.getString(DailyBriefingEngine.PREF_BRIEFING_CITY, "Tehran") ?: "Tehran")
+    }
+    var watchdogBatHighEnabled by remember {
+        mutableStateOf(prefs.getBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_HIGH, true))
+    }
+    var watchdogBatHighThresh by remember {
+        mutableStateOf(prefs.getInt(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_HIGH_THRESHOLD, 90))
+    }
+    var watchdogBatLowEnabled by remember {
+        mutableStateOf(prefs.getBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_LOW, true))
+    }
+    var watchdogBatTempEnabled by remember {
+        mutableStateOf(prefs.getBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_TEMP, true))
+    }
+    var watchdogVpsHealthEnabled by remember {
+        mutableStateOf(prefs.getBoolean(ProactiveWatchdog.PREF_WATCHDOG_VPS_HEALTH, true))
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -2534,6 +2583,254 @@ private fun JarvisSettingsDialog(
 
                 HorizontalDivider(color = CyanNeon.copy(alpha = 0.25f))
 
+                // 🚀 Flagship Companion Suite (v2.6.0)
+                Text(
+                    text = "🚀 COMPANION SUITE SETTINGS",
+                    color = CyanNeon,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                // Stealth Double-Tap Volume Down
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Stealth Double-Tap Volume Down",
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Bypass wake-word & start stealth listening (35ms haptic tick)",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = stealthDoubleTapEnabled,
+                        onCheckedChange = { stealthDoubleTapEnabled = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
+                // Long-Press Volume Down Action
+                Column {
+                    Text(
+                        text = "Long-Press Volume Down (>750ms Action)",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            "off" to "Off",
+                            "shutter" to "Silent Shutter",
+                            "memo" to "Voice Memo"
+                        ).forEach { (modeKey, label) ->
+                            val selected = stealthLongPressMode == modeKey
+                            Button(
+                                onClick = { stealthLongPressMode = modeKey },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (selected) CyanNeon else DarkSurface
+                                ),
+                                border = BorderStroke(0.8.dp, CyanNeon.copy(alpha = 0.45f)),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = if (selected) DarkBackground else TextPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Fake Call Caller Name
+                Column {
+                    Text(text = "Protocol Escape (Fake Call) Default Caller", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = fakeCallCallerName,
+                        onValueChange = { fakeCallCallerName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("Home / دفتر", color = TextSecondary.copy(alpha = 0.5f), fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyanNeon,
+                            unfocusedBorderColor = CyanNeon.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = CyanNeon
+                        )
+                    )
+                }
+
+                // Auto Daily Briefing on First Morning Headphone Connect
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Auto Morning Briefing on Headphone Connect",
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Reads morning briefing once/day (05:00–12:00) via headset",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = autoMorningBriefingEnabled,
+                        onCheckedChange = { autoMorningBriefingEnabled = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
+                // Briefing Weather City
+                Column {
+                    Text(text = "Daily Briefing Weather City", color = TextSecondary, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = briefingCityText,
+                        onValueChange = { briefingCityText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("Tehran", color = TextSecondary.copy(alpha = 0.5f), fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyanNeon,
+                            unfocusedBorderColor = CyanNeon.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = CyanNeon
+                        )
+                    )
+                }
+
+                // Proactive Watchdog Toggles
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Watchdog: Charging Target (${watchdogBatHighThresh}%)",
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Alert to unplug when battery reaches $watchdogBatHighThresh%",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(
+                            onClick = { watchdogBatHighThresh = if (watchdogBatHighThresh == 90) 100 else 90 }
+                        ) {
+                            Text("${watchdogBatHighThresh}%", color = CyanNeon, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Switch(
+                            checked = watchdogBatHighEnabled,
+                            onCheckedChange = { watchdogBatHighEnabled = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = CyanNeon,
+                                checkedTrackColor = CyanDim,
+                                uncheckedThumbColor = TextSecondary,
+                                uncheckedTrackColor = DarkSurface
+                            )
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Watchdog: Low Battery (<=15%)", color = TextPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = watchdogBatLowEnabled,
+                        onCheckedChange = { watchdogBatLowEnabled = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Watchdog: Battery Overheat (>43°C)", color = TextPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = watchdogBatTempEnabled,
+                        onCheckedChange = { watchdogBatTempEnabled = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Watchdog: VPS Health Poll (5m)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Alerts if CPU >90%, RAM >90%, or VPS offline", color = TextSecondary, fontSize = 11.sp)
+                    }
+                    Switch(
+                        checked = watchdogVpsHealthEnabled,
+                        onCheckedChange = { watchdogVpsHealthEnabled = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = CyanNeon.copy(alpha = 0.25f))
+
                 // Save Button
                 Button(
                     onClick = {
@@ -2542,6 +2839,16 @@ private fun JarvisSettingsDialog(
                         prefs.edit()
                             .putString("security_telegram_token", telegramBotTokenText.trim())
                             .putString("security_telegram_chat_id", telegramChatIdText.trim())
+                            .putBoolean(VolumeTriggerStateMachine.PREF_STEALTH_DOUBLE_TAP, stealthDoubleTapEnabled)
+                            .putString(VolumeTriggerStateMachine.PREF_STEALTH_LONG_PRESS, stealthLongPressMode)
+                            .putString(FakeCallActivity.PREF_FAKE_CALL_CALLER, fakeCallCallerName.trim())
+                            .putBoolean(DailyBriefingEngine.PREF_AUTO_MORNING_BRIEFING, autoMorningBriefingEnabled)
+                            .putString(DailyBriefingEngine.PREF_BRIEFING_CITY, briefingCityText.trim().ifBlank { "Tehran" })
+                            .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_HIGH, watchdogBatHighEnabled)
+                            .putInt(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_HIGH_THRESHOLD, watchdogBatHighThresh)
+                            .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_LOW, watchdogBatLowEnabled)
+                            .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_TEMP, watchdogBatTempEnabled)
+                            .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_VPS_HEALTH, watchdogVpsHealthEnabled)
                             .apply()
 
                         if (telegramBotTokenText.isNotBlank() && telegramChatIdText.isNotBlank()) {

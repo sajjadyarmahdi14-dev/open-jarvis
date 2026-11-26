@@ -32,7 +32,8 @@ object LocalCommandRouter {
         val spokenFeedback: String? = null,
         val category: String = "",
         val clientAction: JSONObject? = null,
-        val handoffToAi: Boolean = false
+        val handoffToAi: Boolean = false,
+        val suppressFallbackSpeech: Boolean = false
     )
 
     fun route(context: Context, rawText: String): LocalRouteResult {
@@ -47,11 +48,11 @@ object LocalCommandRouter {
             val secState = SecurityProtocolEngine.currentState
             if (secState == SecurityProtocolEngine.SecurityState.AWAITING_PASSPHRASE_FOR_UNLOCK) {
                 SecurityProtocolEngine.handlePassphraseForUnlock(context, clean, isFa)
-                return LocalRouteResult(handled = true, category = "security_unlock_passphrase")
+                return LocalRouteResult(handled = true, category = "security_unlock_passphrase", suppressFallbackSpeech = true)
             }
             if (secState == SecurityProtocolEngine.SecurityState.AWAITING_PASSPHRASE_FOR_STANDDOWN) {
                 SecurityProtocolEngine.handlePassphraseForStandDown(context, clean, isFa)
-                return LocalRouteResult(handled = true, category = "security_standdown_passphrase")
+                return LocalRouteResult(handled = true, category = "security_standdown_passphrase", suppressFallbackSpeech = true)
             }
 
             // 0. Session, Wake Word & Standby Control
@@ -139,6 +140,45 @@ object LocalCommandRouter {
     }
 
     private fun handleSessionAndWake(context: Context, clean: String, lower: String, isFa: Boolean): LocalRouteResult {
+        val norm = NlpNormalizer.cleanLower(clean)
+
+        // Language Coach / Pocket Live Interpreter Enter/Exit Commands
+        val langCmd = LanguageModeManager.parseLanguageCommand(clean, isFa)
+        if (langCmd != null) {
+            return when (langCmd) {
+                is LanguageModeManager.CommandAction.Exit -> {
+                    val reply = LanguageModeManager.exitMode(isFa)
+                    LocalRouteResult(handled = true, spokenFeedback = reply, category = "language_exit")
+                }
+                is LanguageModeManager.CommandAction.EnterPractice -> {
+                    val reply = LanguageModeManager.activateMode(
+                        LanguageModeManager.Mode.PRACTICE,
+                        langCmd.targetLanguage,
+                        context,
+                        langCmd.isFa
+                    )
+                    JarvisVoiceService.instance?.let { svc ->
+                        svc.broadcastUiUpdate(assistantReply = reply, wakeStatus = "speaking")
+                        JarvisOverlayManager.instance?.updateText(reply)
+                        svc.speakWithLanguage(reply, langCmd.targetLanguage) {
+                            svc.keepActiveConversationAlive(45000L)
+                        }
+                    }
+                    LocalRouteResult(handled = true, spokenFeedback = null, category = "language_practice_start", suppressFallbackSpeech = true)
+                }
+                is LanguageModeManager.CommandAction.EnterInterpreter -> {
+                    val reply = LanguageModeManager.activateMode(
+                        LanguageModeManager.Mode.INTERPRETER,
+                        langCmd.targetLanguage,
+                        context,
+                        langCmd.isFa
+                    )
+                    JarvisVoiceService.instance?.keepActiveConversationAlive(45000L)
+                    LocalRouteResult(handled = true, spokenFeedback = reply, category = "language_interpreter_start")
+                }
+            }
+        }
+
         // Standalone wake word or repeated wake-word deduplication ("Jarvis Jarvis Jarvis")
         val normalizedLower = lower.replace(Regex("[,.!?،؟]+"), "").trim()
         if (WAKE_WORDS.contains(normalizedLower) || isAllWakeWords(lower)) {
@@ -156,12 +196,13 @@ object LocalCommandRouter {
         )
         if (stopPatterns.any { lower == it || lower.startsWith("$it ") || lower.endsWith(" $it") || norm == it || norm.startsWith("$it ") || norm.endsWith(" $it") }) {
             try {
+                if (LanguageModeManager.isActive) LanguageModeManager.exitMode(isFa)
                 MediaEngine.handleMediaControl(context, "pause")
                 JarvisCameraActivity.instance?.finish()
             } catch (_: Exception) {}
             // Instant hard stop flushes speech queue, cancels streams & increments generation ID
             JarvisVoiceService.instance?.triggerHardStop(speakAck = true, isFa = isFa)
-            return LocalRouteResult(handled = true, spokenFeedback = null, category = "session_stop")
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "session_stop", suppressFallbackSpeech = true)
         }
 
         // Repeat last reply

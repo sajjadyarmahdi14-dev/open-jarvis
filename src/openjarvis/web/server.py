@@ -73,6 +73,7 @@ class TTSRequest(BaseModel):
     voice: Optional[str] = None
     rate: Optional[str] = "+5%"
     pitch: Optional[str] = "-2Hz"
+    language: Optional[str] = None
 
 
 class TTSAudioRequest(TTSRequest):
@@ -1350,7 +1351,7 @@ def _handle_fast_path(
 
     # Send Messenger (Telegram / WhatsApp / iGap / Bale / Eitaa)
     m_msg_alt = re.search(r"\b(?:send\s+(?:a\s+)?(.+?)\s+to\s+(.+?)\s+(?:in|on|via)\s+(telegram|whatsapp|igap|bale|eitaa))\b", norm)
-    m_msg_en = re.search(r"\b(?:send\s+(?:a\s+)?(?:telegram|whatsapp|igap|bale|eitaa)|(?:telegram|whatsapp|igap|bale|eitaa)\s+message)\s+(?:message\s+)?(?:to\s+)?([^\s]+.*?)\s+(?:saying|message|that|say)?\s*(.+)$", norm)
+    m_msg_en = re.search(r"\b(?:send\s+(?:a\s+)?(telegram|whatsapp|igap|bale|eitaa)|(telegram|whatsapp|igap|bale|eitaa)\s+message)\s+(?:message\s+)?(?:to\s+)?([^\s]+.*?)\s+(?:saying|message|that|say)?\s*(.+)$", norm)
     m_msg_fa = re.search(r"(?:پیام\s*بده|پیام\s*بفرست|ارسال\s*پیام)\s+(?:به\s+)?(.+?)\s*(?:توی|در)\s*(تلگرام|واتساپ|ایگپ|بله|ایتا)\s*(?:بگو|که|با متن)?\s*(.+)?$", msg)
 
     if m_msg_alt or m_msg_en or m_msg_fa:
@@ -1359,10 +1360,10 @@ def _handle_fast_path(
             contact = m_msg_alt.group(2).strip()
             message = sanitize_literal_text(m_msg_alt.group(1).strip())
         elif m_msg_en:
-            app_raw = m_msg_en.group(1) or ("whatsapp" if "whatsapp" in norm else "telegram")
+            app_raw = m_msg_en.group(1) or m_msg_en.group(2) or ("whatsapp" if "whatsapp" in norm else "telegram")
             app_name = app_raw.strip().lower()
-            contact = m_msg_en.group(2).strip()
-            message = sanitize_literal_text(m_msg_en.group(3).strip())
+            contact = m_msg_en.group(3).strip()
+            message = sanitize_literal_text((m_msg_en.group(4) or "").strip())
         else:
             contact = m_msg_fa.group(1).strip()
             app_raw = m_msg_fa.group(2) or "تلگرام"
@@ -3359,6 +3360,356 @@ async def vps_restart_endpoint(req: VpsRestartRequest):
     return vps_restart_service(req.service)
 
 
+# ---------------------------------------------------------------------------
+# Companion Suite: Executive Briefing, Brain Dump Notes, Clipboard, Watchdog & Language Coach
+# ---------------------------------------------------------------------------
+
+class NoteCreateRequest(BaseModel):
+    text: str
+    category: Optional[str] = None
+    forward_telegram: Optional[bool] = False
+
+
+class ClipboardVaultRequest(BaseModel):
+    text: str
+    source: Optional[str] = "clipboard"
+
+
+class WatchdogAlertRequest(BaseModel):
+    alert_type: str
+    title: str
+    message: str
+    severity: Optional[str] = "warning"
+
+
+class LanguageTurnRequest(BaseModel):
+    mode: str = "practice"  # "practice" | "interpreter"
+    target_language: str = "en"  # "en" | "de" | "fa"
+    user_text: str
+    session_id: Optional[str] = "default"
+    level: Optional[str] = "A1-B1"
+
+
+_language_sessions: Dict[str, deque] = {}
+
+
+def _normalize_target_language(lang: Optional[str], fallback: str = "en") -> str:
+    low = (lang or "").strip().lower()
+    if low in ("de", "de-de", "german", "deutsch", "آلمانی", "المانی"):
+        return "de"
+    if low in ("fa", "fa-ir", "persian", "farsi", "فارسی"):
+        return "fa"
+    if low in ("en", "en-gb", "en-us", "english", "انگلیسی"):
+        return "en"
+    return fallback
+
+
+async def _generate_companion_llm(
+    messages: List[Message],
+    request: Optional[Request] = None,
+    max_tokens: int = 280,
+    temperature: float = 0.4,
+) -> Optional[str]:
+    """Run a fast, crash-proof LLM completion using configured engine or REST fallback."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if request is not None:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            bearer = auth[7:].strip()
+            if bearer:
+                api_key = bearer
+
+    cfg_status = get_config_status()
+    if not api_key:
+        api_key = cfg_status.get("openrouter_key")
+    gemini_key = cfg_status.get("gemini_key") or os.environ.get("GEMINI_API_KEY")
+    active_model = cfg_status.get("active_model") or DEFAULT_OPENROUTER_MODEL
+
+    try:
+        agent = _get_or_create_agent()
+        if agent is not None and getattr(agent, "engine", None) is not None:
+            res = await asyncio.to_thread(
+                agent.engine.generate,
+                messages,
+                model=agent.model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            txt = str((res or {}).get("content") or "").strip()
+            if txt:
+                return _clean_tts_response(txt)
+    except Exception as exc:
+        logger.debug("Companion LLM primary engine notice: %s", exc)
+
+    if api_key or gemini_key:
+        try:
+            import httpx
+            from openjarvis.engine.cloud_rest import generate_openai_compat_rest
+            base_url = os.environ.get("OPENAI_BASE_URL") or "https://openrouter.ai/api/v1"
+            with httpx.Client(timeout=12.0) as client:
+                res = generate_openai_compat_rest(
+                    client=client,
+                    base_url=base_url,
+                    api_key=api_key or gemini_key,
+                    model=active_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                txt = str((res or {}).get("content") or "").strip()
+                if txt:
+                    return _clean_tts_response(txt)
+        except Exception as exc:
+            logger.debug("Companion LLM REST fallback notice: %s", exc)
+
+    return None
+
+
+@app.get("/api/briefing")
+async def executive_briefing_endpoint(
+    city: Optional[str] = Query(default=None),
+    language: Optional[str] = Query(default=None),
+):
+    """Aggregate live VPS status, fast keyless weather (<4s timeout fallback), and today's notes."""
+    from openjarvis.notes_store import NotesStore
+    from openjarvis.vps_ops import vps_status
+    from openjarvis.web_intel import get_weather
+
+    target_city = (city or os.getenv("OPENJARVIS_CITY", "Tehran")).strip() or "Tehran"
+
+    vps_data: Dict[str, Any] = {}
+    try:
+        vps_data = await asyncio.to_thread(vps_status)
+    except Exception as exc:
+        logger.debug("Briefing vps_status notice: %s", exc)
+        vps_data = {
+            "status": "unknown",
+            "cpu": {"load_1m": 0.0, "cores": 1, "used_pct": 0.0},
+            "ram": {"used_pct": 0.0},
+            "summary_en": "VPS telemetry unavailable.",
+            "summary_fa": "اطلاعات سرور موقتاً در دسترس نیست.",
+        }
+
+    weather_data: Dict[str, Any]
+    try:
+        weather_data = await asyncio.wait_for(get_weather(target_city), timeout=3.8)
+    except Exception as exc:
+        logger.debug("Briefing weather timeout/notice for %s: %s", target_city, exc)
+        weather_data = {
+            "city": target_city,
+            "temperature": None,
+            "condition_en": "Clear",
+            "condition_fa": "مساعد",
+            "summary_en": f"{target_city}: weather forecast temporarily offline.",
+            "summary_fa": f"آب‌وهوای {target_city} موقتاً آفلاین است.",
+            "success": False,
+        }
+
+    notes_today: List[Dict[str, Any]] = []
+    try:
+        notes_today = NotesStore.get_instance().list_notes(today=True, limit=10)
+    except Exception as exc:
+        logger.debug("Briefing notes lookup notice: %s", exc)
+
+    ram_pct = vps_data.get("ram", {}).get("used_pct", 0.0)
+    cpu_pct = vps_data.get("cpu", {}).get("used_pct", 0.0)
+    uptime_en = vps_data.get("uptime", {}).get("text_en", "online")
+    uptime_fa = vps_data.get("uptime", {}).get("text_fa", "آنلاین")
+
+    vps_brief_en = f"VPS nominal (CPU {cpu_pct}%, RAM {ram_pct}%, uptime {uptime_en})."
+    vps_brief_fa = f"سرور پایدار است (پردازنده {cpu_pct} درصد، رم {ram_pct} درصد، آپتایم {uptime_fa})."
+
+    return {
+        "status": "ok",
+        "city": target_city,
+        "weather": weather_data,
+        "weather_summary_en": weather_data.get("summary_en", ""),
+        "weather_summary_fa": weather_data.get("summary_fa", ""),
+        "vps": vps_data,
+        "vps_summary_en": vps_brief_en,
+        "vps_summary_fa": vps_brief_fa,
+        "notes_today_count": len(notes_today),
+        "notes_today": notes_today[:5],
+    }
+
+
+@app.post("/api/notes")
+async def create_note_endpoint(req: NoteCreateRequest):
+    """Save a quick note / brain dump capture with 0 LLM tokens and optional Telegram mirror."""
+    from openjarvis.notes_store import NotesStore
+    from openjarvis.security_vault import SecurityEvidenceVault
+
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Note text cannot be empty")
+
+    note = NotesStore.get_instance().save_note(text=text, category=req.category)
+    telegram_result: Dict[str, Any] = {"status": "skipped", "forwarded": False}
+    if req.forward_telegram:
+        vault = SecurityEvidenceVault.get_instance()
+        cat_label = note.get("category", "general").upper()
+        telegram_result = await vault.send_telegram_text(
+            f"📝 JARVIS BRAIN DUMP [{cat_label}]\n\n{text}",
+            parse_mode=None,
+        )
+    note["telegram"] = telegram_result
+    return note
+
+
+@app.get("/api/notes")
+async def list_notes_endpoint(
+    today: bool = Query(default=False),
+    limit: int = Query(default=20),
+    category: Optional[str] = Query(default=None),
+):
+    """Return recent or today's brain-dump notes."""
+    from openjarvis.notes_store import NotesStore
+
+    notes = NotesStore.get_instance().list_notes(today=today, limit=limit, category=category)
+    return {
+        "status": "ok",
+        "today": today,
+        "count": len(notes),
+        "notes": notes,
+    }
+
+
+@app.delete("/api/notes/{note_id}")
+async def delete_note_endpoint(note_id: int):
+    """Delete a note by ID."""
+    from openjarvis.notes_store import NotesStore
+
+    deleted = NotesStore.get_instance().delete_note(note_id)
+    return {"status": "ok" if deleted else "not_found", "id": note_id, "deleted": deleted}
+
+
+@app.post("/api/security/clipboard")
+async def security_clipboard_vault_endpoint(req: ClipboardVaultRequest):
+    """Forward copied clipboard text directly to Telegram Vault with 0 LLM tokens."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Clipboard text cannot be empty")
+
+    vault = SecurityEvidenceVault.get_instance()
+    tg_res = await vault.send_telegram_text(
+        f"📋 JARVIS CLIPBOARD VAULT ({req.source})\n\n{text}",
+        parse_mode=None,
+    )
+    return {
+        "status": "ok",
+        "characters": len(text),
+        "telegram": tg_res,
+    }
+
+
+@app.post("/api/security/alert")
+async def security_watchdog_alert_endpoint(req: WatchdogAlertRequest):
+    """Forward Proactive Device/VPS Watchdog alert to Telegram Vault."""
+    from openjarvis.security_vault import SecurityEvidenceVault
+
+    vault = SecurityEvidenceVault.get_instance()
+    tg_res = await vault.send_telegram_text(
+        f"⚠️ JARVIS WATCHDOG [{req.severity.upper()}: {req.alert_type}]\n{req.title}\n\n{req.message}",
+        parse_mode=None,
+    )
+    return {"status": "ok", "telegram": tg_res}
+
+
+@app.post("/api/language/turn")
+async def language_turn_endpoint(req: LanguageTurnRequest, request: Request = None):
+    """Handle one conversational turn for Hands-Free Language Coach or Pocket Live Interpreter."""
+    user_text = (req.user_text or "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="user_text cannot be empty")
+
+    mode = (req.mode or "practice").strip().lower()
+    if mode not in ("practice", "interpreter"):
+        mode = "practice"
+
+    target_lang = _normalize_target_language(req.target_language, fallback="en")
+    lang_names = {"en": "English", "de": "German", "fa": "Persian"}
+    target_name = lang_names[target_lang]
+    session_key = f"{mode}:{target_lang}:{(req.session_id or 'default').strip()}"
+
+    if session_key not in _language_sessions:
+        _language_sessions[session_key] = deque(maxlen=12)
+    sess_hist = _language_sessions[session_key]
+
+    if mode == "interpreter":
+        system_prompt = (
+            f"You are J.A.R.V.I.S. Pocket Live Interpreter.\n"
+            f"Translate the user's input directly and accurately into natural spoken {target_name}.\n"
+            f"STRICT RULES:\n"
+            f"- Output ONLY the direct {target_name} translation.\n"
+            f"- Do NOT include explanations, greetings, quotation marks, phonetic brackets, or extra commentary.\n"
+            f"- Keep punctuation natural for spoken text-to-speech."
+        )
+        llm_msgs = [
+            Message(role=Role.SYSTEM, content=system_prompt),
+            Message(role=Role.USER, content=user_text),
+        ]
+        reply = await _generate_companion_llm(llm_msgs, request=request, max_tokens=220, temperature=0.2)
+        if not reply:
+            fallback_map = {
+                "en": f"Live translation is temporarily unavailable, sir. Original text: {user_text}",
+                "de": f"Die Live-Übersetzung ist vorübergehend nicht verfügbar: {user_text}",
+                "fa": f"سرویس ترجمه همزمان موقتاً در دسترس نیست قربان: {user_text}",
+            }
+            reply = fallback_map[target_lang]
+    else:
+        level_str = (req.level or "A1-B1").strip()
+        if target_lang == "de":
+            system_prompt = (
+                f"You are J.A.R.V.I.S., a sharp, supportive male voice language tutor coaching German (level {level_str}) during a hands-free walk.\n"
+                f"RULES:\n"
+                f"- Reply in natural spoken German so de-DE-ConradNeural reads it authentically.\n"
+                f"- Keep each turn concise (2 to 3 short spoken sentences max, NO markdown, NO bullet points).\n"
+                f"- If the student made a grammar or word-choice mistake, gently give the corrected German sentence first in one brief sentence, otherwise praise briefly.\n"
+                f"- End with ONE practical everyday German question, vocabulary check, or verb conjugation prompt for the user's next turn."
+            )
+        else:
+            system_prompt = (
+                f"You are J.A.R.V.I.S., a sharp, witty, supportive British male voice tutor coaching conversational {target_name} (level {level_str}) hands-free.\n"
+                f"RULES:\n"
+                f"- Reply strictly in clean spoken {target_name} with ZERO markdown or bullet lists.\n"
+                f"- Keep responses crisp (2 to 3 spoken sentences total).\n"
+                f"- If the user made a grammar or phrasing slip, gently provide the natural correction concisely; otherwise acknowledge and encourage.\n"
+                f"- Always end with ONE engaging follow-up question, practical scenario prompt, or quick vocabulary/conjugation exercise."
+            )
+
+        llm_msgs: List[Message] = [Message(role=Role.SYSTEM, content=system_prompt)]
+        for prev in list(sess_hist)[-8:]:
+            role = Role.USER if prev["role"] == "user" else Role.ASSISTANT
+            llm_msgs.append(Message(role=role, content=prev["content"]))
+        llm_msgs.append(Message(role=Role.USER, content=user_text))
+
+        reply = await _generate_companion_llm(llm_msgs, request=request, max_tokens=240, temperature=0.5)
+        if not reply:
+            if target_lang == "de":
+                reply = "Sehr gut! Lass uns weiter üben. Wie sagt man auf Deutsch: Ich möchte heute Nachmittag einen Kaffee trinken?"
+            elif target_lang == "fa":
+                reply = "عالی است قربان! بیایید ادامه دهیم. امروز چه برنامه‌ای برای تمرین دارید؟"
+            else:
+                reply = "Very good, sir. Let's keep our momentum going—could you tell me about your plans for this evening in two sentences?"
+
+    clean_reply = _clean_tts_response(reply)
+    sess_hist.append({"role": "user", "content": user_text})
+    sess_hist.append({"role": "assistant", "content": clean_reply})
+
+    selected_voice = select_male_edge_tts_voice(clean_reply, language=target_lang)
+    return {
+        "status": "ok",
+        "mode": mode,
+        "target_language": target_lang,
+        "tts_voice": selected_voice,
+        "reply": clean_reply,
+        "spoken_text": clean_reply,
+        "session_turns": len(sess_hist),
+    }
+
+
 @app.post("/api/voice")
 async def voice_endpoint(req: VoiceRequest):
     """Record audio via Termux microphone, transcribe via STT, and run chat."""
@@ -3851,17 +4202,60 @@ async def voice_vad_utterance_endpoint(request: Request):
     }
 
 
+MALE_EDGE_TTS_VOICES = {
+    "en": "en-GB-RyanNeural",
+    "fa": "fa-IR-FaridNeural",
+    "de": "de-DE-ConradNeural",
+}
+
+_GERMAN_WORD_RE = re.compile(
+    r"\b(ich|und|der|die|das|ein|eine|einen|nicht|ist|sind|wie|guten|morgen|abend|"
+    r"danke|bitte|möchte|sprechen|deutsch|heute|warum|wohin|haben|kannst|mir|mit|für)\b",
+    re.IGNORECASE,
+)
+
+
+def select_male_edge_tts_voice(
+    text: str,
+    explicit_voice: Optional[str] = None,
+    language: Optional[str] = None,
+) -> str:
+    """Select strictly 100% Male Edge-TTS voice across English, Persian, and German."""
+    if explicit_voice and explicit_voice.strip():
+        v = explicit_voice.strip()
+        low_v = v.lower()
+        if low_v.startswith("de-"):
+            return "de-DE-ConradNeural"
+        if low_v.startswith("fa-"):
+            return "fa-IR-FaridNeural"
+        if low_v.startswith("en-"):
+            return "en-GB-RyanNeural"
+        return v
+
+    if language and language.strip():
+        norm_lang = _normalize_target_language(language, fallback="")
+        if norm_lang in MALE_EDGE_TTS_VOICES:
+            return MALE_EDGE_TTS_VOICES[norm_lang]
+
+    clean_t = (text or "").strip()
+    if any("\u0600" <= c <= "\u06FF" for c in clean_t):
+        return "fa-IR-FaridNeural"
+    if any(ch in "äöüßÄÖÜ" for ch in clean_t) or len(_GERMAN_WORD_RE.findall(clean_t)) >= 2:
+        return "de-DE-ConradNeural"
+    return "en-GB-RyanNeural"
+
+
 async def _synthesize_edge_tts(
     text: str,
     voice: Optional[str] = None,
     rate: Optional[str] = "+5%",
     pitch: Optional[str] = "-2Hz",
+    language: Optional[str] = None,
 ) -> Response:
     clean_text = _clean_tts_response(text)
     if not clean_text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
-    is_persian = any("\u0600" <= c <= "\u06FF" for c in clean_text)
-    selected_voice = voice or ("fa-IR-FaridNeural" if is_persian else "en-GB-RyanNeural")
+    selected_voice = select_male_edge_tts_voice(clean_text, explicit_voice=voice, language=language)
 
     import aiohttp
     import edge_tts
@@ -3910,20 +4304,20 @@ async def _synthesize_edge_tts(
 
 @app.post("/api/tts")
 async def tts_endpoint(req: TTSRequest):
-    """Synthesize speech using edge-tts (British RyanNeural or Persian FaridNeural)."""
+    """Synthesize speech using Male edge-tts (RyanNeural, FaridNeural, or ConradNeural)."""
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
-    return await _synthesize_edge_tts(text, req.voice, req.rate, req.pitch)
+    return await _synthesize_edge_tts(text, req.voice, req.rate, req.pitch, req.language)
 
 
 @app.post("/api/tts/audio")
 async def tts_audio_endpoint(req: TTSAudioRequest):
-    """Synthesize speech using edge-tts (British RyanNeural or Persian FaridNeural)."""
+    """Synthesize speech using Male edge-tts (RyanNeural, FaridNeural, or ConradNeural)."""
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
-    return await _synthesize_edge_tts(text, req.voice, req.rate, req.pitch)
+    return await _synthesize_edge_tts(text, req.voice, req.rate, req.pitch, req.language)
 
 
 @app.get("/api/tts/audio")
@@ -3932,12 +4326,13 @@ async def tts_audio_get_endpoint(
     voice: Optional[str] = None,
     rate: Optional[str] = "+5%",
     pitch: Optional[str] = "-2Hz",
+    language: Optional[str] = None,
 ):
     """Stream speech audio directly for web audio playback."""
     text = (text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
-    return await _synthesize_edge_tts(text, voice, rate, pitch)
+    return await _synthesize_edge_tts(text, voice, rate, pitch, language)
 
 
 @app.get("/api/camera/latest")

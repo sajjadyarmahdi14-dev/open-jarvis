@@ -118,6 +118,17 @@
             android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize" />
 
+        <!-- Protocol Escape Realistic Fake Incoming Call Activity -->
+        <activity
+            android:name=".FakeCallActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Jarvis" />
+
         <!-- 24/7 Always-On Native Voice Foreground Service -->
         <service
             android:name=".JarvisVoiceService"

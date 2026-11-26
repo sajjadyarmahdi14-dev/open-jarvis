@@ -280,7 +280,8 @@ object LiveScreenWatcher {
     }
 
     private fun getServerUrl(context: Context): String {
-        val prefs = context.getSharedPreferences("jarvis_prefs", Context.MODE_PRIVATE)
-        return prefs.getString("server_url", "http://185.204.1.230:8000") ?: "http://185.204.1.230:8000"
+        val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        val raw = prefs.getString("server_url", "http://104.252.175.159:8765") ?: "http://104.252.175.159:8765"
+        return raw.trim().removeSuffix("/")
     }
 }

@@ -183,7 +183,7 @@ def test_schema_contract_action_dispatcher_coverage():
 
     for m in re.finditer(r'"type":\s*"([a-zA-Z0-9_-]+)"', server_code):
         t = m.group(1).lower()
-        if t not in ("actions", "sentence", "done", "object", "string", "number", "boolean"):
+        if t not in ("actions", "images", "sentence", "done", "object", "string", "number", "boolean"):
             emitted_types.add(t)
 
     for m in re.finditer(r'"client_action":\s*"([a-zA-Z0-9_-]+)"', tools_code):

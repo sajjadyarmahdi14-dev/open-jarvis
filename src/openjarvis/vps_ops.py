@@ -128,6 +128,7 @@ def vps_status() -> Dict[str, Any]:
             "load_5m": load5,
             "load_15m": load15,
             "cores": cpu_cores,
+            "used_pct": round(min(100.0, (load1 / max(1, cpu_cores)) * 100.0), 1),
         },
         "ram": {
             "total_mb": mem_total_mb,

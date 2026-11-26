@@ -32,7 +32,9 @@ object CommunicationDomain {
             "draft", "compose", "write an email", "write a message", "formal email",
             "apologize", "apology", "explain why", "generate text"
         )
-        if (draftingIndicators.any { norm.contains(it) }) {
+        val isQuickNote = com.sajjad.jarvis.ClipboardAndNotesEngine.extractQuickNoteText(clean, isFa) != null
+        val isClipboardCmd = com.sajjad.jarvis.ClipboardAndNotesEngine.detectClipboardAction(norm) != null
+        if (!isQuickNote && !isClipboardCmd && draftingIndicators.any { norm.contains(it) }) {
             Log.i(TAG, "Request contains drafting/composition indicators -> Handoff to AI")
             return LocalRouteResult(handled = false, handoffToAi = true, category = "smart_handoff_ai")
         }
