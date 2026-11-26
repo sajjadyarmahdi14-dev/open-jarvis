@@ -394,6 +394,18 @@ class ProVoiceEngine(
         }
     }
 
+    fun triggerStandby() {
+        activeProbeJob?.cancel()
+        activeProbeJob = null
+        activeConversationUntil = 0L
+        isDirectTapToTalk = false
+        isUtteranceInProgress.set(false)
+        isMicGated.set(false)
+        if (!isMuted) {
+            updateState(EngineState.STANDBY)
+        }
+    }
+
     fun notifySpeaking(isSpeaking: Boolean) {
         if (isSpeaking) {
             isMicGated.set(true)

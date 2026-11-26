@@ -44,7 +44,7 @@ import java.util.Locale
 
 class JarvisAccessibilityService : AccessibilityService() {
 
-    private val serviceScope = CoroutineScope(Dispatchers.Main)
+    val serviceScope = CoroutineScope(Dispatchers.Main)
     private var isReceiverRegistered = false
 
     private val uiActionReceiver = object : BroadcastReceiver() {
