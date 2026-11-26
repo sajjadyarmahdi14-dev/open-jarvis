@@ -52,12 +52,20 @@ object NlpNormalizer {
      */
     fun transliteratePersianToLatin(input: String): String {
         var s = normalize(input).lowercase(Locale.ROOT)
+        val phraseMap = linkedMapOf(
+            "آهنگ" to "ahang",
+            "اهنگ" to "ahang",
+            "شجریان" to "shajarian"
+        )
+        for ((fa, en) in phraseMap) {
+            s = s.replace(fa, en)
+        }
         val charMap = mapOf(
             "ش" to "sh", "چ" to "ch", "خ" to "kh", "ژ" to "zh", "ق" to "gh", "غ" to "gh",
             "ف" to "f", "پ" to "p", "گ" to "g", "ک" to "k", "س" to "s", "ص" to "s", "ث" to "s",
             "ز" to "z", "ض" to "z", "ظ" to "z", "ذ" to "z", "ت" to "t", "ط" to "t", "ح" to "h",
             "ه" to "h", "ع" to "a", "ء" to "", "آ" to "a", "ا" to "a", "ب" to "b", "د" to "d",
-            "ر" to "r", "م" to "m", "ن" to "n", "و" to "o", "ی" to "i", "ل" to "l"
+            "ر" to "r", "م" to "m", "ن" to "n", "و" to "o", "ی" to "i", "ل" to "l", "ج" to "j"
         )
         for ((fa, en) in charMap) {
             s = s.replace(fa, en)
