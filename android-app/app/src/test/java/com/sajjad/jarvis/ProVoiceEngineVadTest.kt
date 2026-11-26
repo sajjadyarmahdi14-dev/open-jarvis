@@ -103,8 +103,8 @@ class ProVoiceEngineVadTest {
         // Peak should be boosted cleanly from 1200 to ~24000 (-2.5 dBFS)
         assertTrue("Normalized peak ($maxNormPeak) should be close to 24000", maxNormPeak in 23500..24500)
 
-        // Flat silence (peak <= 80) should NOT be amplified
-        val silentPcm = ByteArray(100) { 10 }
+        // Flat silence (16-bit sample peak = 10 <= 80) should NOT be amplified
+        val silentPcm = ByteArray(100) { if (it % 2 == 0) 10 else 0 }
         val normSilent = ProVoiceEngine.Companion.peakNormalizePcm(silentPcm)
         assertEquals(silentPcm.toList(), normSilent.toList())
 
