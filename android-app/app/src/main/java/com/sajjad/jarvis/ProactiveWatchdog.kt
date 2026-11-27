@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.sajjad.jarvis.security.SecurityProtocolEngine
@@ -46,6 +47,7 @@ object ProactiveWatchdog {
     const val PREF_WATCHDOG_BATTERY_LOW = "watchdog_battery_low"
     const val PREF_WATCHDOG_BATTERY_TEMP = "watchdog_battery_temp"
     const val PREF_WATCHDOG_VPS_HEALTH = "watchdog_vps_health"
+    const val PREF_WATCHDOG_VPS_POLL_SCREEN_OFF = "watchdog_vps_poll_screen_off"
 
     const val ALERT_BATTERY_HIGH = "battery_high"
     const val ALERT_BATTERY_LOW = "battery_low"
@@ -111,48 +113,55 @@ object ProactiveWatchdog {
         tempTenthsC: Int
     ) {
         if (pct < 0) return
-        val prefs = context.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
-        val enableHigh = prefs.getBoolean(PREF_WATCHDOG_BATTERY_HIGH, true)
-        val highThreshold = prefs.getInt(PREF_WATCHDOG_BATTERY_HIGH_THRESHOLD, 90)
-        val enableLow = prefs.getBoolean(PREF_WATCHDOG_BATTERY_LOW, true)
-        val enableTemp = prefs.getBoolean(PREF_WATCHDOG_BATTERY_TEMP, true)
+        val appCtx = context.applicationContext
+        scope.launch {
+            try {
+                val prefs = appCtx.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+                val enableHigh = prefs.getBoolean(PREF_WATCHDOG_BATTERY_HIGH, true)
+                val highThreshold = prefs.getInt(PREF_WATCHDOG_BATTERY_HIGH_THRESHOLD, 90)
+                val enableLow = prefs.getBoolean(PREF_WATCHDOG_BATTERY_LOW, true)
+                val enableTemp = prefs.getBoolean(PREF_WATCHDOG_BATTERY_TEMP, true)
 
-        val tempC = tempTenthsC / 10.0f
-        val nowMs = System.currentTimeMillis()
-        val alerts = evaluateBatteryThresholds(
-            pct = pct,
-            isCharging = isCharging,
-            tempCelsius = tempC,
-            enableHigh = enableHigh,
-            highThreshold = highThreshold,
-            enableLow = enableLow,
-            enableTemp = enableTemp
-        )
+                val tempC = tempTenthsC / 10.0f
+                val nowMs = System.currentTimeMillis()
+                val alerts = evaluateBatteryThresholds(
+                    pct = pct,
+                    isCharging = isCharging,
+                    tempCelsius = tempC,
+                    enableHigh = enableHigh,
+                    highThreshold = highThreshold,
+                    enableLow = enableLow,
+                    enableTemp = enableTemp
+                )
 
-        val isFa = Locale.getDefault().language == "fa"
-        for (alertType in alerts) {
-            if (!cooldownTracker.shouldEmit(alertType, nowMs)) continue
+                val isFa = Locale.getDefault().language == "fa"
+                for (alertType in alerts) {
+                    if (!cooldownTracker.shouldEmit(alertType, nowMs)) continue
 
-            val (title, msg) = when (alertType) {
-                ALERT_BATTERY_HIGH -> if (isFa) {
-                    "شارژ بهینه‌سازی باتری" to "قربان، شارژ باتری به $pct درصد رسید؛ برای حفظ سلامت باتری می‌توانید شارژر را جدا کنید."
-                } else {
-                    "Battery Longevity Guard" to "Battery reached $pct%, sir. Unplugging now helps preserve long-term battery health."
+                    val (title, msg) = when (alertType) {
+                        ALERT_BATTERY_HIGH -> if (isFa) {
+                            "شارژ بهینه‌سازی باتری" to "قربان، شارژ باتری به $pct درصد رسید؛ برای حفظ سلامت باتری می‌توانید شارژر را جدا کنید."
+                        } else {
+                            "Battery Longevity Guard" to "Battery reached $pct%, sir. Unplugging now helps preserve long-term battery health."
+                        }
+                        ALERT_BATTERY_LOW -> if (isFa) {
+                            "هشدار شارژ کم باتری" to "قربان، شارژ باتری به $pct درصد کاهش یافته است. اتصال به شارژر را پیشنهاد می‌کنم."
+                        } else {
+                            "Low Battery Alert" to "Battery dropped to $pct%, sir. Recommending power connection."
+                        }
+                        ALERT_BATTERY_TEMP -> if (isFa) {
+                            "هشدار دمای بالای باتری" to "قربان، دمای باتری به ${String.format(Locale.US, "%.1f", tempC)} درجه رسیده است. لطفاً دستگاه را خنک کنید."
+                        } else {
+                            "Battery Thermal Warning" to "Device battery temperature reached ${String.format(Locale.US, "%.1f", tempC)}°C, sir."
+                        }
+                        else -> continue
+                    }
+
+                    emitAlert(appCtx, alertType, title, msg, notifyTelegram = false)
                 }
-                ALERT_BATTERY_LOW -> if (isFa) {
-                    "هشدار شارژ کم باتری" to "قربان، شارژ باتری به $pct درصد کاهش یافته است. اتصال به شارژر را پیشنهاد می‌کنم."
-                } else {
-                    "Low Battery Alert" to "Battery dropped to $pct%, sir. Recommending power connection."
-                }
-                ALERT_BATTERY_TEMP -> if (isFa) {
-                    "هشدار دمای بالای باتری" to "قربان، دمای باتری به ${String.format(Locale.US, "%.1f", tempC)} درجه رسیده است. لطفاً دستگاه را خنک کنید."
-                } else {
-                    "Battery Thermal Warning" to "Device battery temperature reached ${String.format(Locale.US, "%.1f", tempC)}°C, sir."
-                }
-                else -> continue
+            } catch (e: Exception) {
+                Log.w(TAG, "Battery watchdog evaluation error: ${e.message}")
             }
-
-            emitAlert(context, alertType, title, msg, notifyTelegram = false)
         }
     }
 
@@ -165,6 +174,9 @@ object ProactiveWatchdog {
                 try {
                     val prefs = appCtx.getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
                     if (!prefs.getBoolean(PREF_WATCHDOG_VPS_HEALTH, true)) continue
+                    val allowWhileScreenOff = prefs.getBoolean(PREF_WATCHDOG_VPS_POLL_SCREEN_OFF, false)
+                    val pm = appCtx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                    if (!allowWhileScreenOff && pm != null && !pm.isInteractive) continue
                     if (!isNetworkConnected(appCtx)) continue
                     pollVpsOnce(appCtx)
                 } catch (e: Exception) {

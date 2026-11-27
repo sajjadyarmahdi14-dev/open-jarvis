@@ -29,12 +29,13 @@ object MediaDomain {
         // ---------------------------------------------------------------------
         // 1. Next / Change Song Transport Controls
         // ---------------------------------------------------------------------
-        val nextWords = listOf(
-            "آهنگ رو عوض کن", "موزیک رو عوض کن", "عوض کن", "بعدی", "آهنگ بعدی",
-            "بزن بعدی", "رد کن", "برو بعدی", "ترک بعدی", "آهنگ بعد", "موزیک بعد",
-            "next", "skip", "change song", "next track", "next song", "switch song", "skip track"
+        val nextExactWords = setOf("بعدی", "عوض کن", "next", "skip", "رد کن")
+        val nextPhrases = listOf(
+            "آهنگ رو عوض کن", "موزیک رو عوض کن", "آهنگ بعدی",
+            "بزن بعدی", "برو بعدی", "ترک بعدی", "آهنگ بعد", "موزیک بعد",
+            "change song", "next track", "next song", "switch song", "skip track"
         )
-        if (nextWords.any { norm == it || norm.contains(it) }) {
+        if (norm in nextExactWords || nextPhrases.any { norm == it || norm.contains(it) }) {
             MediaEngine.handleMediaControl(context, "next")
             val reply = if (isFa) "آهنگ بعدی پخش شد قربان." else "Skipped to next track, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "media_next")
@@ -43,12 +44,13 @@ object MediaDomain {
         // ---------------------------------------------------------------------
         // 2. Previous / Restart Track
         // ---------------------------------------------------------------------
-        val prevWords = listOf(
-            "آهنگ قبلی", "موزیک قبلی", "قبلی", "برگرد قبلی", "از اول بزار",
+        val prevExactWords = setOf("قبلی", "previous")
+        val prevPhrases = listOf(
+            "آهنگ قبلی", "موزیک قبلی", "برگرد قبلی", "از اول بزار",
             "از اول پخش کن", "ترک قبلی", "آهنگ قبل", "موزیک قبل",
-            "previous", "back track", "restart song", "previous track", "previous song", "go back song"
+            "back track", "restart song", "previous track", "previous song", "go back song"
         )
-        if (prevWords.any { norm == it || norm.contains(it) }) {
+        if (prevExactWords.contains(norm) || prevPhrases.any { norm == it || norm.contains(it) }) {
             MediaEngine.handleMediaControl(context, "previous")
             val reply = if (isFa) "آهنگ قبلی پخش شد قربان." else "Playing previous track, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "media_prev")
@@ -57,13 +59,14 @@ object MediaDomain {
         // ---------------------------------------------------------------------
         // 3. Pause / Stop / Mute Media Playback
         // ---------------------------------------------------------------------
-        val stopWords = listOf(
-            "آهنگ رو قطع کن", "موزیک رو قطع کن", "استاپ", "پاز کن", "خاموشش کن",
-            "نگهدار", "بسه", "قطع کن آهنگ رو", "موزیک رو خاموش کن", "متوقف کن",
-            "قطع کن موزیک رو", "آهنگ متوقف", "موزیک قطع", "استپ",
-            "stop music", "pause", "stop playing", "pause music", "pause playback", "stop playback"
+        val stopExactWords = setOf("استاپ", "استپ", "پاز", "نگهدار", "بسه", "pause")
+        val stopPhrases = listOf(
+            "آهنگ رو قطع کن", "موزیک رو قطع کن", "پاز کن",
+            "قطع کن آهنگ رو", "موزیک رو خاموش کن",
+            "قطع کن موزیک رو", "آهنگ متوقف", "موزیک قطع",
+            "stop music", "stop playing", "pause music", "pause playback", "stop playback"
         )
-        if (stopWords.any { norm == it || norm.contains(it) }) {
+        if (norm in stopExactWords || stopPhrases.any { norm == it || norm.contains(it) }) {
             MediaEngine.handleMediaControl(context, "pause")
             val reply = if (isFa) "پخش موسیقی متوقف شد قربان." else "Music playback paused, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "media_pause")
@@ -72,12 +75,13 @@ object MediaDomain {
         // ---------------------------------------------------------------------
         // 4. Resume / Play Music
         // ---------------------------------------------------------------------
-        val resumeWords = listOf(
-            "ادامه بده", "پلی کن", "پخش کن آهنگ رو", "موزیک رو ادامه بده",
+        val resumeExactWords = setOf("ادامه بده", "پلی کن", "resume")
+        val resumePhrases = listOf(
+            "پخش کن آهنگ رو", "موزیک رو ادامه بده",
             "ادامه موزیک", "ادامه آهنگ", "پخش مجدد آهنگ", "پخش مجدد",
-            "resume", "continue music", "resume music", "keep playing", "resume playback"
+            "continue music", "resume music", "keep playing", "resume playback"
         )
-        if (resumeWords.any { norm == it || norm.contains(it) }) {
+        if (norm in resumeExactWords || resumePhrases.any { norm == it || norm.contains(it) }) {
             MediaEngine.handleMediaControl(context, "play")
             val reply = if (isFa) "پخش موسیقی ادامه یافت قربان." else "Resuming music playback, sir."
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "media_resume")

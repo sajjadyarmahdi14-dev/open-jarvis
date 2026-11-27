@@ -183,10 +183,13 @@ object ActionDispatcher {
                 // 4. Volume Control
                 // -----------------------------------------------------------------
                 "android_volume", "volume_control", "volume" -> {
-                    val action = act.optString("action", "up")
+                    val rawAction = act.optString("action", "up").lowercase(Locale.ROOT)
                     val percent = if (act.has("percent")) act.optInt("percent")
                                   else if (act.has("level") && act.optInt("level") in 0..100) act.optInt("level")
                                   else null
+                    val action = if (rawAction == "volume" || rawAction.isBlank()) {
+                        if (percent != null) "set" else act.optString("sub_action", "up")
+                    } else rawAction
                     val stream = act.optString("stream", "media")
                     MediaEngine.handleVolumeControl(context, action, percent, stream)
                     lastActionResult = "Volume action '$action' applied"
@@ -328,6 +331,9 @@ object ActionDispatcher {
                     lastActionResult = "Screen text extracted (${screenText.length} chars)"
                     if (screenText.isNotBlank()) {
                         JarvisVoiceService.instance?.handleReadScreenAction(screenText)
+                    } else {
+                        val blankMsg = if (isFa) "متنی روی صفحه فعلی پیدا نشد قربان." else "No readable text found on the screen, sir."
+                        onFeedback?.invoke(blankMsg)
                     }
                     true
                 }
@@ -368,51 +374,102 @@ object ActionDispatcher {
                 // 9. Atomic UI Actions (Clicks, Typing, Gestures)
                 // -----------------------------------------------------------------
                 "execute_ui_action" -> {
-                    val ok = JarvisAccessibilityService.instance?.executeUiAction(act) == true
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        val missingAcc = if (isFa) "سرویس دسترسی‌پذیری غیرفعال است." else "Accessibility service is disabled."
+                        onFeedback?.invoke(missingAcc)
+                        lastActionResult = "Accessibility disabled"
+                        return false
+                    }
+                    val ok = acc.executeUiAction(act)
                     lastActionResult = if (ok) "UI action executed" else "UI action failed"
                     ok
                 }
                 "type_text", "type", "input_text" -> {
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        val missingAcc = if (isFa) "سرویس دسترسی‌پذیری برای تایپ متن فعال نیست." else "Accessibility service is disabled for text input."
+                        onFeedback?.invoke(missingAcc)
+                        lastActionResult = "Accessibility disabled"
+                        return false
+                    }
                     val text = act.optString("text", act.optString("message", ""))
                     val autoSend = act.optBoolean("auto_send", act.optBoolean("submit", false))
-                    val ok = JarvisAccessibilityService.instance?.typeText(text, autoSend) == true
+                    val ok = acc.typeText(text, autoSend)
                     lastActionResult = if (ok) "Typed text into input field" else "No editable field found"
                     ok
                 }
                 "click_element", "click", "tap" -> {
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        val missingAcc = if (isFa) "سرویس دسترسی‌پذیری برای کلیک فعال نیست." else "Accessibility service is disabled for screen taps."
+                        onFeedback?.invoke(missingAcc)
+                        lastActionResult = "Accessibility disabled"
+                        return false
+                    }
                     val target = act.optString("target", act.optString("target_text", ""))
-                    val ok = JarvisAccessibilityService.instance?.clickElement(target) == true
+                    val ok = acc.clickElement(target)
                     lastActionResult = if (ok) "Clicked element '$target'" else "Element '$target' not found"
                     ok
                 }
                 "scroll_down" -> {
-                    val ok = JarvisAccessibilityService.instance?.scrollDown() == true
-                    lastActionResult = "Scrolled down"
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        onFeedback?.invoke(if (isFa) "سرویس دسترسی‌پذیری غیرفعال است." else "Accessibility service is disabled.")
+                        return false
+                    }
+                    val ok = acc.scrollDown()
+                    lastActionResult = if (ok) "Scrolled down" else "Scroll down failed"
                     ok
                 }
                 "scroll_up" -> {
-                    val ok = JarvisAccessibilityService.instance?.scrollUp() == true
-                    lastActionResult = "Scrolled up"
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        onFeedback?.invoke(if (isFa) "سرویس دسترسی‌پذیری غیرفعال است." else "Accessibility service is disabled.")
+                        return false
+                    }
+                    val ok = acc.scrollUp()
+                    lastActionResult = if (ok) "Scrolled up" else "Scroll up failed"
                     ok
                 }
                 "go_back" -> {
-                    val ok = JarvisAccessibilityService.instance?.goBack() == true
-                    lastActionResult = "Navigated back"
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        onFeedback?.invoke(if (isFa) "سرویس دسترسی‌پذیری غیرفعال است." else "Accessibility service is disabled.")
+                        return false
+                    }
+                    val ok = acc.goBack()
+                    lastActionResult = if (ok) "Navigated back" else "Navigate back failed"
                     ok
                 }
                 "go_home" -> {
-                    val ok = JarvisAccessibilityService.instance?.goHome() == true
-                    lastActionResult = "Navigated home"
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        onFeedback?.invoke(if (isFa) "سرویس دسترسی‌پذیری غیرفعال است." else "Accessibility service is disabled.")
+                        return false
+                    }
+                    val ok = acc.goHome()
+                    lastActionResult = if (ok) "Navigated home" else "Navigate home failed"
                     ok
                 }
                 "open_notifications" -> {
-                    val ok = JarvisAccessibilityService.instance?.openNotifications() == true
-                    lastActionResult = "Opened notifications"
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        onFeedback?.invoke(if (isFa) "سرویس دسترسی‌پذیری غیرفعال است." else "Accessibility service is disabled.")
+                        return false
+                    }
+                    val ok = acc.openNotifications()
+                    lastActionResult = if (ok) "Opened notifications" else "Open notifications failed"
                     ok
                 }
                 "take_screenshot" -> {
-                    val ok = JarvisAccessibilityService.instance?.takeScreenshot() == true
-                    lastActionResult = "Screenshot triggered"
+                    val acc = JarvisAccessibilityService.instance
+                    if (acc == null) {
+                        onFeedback?.invoke(if (isFa) "سرویس دسترسی‌پذیری برای اسکرین‌شات فعال نیست." else "Accessibility service is disabled for screenshots.")
+                        return false
+                    }
+                    val ok = acc.takeScreenshot()
+                    lastActionResult = if (ok) "Screenshot triggered" else "Screenshot failed"
                     ok
                 }
 

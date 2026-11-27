@@ -258,8 +258,8 @@ def test_android_v260_static_configs_and_no_google_tts():
     assert 'android:turnScreenOn="true"' in manifest_xml
 
     gradle_kts = (REPO_ROOT / "android-app/app/build.gradle.kts").read_text(encoding="utf-8")
-    assert "versionCode = 32" in gradle_kts
-    assert 'versionName = "2.6.0"' in gradle_kts
+    assert "versionCode = 33" in gradle_kts
+    assert 'versionName = "2.6.1"' in gradle_kts
 
     android_src = REPO_ROOT / "android-app/app/src/main"
     for kt_file in android_src.rglob("*.kt"):

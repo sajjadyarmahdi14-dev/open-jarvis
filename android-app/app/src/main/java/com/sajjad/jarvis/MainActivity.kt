@@ -85,6 +85,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -197,6 +200,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
     private var isServiceActiveState = mutableStateOf(true)
     private var isTtsMutedState = mutableStateOf(false)
     private var voiceStateText = mutableStateOf("STANDBY: Say \"Jarvis\"")
+    private var lastCommandTraceState = mutableStateOf("")
     private var audioAmplitudeState = mutableFloatStateOf(0.0f)
     private var messagesState = mutableStateListOf<ChatMessage>()
     private var isProcessingState = mutableStateOf(false)
@@ -266,6 +270,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                             // Animated Voice Orb & Real-Time Status Indicator
                             JarvisVoiceOrbSection(
                                 voiceState = voiceStateText.value,
+                                commandTrace = lastCommandTraceState.value,
                                 amplitude = audioAmplitudeState.floatValue,
                                 onOrbClick = { triggerVoiceListen() }
                             )
@@ -523,8 +528,13 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
     }
 
     override fun onTtsFinished() {
+        // State transition after cooldown is driven by onWakeStateChanged(st), avoiding STANDBY flicker.
+    }
+
+    override fun onCommandTrace(trace: String) {
+        if (trace.isBlank()) return
         runOnUiThread {
-            voiceStateText.value = "STANDBY: Say \"Jarvis\""
+            lastCommandTraceState.value = trace
         }
     }
 
@@ -546,6 +556,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
             val isAppend = intent?.getBooleanExtra("is_append", false) ?: false
             val wakeStatus = intent?.getStringExtra("wake_status")
             val amp = intent?.getFloatExtra("amplitude", -1f) ?: -1f
+            val cmdTrace = intent?.getStringExtra("command_trace")
 
             // Avoid double delivery when MainActivity is active and attached as direct serviceListener
             if (JarvisVoiceService.serviceListener === this@MainActivity) {
@@ -554,6 +565,9 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                 }
                 if (amp >= 0f) {
                     audioAmplitudeState.floatValue = amp
+                }
+                if (!cmdTrace.isNullOrBlank()) {
+                    lastCommandTraceState.value = cmdTrace
                 }
                 return
             }
@@ -569,6 +583,9 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
             }
             if (amp >= 0f) {
                 audioAmplitudeState.floatValue = amp
+            }
+            if (!cmdTrace.isNullOrBlank()) {
+                lastCommandTraceState.value = cmdTrace
             }
         }
     }
@@ -670,80 +687,87 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
         if (clean.isBlank() || isProcessingState.value) return
 
         val turnId = UUID.randomUUID().toString()
+        val startMs = SystemClock.elapsedRealtime()
+        val snippet = if (clean.length > 36) clean.take(33) + "..." else clean
         handleUserMessage(clean, turnId)
-
-        // Check Zero-Token LocalCommandRouter first for typed chat!
-        val localResult = LocalCommandRouter.route(applicationContext, clean)
-        if (localResult.handled) {
-            val isFa = clean.any { it in '\u0600'..'\u06FF' }
-            val replyText = localResult.spokenFeedback
-            if (!replyText.isNullOrBlank()) {
-                handleAssistantMessage(replyText, turnId, false)
-                speakText(replyText)
-            } else if (!localResult.suppressFallbackSpeech) {
-                val fallback = if (isFa) "انجام شد قربان." else "Done, sir."
-                handleAssistantMessage(fallback, turnId, false)
-                speakText(fallback)
-            }
-            isProcessingState.value = false
-            voiceStateText.value = "STANDBY: Say \"Jarvis\""
-            return
-        }
-
-        // Active Language Coach / Live Interpreter Mode
-        if (LanguageModeManager.isActive) {
-            isProcessingState.value = true
-            voiceStateText.value = "LANGUAGE MODE (${LanguageModeManager.targetLanguage.uppercase(Locale.ROOT)})"
-            LanguageModeManager.handleUserTurn(applicationContext, clean, turnId) { reply, _ ->
-                runOnUiThread {
-                    handleAssistantMessage(reply, turnId, false)
-                    isProcessingState.value = false
-                    voiceStateText.value = "STANDBY: Say \"Jarvis\""
-                }
-            }
-            return
-        }
-
-        if (com.sajjad.jarvis.live.LiveScreenWatcher.isActive) {
-            isProcessingState.value = true
-            voiceStateText.value = "WATCHING SCREEN..."
-            com.sajjad.jarvis.live.LiveScreenWatcher.askScreenQuestion(applicationContext, clean) { reply ->
-                handleAssistantMessage(reply, turnId, false)
-                speakText(reply)
-                isProcessingState.value = false
-                voiceStateText.value = "STANDBY: Say \"Jarvis\""
-            }
-            return
-        }
-
-        if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
-            isProcessingState.value = true
-            voiceStateText.value = "ANALYZING AUDIO..."
-            com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(applicationContext, clean)
-            isProcessingState.value = false
-            voiceStateText.value = "STANDBY: Say \"Jarvis\""
-            return
-        }
-
         isProcessingState.value = true
         voiceStateText.value = "THINKING..."
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val server = serverUrlState.value.removeSuffix("/")
-                val u = URL("$server/api/chat")
-                val conn = u.openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                conn.setRequestProperty("Accept", "application/json")
-                val currentKey = apiKeyState.value.trim()
-                if (currentKey.isNotBlank()) {
-                    conn.setRequestProperty("Authorization", "Bearer $currentKey")
+                // Run Zero-Token LocalCommandRouter strictly off the Main thread
+                val localResult = LocalCommandRouter.route(applicationContext, clean)
+                if (localResult.handled) {
+                    val dt = SystemClock.elapsedRealtime() - startMs
+                    val isFa = clean.any { it in '\u0600'..'\u06FF' }
+                    val replyText = localResult.spokenFeedback
+                    withContext(Dispatchers.Main) {
+                        lastCommandTraceState.value = "Typed: \"$snippet\" -> LOCAL (${dt}ms)"
+                        if (!replyText.isNullOrBlank()) {
+                            handleAssistantMessage(replyText, turnId, false)
+                            if (!localResult.languageHint.isNullOrBlank()) {
+                                JarvisVoiceService.instance?.speakWithLanguage(replyText, localResult.languageHint)
+                            } else {
+                                speakText(replyText)
+                            }
+                        } else if (!localResult.suppressFallbackSpeech) {
+                            val fallback = if (isFa) "انجام شد قربان." else "Done, sir."
+                            handleAssistantMessage(fallback, turnId, false)
+                            speakText(fallback)
+                        }
+                        isProcessingState.value = false
+                        voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                    }
+                    return@launch
                 }
-                conn.connectTimeout = 10000
-                conn.readTimeout = 30000
-                conn.doOutput = true
 
+                // Active Language Coach / Live Interpreter Mode
+                if (LanguageModeManager.isActive) {
+                    withContext(Dispatchers.Main) {
+                        voiceStateText.value = "LANGUAGE MODE (${LanguageModeManager.targetLanguage.uppercase(Locale.ROOT)})"
+                    }
+                    LanguageModeManager.handleUserTurn(applicationContext, clean, turnId) { reply, _ ->
+                        val dt = SystemClock.elapsedRealtime() - startMs
+                        runOnUiThread {
+                            lastCommandTraceState.value = "Typed: \"$snippet\" -> LANG (${dt}ms)"
+                            handleAssistantMessage(reply, turnId, false)
+                            isProcessingState.value = false
+                            voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                        }
+                    }
+                    return@launch
+                }
+
+                if (com.sajjad.jarvis.live.LiveScreenWatcher.isActive) {
+                    withContext(Dispatchers.Main) {
+                        voiceStateText.value = "WATCHING SCREEN..."
+                    }
+                    com.sajjad.jarvis.live.LiveScreenWatcher.askScreenQuestion(applicationContext, clean) { reply ->
+                        val dt = SystemClock.elapsedRealtime() - startMs
+                        lastCommandTraceState.value = "Typed: \"$snippet\" -> SCREEN (${dt}ms)"
+                        handleAssistantMessage(reply, turnId, false)
+                        speakText(reply)
+                        isProcessingState.value = false
+                        voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                    }
+                    return@launch
+                }
+
+                if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
+                    withContext(Dispatchers.Main) {
+                        voiceStateText.value = "ANALYZING AUDIO..."
+                    }
+                    com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(applicationContext, clean)
+                    val dt = SystemClock.elapsedRealtime() - startMs
+                    withContext(Dispatchers.Main) {
+                        lastCommandTraceState.value = "Typed: \"$snippet\" -> AUDIO (${dt}ms)"
+                        isProcessingState.value = false
+                        voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                    }
+                    return@launch
+                }
+
+                val server = serverUrlState.value.removeSuffix("/")
                 val (batteryPct, isCharging) = getBatteryTelemetry()
                 val body = JSONObject().apply {
                     put("message", clean)
@@ -752,67 +776,75 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                     put("device_charging", isCharging)
                 }
 
-                OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(body.toString()) }
+                val reqBuilder = Request.Builder()
+                    .url("$server/api/chat")
+                    .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .addHeader("Accept", "application/json")
+                val currentKey = apiKeyState.value.trim()
+                if (currentKey.isNotBlank()) {
+                    reqBuilder.addHeader("Authorization", "Bearer $currentKey")
+                }
 
-                if (conn.responseCode in 200..299) {
-                    val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                    val json = JSONObject(respStr)
-                    val reply = json.optString("response", "Done, sir.")
-                    val clientActions = json.optJSONArray("client_actions")
-                    val imagesArray = json.optJSONArray("images")
-                    val chatImages = mutableListOf<ChatImage>()
-                    if (imagesArray != null) {
-                        for (i in 0 until imagesArray.length()) {
-                            val imgObj = imagesArray.optJSONObject(i)
-                            if (imgObj != null) {
-                                val u = imgObj.optString("url")
-                                val cap = imgObj.optString("caption")
-                                if (u.isNotBlank()) {
-                                    chatImages.add(ChatImage(url = u, caption = cap))
+                JarvisHttpClient.chatClient.newCall(reqBuilder.build()).execute().use { resp ->
+                    val dt = SystemClock.elapsedRealtime() - startMs
+                    val durStr = if (dt >= 1000L) String.format(Locale.US, "%.1fs", dt / 1000.0) else "${dt}ms"
+                    if (resp.isSuccessful) {
+                        val respStr = resp.body?.string() ?: "{}"
+                        val json = JSONObject(respStr)
+                        val reply = json.optString("response", "Done, sir.")
+                        val clientActions = json.optJSONArray("client_actions")
+                        val imagesArray = json.optJSONArray("images")
+                        val chatImages = mutableListOf<ChatImage>()
+                        if (imagesArray != null) {
+                            for (i in 0 until imagesArray.length()) {
+                                val imgObj = imagesArray.optJSONObject(i)
+                                if (imgObj != null) {
+                                    val u = imgObj.optString("url")
+                                    val cap = imgObj.optString("caption")
+                                    if (u.isNotBlank()) {
+                                        chatImages.add(ChatImage(url = u, caption = cap))
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    withContext(Dispatchers.Main) {
-                        handleAssistantMessage(reply, turnId, false, chatImages)
-                        isProcessingState.value = false
-                        voiceStateText.value = "STANDBY: Say \"Jarvis\""
-                    }
+                        withContext(Dispatchers.Main) {
+                            lastCommandTraceState.value = "Typed: \"$snippet\" -> AI ($durStr)"
+                            handleAssistantMessage(reply, turnId, false, chatImages)
+                            isProcessingState.value = false
+                            voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                        }
 
-                    // Execute client actions via Unified ActionDispatcher
-                    if (clientActions != null) {
-                        ActionDispatcher.dispatchActions(applicationContext, clientActions) { feedback ->
-                            handleAssistantMessage(feedback, turnId, true)
-                            if (!isTtsMutedState.value) {
-                                val svc = JarvisVoiceService.instance
-                                if (svc != null) {
-                                    svc.speakBritish(feedback)
+                        if (clientActions != null) {
+                            ActionDispatcher.dispatchActions(applicationContext, clientActions) { feedback ->
+                                handleAssistantMessage(feedback, turnId, true)
+                                if (!isTtsMutedState.value) {
+                                    JarvisVoiceService.instance?.speakBritish(feedback)
                                 }
                             }
                         }
-                    }
 
-                    // Read out reply via TTS (guaranteed single-flight loud Edge-TTS)
-                    if (!isTtsMutedState.value) {
-                        val svc = JarvisVoiceService.instance
-                        if (svc != null) {
-                            svc.speakBritish(reply)
-                        } else {
-                            try {
-                                val speakIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
-                                    action = JarvisVoiceService.ACTION_SPEAK_TEXT
-                                    putExtra(JarvisVoiceService.EXTRA_SPEAK_TEXT, reply)
-                                }
-                                ContextCompat.startForegroundService(applicationContext, speakIntent)
-                            } catch (_: Exception) {}
+                        if (!isTtsMutedState.value) {
+                            val svc = JarvisVoiceService.instance
+                            if (svc != null) {
+                                svc.speakBritish(reply)
+                            } else {
+                                try {
+                                    val speakIntent = Intent(applicationContext, JarvisVoiceService::class.java).apply {
+                                        action = JarvisVoiceService.ACTION_SPEAK_TEXT
+                                        putExtra(JarvisVoiceService.EXTRA_SPEAK_TEXT, reply)
+                                    }
+                                    ContextCompat.startForegroundService(applicationContext, speakIntent)
+                                } catch (_: Exception) {}
+                            }
                         }
-                    }
-                } else {
-                    withContext(Dispatchers.Main) {
-                        handleAssistantMessage("Server returned HTTP ${conn.responseCode}", turnId, false)
-                        isProcessingState.value = false
-                        voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            lastCommandTraceState.value = "Typed: \"$snippet\" -> HTTP ${resp.code} ($durStr)"
+                            handleAssistantMessage("Server returned HTTP ${resp.code}", turnId, false)
+                            isProcessingState.value = false
+                            voiceStateText.value = "STANDBY: Say \"Jarvis\""
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -1109,6 +1141,7 @@ private fun JarvisTopBar(
 @Composable
 private fun JarvisVoiceOrbSection(
     voiceState: String,
+    commandTrace: String,
     amplitude: Float,
     onOrbClick: () -> Unit
 ) {
@@ -1278,6 +1311,19 @@ private fun JarvisVoiceOrbSection(
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+            )
+        }
+
+        if (commandTrace.isNotBlank()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = commandTrace,
+                color = TextSecondary,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 16.dp)
             )
         }
     }
@@ -1697,6 +1743,9 @@ private fun JarvisSettingsDialog(
     }
     var watchdogVpsHealthEnabled by remember {
         mutableStateOf(prefs.getBoolean(ProactiveWatchdog.PREF_WATCHDOG_VPS_HEALTH, true))
+    }
+    var watchdogVpsPollScreenOff by remember {
+        mutableStateOf(prefs.getBoolean(ProactiveWatchdog.PREF_WATCHDOG_VPS_POLL_SCREEN_OFF, false))
     }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -2829,6 +2878,27 @@ private fun JarvisSettingsDialog(
                     )
                 }
 
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Watchdog: Poll While Screen Off", color = TextPrimary, fontSize = 13.sp)
+                        Text("Saves battery when disabled (default OFF)", color = TextSecondary, fontSize = 11.sp)
+                    }
+                    Switch(
+                        checked = watchdogVpsPollScreenOff,
+                        onCheckedChange = { watchdogVpsPollScreenOff = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyanNeon,
+                            checkedTrackColor = CyanDim,
+                            uncheckedThumbColor = TextSecondary,
+                            uncheckedTrackColor = DarkSurface
+                        )
+                    )
+                }
+
                 HorizontalDivider(color = CyanNeon.copy(alpha = 0.25f))
 
                 // Save Button
@@ -2849,6 +2919,7 @@ private fun JarvisSettingsDialog(
                             .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_LOW, watchdogBatLowEnabled)
                             .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_BATTERY_TEMP, watchdogBatTempEnabled)
                             .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_VPS_HEALTH, watchdogVpsHealthEnabled)
+                            .putBoolean(ProactiveWatchdog.PREF_WATCHDOG_VPS_POLL_SCREEN_OFF, watchdogVpsPollScreenOff)
                             .apply()
 
                         if (telegramBotTokenText.isNotBlank() && telegramChatIdText.isNotBlank()) {

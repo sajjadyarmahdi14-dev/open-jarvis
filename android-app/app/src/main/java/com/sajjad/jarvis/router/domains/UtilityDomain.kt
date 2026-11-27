@@ -150,7 +150,7 @@ object UtilityDomain {
         }
     }
 
-    private fun parseZoomValue(text: String): Float? {
+    fun parseZoomValue(text: String): Float? {
         val norm = NlpNormalizer.cleanLower(text)
         val normDigits = NlpNormalizer.normalizeDigits(norm)
 
@@ -169,10 +169,11 @@ object UtilityDomain {
             if (f != null && f > 0f) return f
         }
 
-        val faRegex = Regex("(?:زوم\\s+)?(\\d+(?:\\.\\d+)?)\\s*(?:برابر)?")
-        val faMatch = faRegex.find(normDigits)
+        val faZoomRegex = Regex("(?:(?:زوم|بزرگنمایی)\\s+(\\d+(?:\\.\\d+)?)(?:\\s*برابر)?|(\\d+(?:\\.\\d+)?)\\s+برابر)")
+        val faMatch = faZoomRegex.find(normDigits)
         if (faMatch != null) {
-            val f = faMatch.groupValues[1].toFloatOrNull()
+            val valStr = faMatch.groupValues[1].ifBlank { faMatch.groupValues[2] }
+            val f = valStr.toFloatOrNull()
             if (f != null && f > 0f) return f
         }
         return null
@@ -482,15 +483,15 @@ object UtilityDomain {
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "clock_alarm_dismiss")
         }
 
-        // Set Alarm (Background Exact Alarm via AlarmManager)
+        // Set Alarm (Background Exact Alarm via AlarmManager - require explicit alarm/wake intent)
         val alarmMatchEn = Regex("(set an alarm for|alarm for|wake me up at)\\s+(\\d+)(?::(\\d+))?\\s*(am|pm)?").find(lower)
-        val alarmMatchFa = Regex("(آلارم بزار برای|ساعت|بیدارم کن ساعت)\\s*(\\d+)(?::(\\d+))?\\s*(صبح|عصر|شب)?").find(NlpNormalizer.normalizeDigits(clean))
+        val alarmMatchFa = Regex("(?:آلارم\\s*(?:بزار\\s*)?(?:برای\\s*)?|زنگ\\s*(?:هشدار\\s*)?(?:برای\\s*)?|بیدارم\\s*کن\\s*)(?:ساعت\\s*)?(\\d+)(?::(\\d+))?\\s*(صبح|عصر|شب)?").find(NlpNormalizer.normalizeDigits(clean))
         if (alarmMatchEn != null || alarmMatchFa != null) {
             var hour = alarmMatchEn?.groupValues?.get(2)?.toIntOrNull()
-                ?: alarmMatchFa?.groupValues?.get(2)?.toIntOrNull() ?: 8
+                ?: alarmMatchFa?.groupValues?.get(1)?.toIntOrNull() ?: 8
             val min = alarmMatchEn?.groupValues?.get(3)?.toIntOrNull()
-                ?: alarmMatchFa?.groupValues?.get(3)?.toIntOrNull() ?: 0
-            val amPm = alarmMatchEn?.groupValues?.get(4) ?: alarmMatchFa?.groupValues?.get(4) ?: ""
+                ?: alarmMatchFa?.groupValues?.get(2)?.toIntOrNull() ?: 0
+            val amPm = alarmMatchEn?.groupValues?.get(4) ?: alarmMatchFa?.groupValues?.get(3) ?: ""
             if ((amPm == "pm" || amPm == "عصر" || amPm == "شب") && hour < 12) hour += 12
             if ((amPm == "am" || amPm == "صبح") && hour == 12) hour = 0
 
@@ -522,9 +523,9 @@ object UtilityDomain {
     private fun handleCalendar(context: Context, clean: String, lower: String, norm: String, isFa: Boolean): LocalRouteResult {
         val calWords = listOf(
             "open calendar", "show calendar", "create event", "add calendar event", "schedule meeting",
-            "تقویم رو باز کن", "تقویم", "یک جلسه ثبت کن", "یک رویداد در تقویم ثبت کن", "جلسه جدید در تقویم"
+            "تقویم رو باز کن", "برنامه تقویم", "یک جلسه ثبت کن", "یک رویداد در تقویم ثبت کن", "جلسه جدید در تقویم"
         )
-        if (calWords.any { norm.contains(it) || lower.contains(it) }) {
+        if (norm == "تقویم" || calWords.any { norm.contains(it) || lower.contains(it) }) {
             val intent = Intent(Intent.ACTION_INSERT).apply {
                 data = CalendarContract.Events.CONTENT_URI
                 putExtra(CalendarContract.Events.TITLE, "New Meeting")
@@ -543,7 +544,7 @@ object UtilityDomain {
     private fun handleMapsAndNavigation(context: Context, clean: String, lower: String, norm: String, isFa: Boolean): LocalRouteResult {
         var place: String? = null
 
-        val navMatchEn = Regex("^(?:navigate to|directions to|show me directions to|map of|where is)\\s+(.+)").find(lower)
+        val navMatchEn = Regex("^(?:navigate to|directions to|show me directions to|map of|take me to)\\s+(.+)").find(lower)
         if (navMatchEn != null) {
             place = navMatchEn.groupValues[1].trim()
         } else if (isFa) {

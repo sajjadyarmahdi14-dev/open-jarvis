@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import logging
@@ -2273,6 +2274,72 @@ async def clear_chat_history():
     return {"success": True, "message": "Conversation history cleared."}
 
 
+_APP_INJECT_KEYWORDS = (
+    "open ", "launch ", "start ", "run ", "app", "uninstall", "install",
+    "باز کن", "اجرا کن", "برنامه", "اپ ", "نصب", "تلگرام", "واتساپ", "اینستاگرام", "یوتیوب",
+    "telegram", "whatsapp", "instagram", "youtube", "spotify", "chrome", "camera",
+)
+
+
+def _should_inject_device_apps(message: str) -> bool:
+    """Only inject installed app inventory when the prompt likely refers to launching/checking apps."""
+    if not _device_apps or not message:
+        return False
+    low = message.lower()
+    if any(k in low for k in _APP_INJECT_KEYWORDS):
+        return True
+    for a in _device_apps[:120]:
+        name = (a.get("name") or a.get("label") or "").strip().lower()
+        if len(name) >= 3 and name in low:
+            return True
+    return False
+
+
+_EXPLICIT_PHOTO_PATTERNS = (
+    r"\b(?:give\s+me\s+(?:a\s+)?(?:photo|picture|pic|image)\s+of|show\s+me\s+(?:a\s+)?(?:picture|photo|pic|image)\s+of|find\s+(?:a\s+)?(?:picture|photo|pic|image)\s+of|(?:photo|picture|image)\s+of)\s+(.+)",
+    r"(?:^|[\s،.!؟])(?:عکس|تصویر)\s+(?!بگیر|گرفتن|سلفی)(.+?)(?:\s+(?:رو\s+نشون\s+بده|رو\s+بفرست|نشون\s+بده|بفرست))?$",
+)
+_CAMERA_CAPTURE_EXCLUDE_RE = re.compile(
+    r"\b(?:take\s+a\s+(?:photo|picture|pic|selfie)|snap\s+(?:a\s+)?photo)\b|عکس\s*بگیر|عکس\s+بینداز|سلفی",
+    re.IGNORECASE,
+)
+
+
+async def _maybe_fetch_photo_intel(message: str) -> tuple[List[Dict[str, str]], str]:
+    """Fetch inline images + web context concurrently only for explicit image lookup requests."""
+    if not message or _CAMERA_CAPTURE_EXCLUDE_RE.search(message):
+        return [], ""
+    detected_target = None
+    for pp in _EXPLICIT_PHOTO_PATTERNS:
+        m_ph = re.search(pp, message, re.IGNORECASE)
+        if m_ph:
+            detected_target = m_ph.group(1).strip()
+            break
+    if not detected_target:
+        return [], ""
+    try:
+        from openjarvis.web_intel import search_images, web_search, format_search_context
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        found_images, web_results = await asyncio.wait_for(
+            asyncio.gather(
+                search_images(detected_target, max_results=3),
+                web_search(f"{detected_target} {today_str}", max_results=3),
+            ),
+            timeout=4.5,
+        )
+        prefix = (
+            f"[CURRENT DATE: {today_str}]\n"
+            f"[REAL WEB SEARCH RESULTS]:\n{format_search_context(web_results)}\n"
+            f"[CRITICAL IMAGE RULE]: Real verified photos have been retrieved and will be displayed inline directly in the chat UI. "
+            f"You MUST NEVER invent, hallucinate, or output fake URLs or markdown links! "
+            f"Concisely summarize who/what the subject is in 2-3 spoken sentences based strictly on the search results.\n\n"
+        )
+        return found_images, prefix
+    except Exception as e:
+        logger.debug("Photo intel search skipped/timed out: %s", e)
+        return [], ""
+
+
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest, request: Request = None):
     global _last_device_battery, _last_device_charging
@@ -2348,7 +2415,7 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
         input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
     elif _active_language_override == "fa":
         input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak Persian. Respond entirely in Persian.]\n\n{input_text}"
-    if _device_apps:
+    if _should_inject_device_apps(req.message):
         compact_apps = ", ".join(f"{a.get('name') or a.get('label')}={a.get('pkg') or a.get('package')}" for a in _device_apps[:120])
         input_text = f"[INSTALLED APPS ON PHONE]: {compact_apps}\nCRITICAL: If launching an app, select exact package name from this list.\n\n{input_text}"
 
@@ -2367,37 +2434,9 @@ async def chat_endpoint(req: ChatRequest, request: Request = None):
     except Exception as e:
         logger.debug("Active audio context injection notice: %s", e)
 
-    # Photo / Picture Request Hook (Fix 2)
-    found_images: List[Dict[str, str]] = []
-    photo_patterns = [
-        r"\b(?:give\s+me\s+(?:a\s+)?photo\s+of|show\s+me\s+(?:a\s+)?(?:picture|photo|pic|image)\s+of|photo\s+of|picture\s+of|image\s+of)\s+(.+)",
-        r"(?:عکس|تصویر)\s+(.+?)(?:\s+(?:رو\s+نشون\s+بده|رو\s+بفرست|نشون\s+بده|بفرست))?$",
-    ]
-    detected_photo_target = None
-    for pp in photo_patterns:
-        m_ph = re.search(pp, req.message, re.IGNORECASE)
-        if m_ph:
-            detected_photo_target = m_ph.group(1).strip()
-            break
-
-    if detected_photo_target or any(k in req.message.lower() for k in ["photo of", "picture of", "image of", "عکس"]):
-        try:
-            from openjarvis.web_intel import search_images, web_search, format_search_context
-            from datetime import datetime, timezone
-            query_target = detected_photo_target or req.message
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            found_images = await search_images(query_target, max_results=3)
-            web_results = await web_search(f"{query_target} {today_str}", max_results=3)
-            input_text = (
-                f"[CURRENT DATE: {today_str}]\n"
-                f"[REAL WEB SEARCH RESULTS]:\n{format_search_context(web_results)}\n"
-                f"[CRITICAL IMAGE RULE]: Real verified photos have been retrieved and will be displayed inline directly in the chat UI. "
-                f"You MUST NEVER invent, hallucinate, or output fake URLs or markdown links! "
-                f"Concisely summarize who/what the subject is in 2-3 spoken sentences based strictly on the search results.\n\n"
-                f"{input_text}"
-            )
-        except Exception as e:
-            logger.debug(f"Photo intel search notice: {e}")
+    found_images, photo_prefix = await _maybe_fetch_photo_intel(req.message)
+    if photo_prefix:
+        input_text = f"{photo_prefix}{input_text}"
 
     try:
         # Run agent in background thread so async event loop and ping checks are never blocked!
@@ -2583,7 +2622,7 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
             input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak English. Respond entirely in English.]\n\n{input_text}"
         elif _active_language_override == "fa":
             input_text = f"[LANGUAGE OVERRIDE: The user explicitly commanded you to speak Persian. Respond entirely in Persian.]\n\n{input_text}"
-        if _device_apps:
+        if _should_inject_device_apps(req.message):
             compact_apps = ", ".join(f"{a.get('name') or a.get('label')}={a.get('pkg') or a.get('package')}" for a in _device_apps[:120])
             input_text = f"[INSTALLED APPS ON PHONE]: {compact_apps}\nCRITICAL: If launching an app, select exact package name from this list.\n\n{input_text}"
         if req.screen_context:
@@ -2601,37 +2640,9 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
         except Exception as e:
             logger.debug("Active audio context stream injection notice: %s", e)
 
-        # Photo / Picture Request Hook for streaming (Fix 2)
-        found_stream_images: List[Dict[str, str]] = []
-        photo_patterns = [
-            r"\b(?:give\s+me\s+(?:a\s+)?photo\s+of|show\s+me\s+(?:a\s+)?(?:picture|photo|pic|image)\s+of|photo\s+of|picture\s+of|image\s+of)\s+(.+)",
-            r"(?:عکس|تصویر)\s+(.+?)(?:\s+(?:رو\s+نشون\s+بده|رو\s+بفرست|نشون\s+بده|بفرست))?$",
-        ]
-        detected_photo_target = None
-        for pp in photo_patterns:
-            m_ph = re.search(pp, req.message, re.IGNORECASE)
-            if m_ph:
-                detected_photo_target = m_ph.group(1).strip()
-                break
-
-        if detected_photo_target or any(k in req.message.lower() for k in ["photo of", "picture of", "image of", "عکس"]):
-            try:
-                from openjarvis.web_intel import search_images, web_search, format_search_context
-                from datetime import datetime, timezone
-                query_target = detected_photo_target or req.message
-                today_str = datetime.now().strftime("%Y-%m-%d")
-                found_stream_images = await search_images(query_target, max_results=3)
-                web_results = await web_search(f"{query_target} {today_str}", max_results=3)
-                input_text = (
-                    f"[CURRENT DATE: {today_str}]\n"
-                    f"[REAL WEB SEARCH RESULTS]:\n{format_search_context(web_results)}\n"
-                    f"[CRITICAL IMAGE RULE]: Real verified photos have been retrieved and will be displayed inline directly in the chat UI. "
-                    f"You MUST NEVER invent, hallucinate, or output fake URLs or markdown links! "
-                    f"Concisely summarize who/what the subject is in 2-3 spoken sentences based strictly on the search results.\n\n"
-                    f"{input_text}"
-                )
-            except Exception as e:
-                logger.debug(f"Photo intel stream search notice: {e}")
+        found_stream_images, photo_prefix = await _maybe_fetch_photo_intel(req.message)
+        if photo_prefix:
+            input_text = f"{photo_prefix}{input_text}"
 
         system_prompt = (
             "You are J.A.R.V.I.S., a witty, razor-sharp, hyper-competent AI assistant with the personality of Tony Stark's iconic AI. "
@@ -2656,7 +2667,14 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request = None):
         try:
             if found_stream_images:
                 yield json.dumps({"type": "images", "images": found_stream_images}) + "\n"
-            async for chunk in engine.stream_full(messages, model=model):
+            stream_iter = (
+                engine.stream_full(
+                    messages, model=model, voice_fast=True, first_token_timeout_s=6.0
+                )
+                if type(engine).__name__ == "CloudEngine"
+                else engine.stream_full(messages, model=model)
+            )
+            async for chunk in stream_iter:
                 delta = chunk.content or ""
                 if chunk.tool_calls:
                     for tc in chunk.tool_calls:
@@ -3844,7 +3862,7 @@ def _speech_bandpass_filter(shorts: tuple[int, ...] | list[int], framerate: int 
 
 
 def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
-    """Calculate duration, RMS, and return bandpass-filtered and peak-normalized WAV (Fix 1 & Fix 2)."""
+    """Calculate duration, RMS, and peak-normalize WAV preserving natural full-band speech."""
     try:
         import wave, io, math, struct
         try:
@@ -3861,21 +3879,28 @@ def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
             return wav_bytes, duration, 0.0
 
         count = len(frames) // 2
-        raw_shorts = struct.unpack(f"<{count}h", frames[:count * 2])
         if count == 0:
             return wav_bytes, duration, 0.0
 
-        # Apply 300Hz-3400Hz speech-band BPF to remove rumble and high hiss
-        shorts = _speech_bandpass_filter(raw_shorts, framerate)
+        if audioop is not None:
+            rms = float(audioop.rms(frames, 2))
+            peak = int(audioop.max(frames, 2))
+            gain = min(15.0, 24000.0 / peak) if 60 < peak < 18000 else 1.0
+            norm_frames = audioop.mul(frames, 2, gain) if gain > 1.01 else frames
+            norm_rms = float(audioop.rms(norm_frames, 2)) if gain > 1.01 else rms
+        else:
+            raw_shorts = struct.unpack(f"<{count}h", frames[:count * 2])
+            rms = math.sqrt(sum(s * s for s in raw_shorts) / count)
+            peak = max(abs(s) for s in raw_shorts)
+            gain = min(15.0, 24000.0 / peak) if 60 < peak < 18000 else 1.0
+            if gain > 1.01:
+                clamped = [max(-32768, min(32767, int(s * gain))) for s in raw_shorts]
+                norm_frames = struct.pack(f"<{count}h", *clamped)
+                norm_rms = math.sqrt(sum(s * s for s in clamped) / count)
+            else:
+                norm_frames = frames[:count * 2]
+                norm_rms = rms
 
-        rms = math.sqrt(sum(s * s for s in shorts) / count)
-        peak = max(abs(s) for s in shorts) if shorts else 0
-
-        # Peak normalization: if 80 < peak < 18000, boost linearly to ~24000 (-2.5 dBFS)
-        gain = min(15.0, 24000.0 / peak) if 80 < peak < 18000 else 1.0
-        clamped = [max(-32768, min(32767, int(s * gain))) for s in shorts]
-        norm_frames = struct.pack(f"<{count}h", *clamped)
-        norm_rms = math.sqrt(sum(s * s for s in clamped) / count)
         out_buf = io.BytesIO()
         with wave.open(out_buf, "wb") as out_w:
             out_w.setparams(params)
@@ -3888,13 +3913,39 @@ def _normalize_audio(wav_bytes: bytes) -> tuple[bytes, float, float]:
         return wav_bytes, 0.0, 0.0
 
 
-def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
-    """Transcribe audio WAV/PCM bytes with smart concurrent bilingual (fa-IR + en-US) recognition."""
+_STT_WAKE_WORDS_FA = (
+    "جارویس", "جرویس", "جارویز", "جرویز", "چارویس", "چرویس",
+    "جاروویس", "جاربیس", "دارویس", "یارویس", "جارو بیس",
+)
+_STT_WAKE_WORDS_EN = (
+    "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "jervis",
+    "javis", "garvis", "charvis", "jarvish", "jarvez", "travis",
+)
+
+
+def _select_bilingual_transcript(txt_fa: str, txt_en: str, requested_lang: str) -> str:
+    req_clean = (requested_lang or "auto").strip().lower()
+    if req_clean in ("fa", "fa-ir"):
+        return txt_fa or txt_en
+    if req_clean in ("en", "en-us"):
+        return txt_en or txt_fa
+    fa_has_wake = any(w in txt_fa.lower() for w in _STT_WAKE_WORDS_FA)
+    en_has_wake = any(w in txt_en.lower() for w in _STT_WAKE_WORDS_EN)
+    has_fa_chars = any("\u0600" <= c <= "\u06FF" for c in txt_fa)
+    if fa_has_wake:
+        return txt_fa
+    if en_has_wake:
+        return txt_en
+    if txt_fa and has_fa_chars:
+        return txt_fa
+    return txt_en or txt_fa
+
+
+async def _do_transcribe_async(data: bytes, requested_lang: str = "auto") -> str:
+    """Single concurrent fa-IR + en-US Google STT pass via asyncio.gather with a 4.5s hard timeout."""
     norm_data, duration, rms = _normalize_audio(data)
     try:
-        import io
         import speech_recognition as sr
-        from concurrent.futures import ThreadPoolExecutor
 
         r = sr.Recognizer()
         with sr.AudioFile(io.BytesIO(norm_data)) as source:
@@ -3904,92 +3955,68 @@ def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
             try:
                 res = r.recognize_google(audio, language=lang)
                 return (res or "").strip()
-            except (sr.UnknownValueError, Exception):
+            except Exception:
                 return ""
 
-        wake_words_fa = (
-            "جارویس", "جرویس", "جارویز", "جرویز", "چارویس", "چرویس",
-            "جاروویس", "جاربیس", "دارویس", "یارویس", "جارو بیس"
-        )
-        wake_words_en = (
-            "jarvis", "hey jarvis", "hi jarvis", "ok jarvis", "jervis",
-            "javis", "garvis", "charvis", "jarvish", "jarvez", "travis"
-        )
+        try:
+            txt_fa, txt_en = await asyncio.wait_for(
+                asyncio.gather(
+                    asyncio.to_thread(_recognize, "fa-IR"),
+                    asyncio.to_thread(_recognize, "en-US"),
+                ),
+                timeout=4.5,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("STT timed out after 4.5s (bytes=%d, dur=%.2fs)", len(data), duration)
+            return ""
 
-        req_clean = (requested_lang or "auto").strip().lower()
-        result = ""
-        if req_clean in ("fa", "fa-ir"):
-            txt_fa = _recognize("fa-IR")
-            if txt_fa:
-                result = txt_fa
-            else:
-                result = _recognize("en-US")
-        elif req_clean in ("en", "en-us"):
-            txt_en = _recognize("en-US")
-            if txt_en:
-                result = txt_en
-            else:
-                result = _recognize("fa-IR")
-        else:
-            # "auto" mode: execute fa-IR and en-US concurrently in parallel
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                fut_fa = executor.submit(_recognize, "fa-IR")
-                fut_en = executor.submit(_recognize, "en-US")
-                txt_fa = fut_fa.result()
-                txt_en = fut_en.result()
-
-            # Smart wake-word & bilingual selection:
-            # 1. Prefer candidate containing a wake-word variant
-            fa_has_wake = any(w in txt_fa.lower() for w in wake_words_fa)
-            en_has_wake = any(w in txt_en.lower() for w in wake_words_en)
-            has_fa_chars = any("\u0600" <= c <= "\u06FF" for c in txt_fa)
-
-            if fa_has_wake:
-                result = txt_fa
-            elif en_has_wake:
-                result = txt_en
-            elif txt_fa and has_fa_chars:
-                result = txt_fa
-            elif txt_en:
-                result = txt_en
-            elif txt_fa:
-                result = txt_fa
-
-            # Fallback to en-GB if both return empty on valid audio (RMS > 150) (Fix 2: 4)
-            if not result and rms > 150.0:
-                txt_gb = _recognize("en-GB")
-                if txt_gb:
-                    result = txt_gb
-
-        # Fallback to local whisper or speech backend if configured
-        if not result:
-            try:
-                txt = r.recognize_whisper(audio)
-                if txt and txt.strip():
-                    result = txt.strip()
-            except Exception as e:
-                logger.debug("Whisper fallback transcription error: %s", e)
-        if not result:
-            try:
-                from openjarvis.core.config import load_config
-                from openjarvis.speech._discovery import discover_speech_backend
-                cfg = load_config()
-                backend = discover_speech_backend(cfg)
-                if backend:
-                    res = backend.transcribe(norm_data)
-                    if res and res.strip():
-                        result = res.strip()
-            except Exception as e:
-                logger.debug("SpeechBackend fallback error: %s", e)
-
-        logger.info(
-            "STT audio: bytes=%d, duration=%.2fs, rms=%.1f -> transcript='%s'",
-            len(data), duration, rms, result
-        )
+        result = _select_bilingual_transcript(txt_fa, txt_en, requested_lang)
+        logger.info("STT audio: bytes=%d, duration=%.2fs, rms=%.1f -> transcript='%s'", len(data), duration, rms, result)
         return result
     except Exception as exc:
         logger.warning("VAD transcription exception: %s", exc)
     return ""
+
+
+def _do_transcribe(data: bytes, requested_lang: str = "auto") -> str:
+    """Synchronous concurrent bilingual (fa-IR + en-US) transcription with 4.5s hard timeout (zero sequential retries)."""
+    norm_data, duration, rms = _normalize_audio(data)
+    try:
+        import speech_recognition as sr
+        from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+
+        r = sr.Recognizer()
+        with sr.AudioFile(io.BytesIO(norm_data)) as source:
+            audio = r.record(source)
+
+        def _recognize(lang: str) -> str:
+            try:
+                res = r.recognize_google(audio, language=lang)
+                return (res or "").strip()
+            except Exception:
+                return ""
+
+        executor = ThreadPoolExecutor(max_workers=2)
+        try:
+            fut_fa = executor.submit(_recognize, "fa-IR")
+            fut_en = executor.submit(_recognize, "en-US")
+            done, not_done = futures_wait((fut_fa, fut_en), timeout=4.5)
+            for f in not_done:
+                f.cancel()
+            txt_fa = fut_fa.result() if fut_fa in done else ""
+            txt_en = fut_en.result() if fut_en in done else ""
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        result = _select_bilingual_transcript(txt_fa, txt_en, requested_lang)
+        logger.info("STT audio: bytes=%d, duration=%.2fs, rms=%.1f -> transcript='%s'", len(data), duration, rms, result)
+        return result
+    except Exception as exc:
+        logger.warning("VAD transcription exception: %s", exc)
+    return ""
+
+
+_ORIGINAL_DO_TRANSCRIBE = _do_transcribe
 
 
 @app.post("/api/stt")
@@ -4023,10 +4050,13 @@ async def stt_endpoint(request: Request):
     if not audio_bytes or len(audio_bytes) < 4:
         return {"success": False, "transcript": "", "text": "", "language": "en", "error": "Received empty or invalid audio data"}
 
-    try:
-        transcript = await asyncio.to_thread(_do_transcribe, audio_bytes, req_lang)
-    except TypeError:
-        transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
+    if _do_transcribe is _ORIGINAL_DO_TRANSCRIBE:
+        transcript = await _do_transcribe_async(audio_bytes, req_lang)
+    else:
+        try:
+            transcript = await asyncio.to_thread(_do_transcribe, audio_bytes, req_lang)
+        except TypeError:
+            transcript = await asyncio.to_thread(_do_transcribe, audio_bytes)
     transcript = (transcript or "").strip()
     is_fa = any("\u0600" <= c <= "\u06FF" for c in transcript)
     err = None if transcript else "No speech detected in audio"
@@ -4245,6 +4275,36 @@ def select_male_edge_tts_voice(
     return "en-GB-RyanNeural"
 
 
+_EDGE_TTS_RAM_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
+_EDGE_TTS_RAM_MAX = 256
+_EDGE_TTS_DISK_MAX = 500
+
+
+def _tts_cache_dir() -> Path:
+    cache_dir = Path(os.environ.get("OPENJARVIS_TTS_CACHE_DIR", "/tmp/openjarvis_tts_cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _put_tts_cache(cache_key: str, audio_bytes: bytes, text_len: int) -> None:
+    if text_len <= 240:
+        _EDGE_TTS_RAM_CACHE[cache_key] = audio_bytes
+        _EDGE_TTS_RAM_CACHE.move_to_end(cache_key)
+        while len(_EDGE_TTS_RAM_CACHE) > _EDGE_TTS_RAM_MAX:
+            _EDGE_TTS_RAM_CACHE.popitem(last=False)
+    try:
+        cdir = _tts_cache_dir()
+        target = cdir / f"{cache_key}.mp3"
+        if not target.exists():
+            target.write_bytes(audio_bytes)
+            files = sorted(cdir.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+            while len(files) > _EDGE_TTS_DISK_MAX:
+                oldest = files.pop(0)
+                oldest.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 async def _synthesize_edge_tts(
     text: str,
     voice: Optional[str] = None,
@@ -4256,9 +4316,29 @@ async def _synthesize_edge_tts(
     if not clean_text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
     selected_voice = select_male_edge_tts_voice(clean_text, explicit_voice=voice, language=language)
+    rate_eff = rate or "+5%"
+    pitch_eff = pitch or "-2Hz"
 
     import aiohttp
     import edge_tts
+
+    use_cache = getattr(edge_tts.Communicate, "__module__", "").startswith("edge_tts")
+    cache_key = hashlib.sha256(
+        f"{selected_voice}|{rate_eff}|{pitch_eff}|{clean_text}".encode("utf-8")
+    ).hexdigest()
+    if use_cache:
+        if cache_key in _EDGE_TTS_RAM_CACHE:
+            _EDGE_TTS_RAM_CACHE.move_to_end(cache_key)
+            return Response(content=_EDGE_TTS_RAM_CACHE[cache_key], media_type="audio/mpeg")
+        disk_path = _tts_cache_dir() / f"{cache_key}.mp3"
+        if disk_path.exists():
+            try:
+                cached_bytes = disk_path.read_bytes()
+                if cached_bytes:
+                    _put_tts_cache(cache_key, cached_bytes, len(clean_text))
+                    return Response(content=cached_bytes, media_type="audio/mpeg")
+            except Exception:
+                pass
 
     last_exc = None
     for attempt in range(2):
@@ -4267,8 +4347,8 @@ async def _synthesize_edge_tts(
             comm_kwargs = {
                 "text": clean_text,
                 "voice": selected_voice,
-                "rate": rate or "+5%",
-                "pitch": pitch or "-2Hz",
+                "rate": rate_eff,
+                "pitch": pitch_eff,
             }
             try:
                 import inspect
@@ -4292,7 +4372,10 @@ async def _synthesize_edge_tts(
             if not buffer:
                 raise RuntimeError("No audio data synthesized")
 
-            return Response(content=bytes(buffer), media_type="audio/mpeg")
+            audio_out = bytes(buffer)
+            if use_cache:
+                _put_tts_cache(cache_key, audio_out, len(clean_text))
+            return Response(content=audio_out, media_type="audio/mpeg")
         except Exception as exc:
             last_exc = exc
             logger.warning("edge-tts synthesis attempt %d failed: %s", attempt + 1, exc)

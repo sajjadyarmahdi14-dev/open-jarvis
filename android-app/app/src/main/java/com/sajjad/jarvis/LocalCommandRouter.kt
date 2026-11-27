@@ -33,7 +33,8 @@ object LocalCommandRouter {
         val category: String = "",
         val clientAction: JSONObject? = null,
         val handoffToAi: Boolean = false,
-        val suppressFallbackSpeech: Boolean = false
+        val suppressFallbackSpeech: Boolean = false,
+        val languageHint: String? = null
     )
 
     fun route(context: Context, rawText: String): LocalRouteResult {
@@ -139,6 +140,27 @@ object LocalCommandRouter {
         }
     }
 
+    private val STOP_EXACT_PATTERNS = setOf(
+        "stop", "shut up", "quiet", "be quiet", "cancel", "silence", "stop listening",
+        "go to sleep", "sleep mode", "mute yourself", "standby", "that's all jarvis", "thats all jarvis",
+        "بسه", "ساکت شو", "وایسا", "وایستا", "استپ", "صبر کن", "خفه شو",
+        "کافیه", "بس کن", "خاموش شو", "گوش نده", "دیگه گوش نده", "برو استندبای",
+        "استندبای", "بخواب", "فعلا جارویس", "خداحافظ جارویس", "خداحافظ"
+    )
+
+    fun isStandaloneStopCommand(rawText: String, isLiveSessionActive: Boolean = false): Boolean {
+        if (isLiveSessionActive) return false
+        val norm = NlpNormalizer.cleanLower(rawText)
+        if (norm.isBlank()) return false
+        val tokens = norm.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val withoutLeadingWake = if (tokens.size >= 2 && isWakeToken(tokens.first())) {
+            tokens.drop(1).joinToString(" ")
+        } else {
+            norm
+        }
+        return STOP_EXACT_PATTERNS.contains(norm) || STOP_EXACT_PATTERNS.contains(withoutLeadingWake)
+    }
+
     private fun handleSessionAndWake(context: Context, clean: String, lower: String, isFa: Boolean): LocalRouteResult {
         val norm = NlpNormalizer.cleanLower(clean)
 
@@ -164,7 +186,13 @@ object LocalCommandRouter {
                             svc.keepActiveConversationAlive(45000L)
                         }
                     }
-                    LocalRouteResult(handled = true, spokenFeedback = null, category = "language_practice_start", suppressFallbackSpeech = true)
+                    LocalRouteResult(
+                        handled = true,
+                        spokenFeedback = if (JarvisVoiceService.instance == null) reply else null,
+                        category = "language_practice_start",
+                        suppressFallbackSpeech = true,
+                        languageHint = langCmd.targetLanguage
+                    )
                 }
                 is LanguageModeManager.CommandAction.EnterInterpreter -> {
                     val reply = LanguageModeManager.activateMode(
@@ -174,7 +202,12 @@ object LocalCommandRouter {
                         langCmd.isFa
                     )
                     JarvisVoiceService.instance?.keepActiveConversationAlive(45000L)
-                    LocalRouteResult(handled = true, spokenFeedback = reply, category = "language_interpreter_start")
+                    LocalRouteResult(
+                        handled = true,
+                        spokenFeedback = reply,
+                        category = "language_interpreter_start",
+                        languageHint = langCmd.targetLanguage
+                    )
                 }
             }
         }
@@ -182,19 +215,13 @@ object LocalCommandRouter {
         // Standalone wake word or repeated wake-word deduplication ("Jarvis Jarvis Jarvis")
         val normalizedLower = lower.replace(Regex("[,.!?،؟]+"), "").trim()
         if (WAKE_WORDS.contains(normalizedLower) || isAllWakeWords(lower)) {
-            val reply = if (isFa) "در خدمت شما هستم قربان. گوش می‌دهم." else "At your service, sir. I'm listening."
+            val reply = if (isFa) "بفرمایید قربان." else "Yes, sir?"
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "wake_session")
         }
 
-        // Stop / Cancel / Shut up / Sleep (Fix 3: Instant Hard Stop)
-        val stopPatterns = listOf(
-            "stop", "shut up", "quiet", "be quiet", "cancel", "wait", "silence", "stop listening",
-            "go to sleep", "sleep mode", "mute yourself", "standby", "that's all jarvis",
-            "بسه", "ساکت شو", "وایسا", "وایستا", "قطع کن", "استپ", "صبر کن", "خفه شو",
-            "کافیه", "بس کن", "خاموش شو", "گوش نده", "دیگه گوش نده", "برو استندبای",
-            "استندبای", "بخواب", "فعلا جارویس", "خداحافظ جارویس", "خداحافظ"
-        )
-        if (stopPatterns.any { lower == it || lower.startsWith("$it ") || lower.endsWith(" $it") || norm == it || norm.startsWith("$it ") || norm.endsWith(" $it") }) {
+        val isLiveSessionActive = com.sajjad.jarvis.live.LiveAudioSessionManager.isActive ||
+                com.sajjad.jarvis.live.LiveScreenWatcher.isActive
+        if (isStandaloneStopCommand(clean, isLiveSessionActive)) {
             try {
                 if (LanguageModeManager.isActive) LanguageModeManager.exitMode(isFa)
                 MediaEngine.handleMediaControl(context, "pause")
@@ -251,7 +278,7 @@ object LocalCommandRouter {
             val audioStopWords = listOf("تموم شد", "کافیه", "بسه", "دیگه گوش نده", "خب بگو", "stop listening", "done listening")
             if (audioStopWords.any { norm == it || norm.contains(it) }) {
                 com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(context)
-                return LocalRouteResult(handled = true, spokenFeedback = null, category = "live_audio_stop")
+                return LocalRouteResult(handled = true, spokenFeedback = null, category = "live_audio_stop", suppressFallbackSpeech = true)
             }
         }
 
@@ -274,7 +301,7 @@ object LocalCommandRouter {
                 }
             }
             com.sajjad.jarvis.live.LiveScreenWatcher.startWatching(context, question)
-            return LocalRouteResult(handled = true, spokenFeedback = null, category = "live_screen_start")
+            return LocalRouteResult(handled = true, spokenFeedback = null, category = "live_screen_start", suppressFallbackSpeech = true)
         }
 
         // 4. Live Audio Listening Start (Fix 9)
@@ -299,7 +326,12 @@ object LocalCommandRouter {
             val reply = if (question == null) {
                 if (isFa) "در حال گوش دادن به صوت قربان..." else "Listening to audio, sir..."
             } else null
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "live_audio_start")
+            return LocalRouteResult(
+                handled = true,
+                spokenFeedback = reply,
+                category = "live_audio_start",
+                suppressFallbackSpeech = (question != null)
+            )
         }
 
         return LocalRouteResult(handled = false)

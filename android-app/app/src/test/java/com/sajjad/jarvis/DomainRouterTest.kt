@@ -182,4 +182,32 @@ class DomainRouterTest {
             assertTrue("Cancel timer must match '$phrase'", cancelWords.any { norm.contains(it) })
         }
     }
+
+    @Test
+    fun testMathNotHijackedByCameraZoomAndStopCollisionsFixed() {
+        // Bare numbers in math/questions must NEVER match parseZoomValue
+        assertEquals(null, UtilityDomain.parseZoomValue("۲ + ۲"))
+        assertEquals(null, UtilityDomain.parseZoomValue("5 times 6"))
+        assertEquals(null, UtilityDomain.parseZoomValue("ساعت 8"))
+        assertEquals(null, UtilityDomain.parseZoomValue("tell me 3 jokes"))
+
+        // Explicit zoom commands still parse cleanly
+        assertEquals(2.0f, UtilityDomain.parseZoomValue("zoom x2") ?: -1f, 0.01f)
+        assertEquals(2.0f, UtilityDomain.parseZoomValue("2x") ?: -1f, 0.01f)
+        assertEquals(2.0f, UtilityDomain.parseZoomValue("زوم ۲") ?: -1f, 0.01f)
+        assertEquals(2.0f, UtilityDomain.parseZoomValue("زوم ۲ برابر") ?: -1f, 0.01f)
+
+        // Domain stop commands must NOT be hijacked by session hard stop
+        assertTrue(LocalCommandRouter.isStandaloneStopCommand("stop"))
+        assertTrue(LocalCommandRouter.isStandaloneStopCommand("Jarvis stop listening"))
+        assertTrue(LocalCommandRouter.isStandaloneStopCommand("بسه"))
+        assertFalse(LocalCommandRouter.isStandaloneStopCommand("stop music"))
+        assertFalse(LocalCommandRouter.isStandaloneStopCommand("stop recording"))
+        assertFalse(LocalCommandRouter.isStandaloneStopCommand("stop timer"))
+        assertFalse(LocalCommandRouter.isStandaloneStopCommand("آهنگ رو قطع کن"))
+        assertFalse(LocalCommandRouter.isStandaloneStopCommand("کافیه", isLiveSessionActive = true))
+
+        // Watchdog screen-off preference key defaults off unless enabled
+        assertEquals("watchdog_vps_poll_screen_off", ProactiveWatchdog.PREF_WATCHDOG_VPS_POLL_SCREEN_OFF)
+    }
 }

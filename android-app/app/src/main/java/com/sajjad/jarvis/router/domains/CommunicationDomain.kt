@@ -27,7 +27,7 @@ object CommunicationDomain {
         // SMART HANDOFF CHECK: Drafting, Formal Composition, Creative Writing
         // ---------------------------------------------------------------------
         val draftingIndicators = listOf(
-            "بنویس", "متن بنویس", "تنظیم کن", "پیش نویس", "پیش‌نویس", "عذرخواهی",
+            "بنویس", "متن بنویس", "تنظیم نامه", "تنظیم متن", "تنظیم ایمیل", "پیش نویس", "پیش‌نویس", "عذرخواهی",
             "رسمی", "محترمانه", "توضیح بده چرا", "بگو که چرا", "دلیلش رو بگو",
             "draft", "compose", "write an email", "write a message", "formal email",
             "apologize", "apology", "explain why", "generate text"

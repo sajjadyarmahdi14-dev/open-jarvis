@@ -22,8 +22,6 @@ import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.media.MediaPlayer
 import android.media.MediaRecorder
@@ -36,6 +34,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.ContactsContract
 import android.speech.RecognizerIntent
@@ -62,8 +61,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.security.MessageDigest
 import okhttp3.Call
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -78,6 +79,47 @@ import java.nio.ByteOrder
 import java.util.Locale
 import java.util.UUID
 
+object JarvisHttpClient {
+    private val pool = ConnectionPool(6, 5, TimeUnit.MINUTES)
+
+    private val sharedClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectionPool(pool)
+            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+    val sttClient: OkHttpClient by lazy {
+        sharedClient.newBuilder()
+            .readTimeout(6, TimeUnit.SECONDS)
+            .writeTimeout(6, TimeUnit.SECONDS)
+            .build()
+    }
+
+    val chatClient: OkHttpClient by lazy {
+        sharedClient.newBuilder()
+            .readTimeout(22, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
+            .build()
+    }
+
+    val streamClient: OkHttpClient by lazy {
+        sharedClient.newBuilder()
+            .readTimeout(22, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
+            .build()
+    }
+
+    val ttsClient: OkHttpClient by lazy {
+        sharedClient.newBuilder()
+            .readTimeout(12, TimeUnit.SECONDS)
+            .writeTimeout(6, TimeUnit.SECONDS)
+            .build()
+    }
+}
+
 class JarvisVoiceService : Service() {
 
     interface VoiceEventListener {
@@ -90,6 +132,7 @@ class JarvisVoiceService : Service() {
         fun onTtsStarted()
         fun onTtsFinished()
         fun onAmplitudeChanged(amplitude: Float)
+        fun onCommandTrace(trace: String) {}
     }
 
     enum class VadMode {
@@ -274,6 +317,8 @@ class JarvisVoiceService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private val isCommandInFlight = AtomicBoolean(false)
+    val isProcessingUserTurn = AtomicBoolean(false)
+    @Volatile private var activeTurnJob: Job? = null
     @Volatile private var utteranceAlreadyCommitted = false
     @Volatile private var lastCommittedText = ""
     @Volatile private var lastCommitTimeMs = 0L
@@ -294,8 +339,6 @@ class JarvisVoiceService : Service() {
     private var proVoiceEngine: ProVoiceEngine? = null
     private var audioRecord: AudioRecord? = null
     private var noiseSuppressor: NoiseSuppressor? = null
-    private var acousticEchoCanceler: AcousticEchoCanceler? = null
-    private var automaticGainControl: AutomaticGainControl? = null
     private var recordingJob: Job? = null
     @Volatile private var isRecordingLoopActive = false
     @Volatile private var isUtteranceActive = false
@@ -354,11 +397,6 @@ class JarvisVoiceService : Service() {
     private val pendingSpeechCount = java.util.concurrent.atomic.AtomicInteger(0)
     private var speechQueueJob: Job? = null
 
-    private val streamingHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .build()
     private var activeStreamCall: Call? = null
     private var fillerJob: Job? = null
 
@@ -660,31 +698,11 @@ class JarvisVoiceService : Service() {
             if (NoiseSuppressor.isAvailable()) {
                 noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
                     enabled = true
-                    Log.i(TAG, "Hardware NoiseSuppressor attached and enabled.")
+                    Log.i(TAG, "Hardware NoiseSuppressor attached and enabled (AEC/AGC disabled).")
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed attaching NoiseSuppressor: ${e.message}")
-        }
-        try {
-            if (AcousticEchoCanceler.isAvailable()) {
-                acousticEchoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply {
-                    enabled = true
-                    Log.i(TAG, "Hardware AcousticEchoCanceler attached and enabled.")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed attaching AcousticEchoCanceler: ${e.message}")
-        }
-        try {
-            if (AutomaticGainControl.isAvailable()) {
-                automaticGainControl = AutomaticGainControl.create(audioSessionId)?.apply {
-                    enabled = true
-                    Log.i(TAG, "Hardware AutomaticGainControl attached and enabled.")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed attaching AutomaticGainControl: ${e.message}")
         }
     }
 
@@ -692,14 +710,6 @@ class JarvisVoiceService : Service() {
         try {
             noiseSuppressor?.release()
             noiseSuppressor = null
-        } catch (_: Exception) {}
-        try {
-            acousticEchoCanceler?.release()
-            acousticEchoCanceler = null
-        } catch (_: Exception) {}
-        try {
-            automaticGainControl?.release()
-            automaticGainControl = null
         } catch (_: Exception) {}
     }
 
@@ -716,6 +726,9 @@ class JarvisVoiceService : Service() {
             proVoiceEngine = ProVoiceEngine(
                 context = applicationContext,
                 scope = scope,
+                isUserTurnInFlight = {
+                    isProcessingUserTurn.get() || isTtsSpeaking || pendingSpeechCount.get() > 0
+                },
                 listener = object : ProVoiceEngine.EngineListener {
                     override fun onMicLevel(level: Float) {
                         broadcastUiUpdate(amplitude = level)
@@ -740,10 +753,10 @@ class JarvisVoiceService : Service() {
                     }
 
                     override fun onWakeAlone(isFa: Boolean) {
-                        // Duck music cleanly once wake word is confirmed
+                        // Duck music cleanly once wake word is confirmed; keep reply ultra-short & pre-cached
                         duckExternalAndLocalAudio(true)
                         playActivationChime()
-                        val reply = if (isFa) "در خدمت شما هستم قربان. گوش می‌دهم." else "At your service, sir. I'm listening."
+                        val reply = if (isFa) "بفرمایید قربان." else "Yes, sir?"
                         val turnId = UUID.randomUUID().toString()
                         serviceListener?.onAssistantResponse(reply, turnId, false)
                         broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false, wakeStatus = "speaking")
@@ -830,232 +843,160 @@ class JarvisVoiceService : Service() {
         proVoiceEngine?.start()
     }
 
+    private fun emitCommandTrace(transcript: String, routeLabel: String, elapsedMs: Long) {
+        val durStr = if (elapsedMs >= 1000L) {
+            String.format(Locale.US, "%.1fs", elapsedMs / 1000.0)
+        } else {
+            "${elapsedMs}ms"
+        }
+        val snippet = if (transcript.length > 36) transcript.take(33) + "..." else transcript
+        val trace = "Heard: \"$snippet\" -> $routeLabel ($durStr)"
+        Log.i(TAG, "CommandTrace: $trace")
+        serviceListener?.onCommandTrace(trace)
+        broadcastUiUpdate(commandTrace = trace)
+    }
+
     private fun dispatchVadUtteranceDirect(transcript: String, wavBytes: ByteArray, isFa: Boolean, turnId: String = UUID.randomUUID().toString(), createdAtMs: Long = System.currentTimeMillis()) {
         val now = System.currentTimeMillis()
-        if (now - createdAtMs > 12_000L) {
-            Log.w(TAG, "Dropping stale command utterance ($transcript), age=${now - createdAtMs}ms > 12s TTL")
-            isProcessing = false
-            isCommandInFlight.set(false)
+        if (now - createdAtMs > ProVoiceEngine.HARD_STALE_TTL_MS) {
+            val expiredMsg = if (isFa) "متاسفانه زمان پاسخ تمام شد قربان." else "Sorry sir, that timed out."
+            Log.w(TAG, "Stale command utterance ($transcript), age=${now - createdAtMs}ms > 20s TTL")
+            speakBritish(expiredMsg)
             proVoiceEngine?.notifyProcessing(false)
             return
         }
-        if (!isCommandInFlight.compareAndSet(false, true)) {
-            Log.i(TAG, "Command dispatch already in flight, ignoring concurrent audio dispatch")
+        if (!isProcessingUserTurn.compareAndSet(false, true)) {
+            Log.i(TAG, "User turn already in flight, ignoring concurrent VAD noise for '$transcript'")
             return
         }
-        activeStreamCall?.cancel()
-        activeStreamCall = null
+        isCommandInFlight.set(true)
 
+        val turnStartMs = SystemClock.elapsedRealtime()
         JarvisOverlayManager.instance?.showOverlay()
         JarvisOverlayManager.instance?.updateText("Thinking...")
         JarvisOverlayManager.instance?.updateState("thinking")
 
-        scope.launch {
+        activeTurnJob = scope.launch {
             try {
-                withTimeout(15_000L) {
+                withTimeout(ProVoiceEngine.HARD_STALE_TTL_MS) {
                     serviceListener?.onFinalSpeech(transcript, turnId)
                     broadcastUiUpdate(userText = transcript, turnId = turnId, wakeStatus = "processing")
                     updateNotification("Processing speech: $transcript")
 
                     // -------------------------------------------------------------
-                    // Check Zero-Token LocalCommandRouter FIRST!
+                    // Check Zero-Token LocalCommandRouter FIRST on Dispatchers.IO!
                     // -------------------------------------------------------------
-                    val localResult = LocalCommandRouter.route(applicationContext, transcript)
+                    val localResult = withContext(Dispatchers.IO) {
+                        LocalCommandRouter.route(applicationContext, transcript)
+                    }
                     if (localResult.handled) {
-                        Log.i(TAG, "Command handled locally by LocalCommandRouter (category=${localResult.category}, 0 tokens)")
+                        val dt = SystemClock.elapsedRealtime() - turnStartMs
+                        Log.i(TAG, "Command handled locally by LocalCommandRouter (category=${localResult.category}, ${dt}ms)")
+                        emitCommandTrace(transcript, "LOCAL", dt)
+
+                        if (localResult.category == "session_stop") {
+                            return@withTimeout
+                        }
+
                         val replyText = localResult.spokenFeedback
-                        if (!replyText.isNullOrBlank()) {
-                            serviceListener?.onAssistantResponse(replyText, turnId, false)
-                            broadcastUiUpdate(
-                                assistantReply = replyText,
-                                turnId = turnId,
-                                isAppend = false,
-                                wakeStatus = "speaking"
-                            )
-                            JarvisOverlayManager.instance?.updateText(replyText)
-                            JarvisOverlayManager.instance?.updateState("speaking")
-                            updateNotification("Local Action (0 tokens): ${localResult.category}")
-                            speakBritish(replyText)
+                        val spokenTarget = if (!replyText.isNullOrBlank()) {
+                            replyText
                         } else if (!localResult.suppressFallbackSpeech) {
-                            val fallback = if (isFa) "انجام شد قربان." else "Done, sir."
-                            serviceListener?.onAssistantResponse(fallback, turnId, false)
+                            if (isFa) "انجام شد قربان." else "Done, sir."
+                        } else {
+                            ""
+                        }
+
+                        if (spokenTarget.isNotBlank()) {
+                            serviceListener?.onAssistantResponse(spokenTarget, turnId, false)
                             broadcastUiUpdate(
-                                assistantReply = fallback,
+                                assistantReply = spokenTarget,
                                 turnId = turnId,
                                 isAppend = false,
                                 wakeStatus = "speaking"
                             )
-                            JarvisOverlayManager.instance?.updateText(fallback)
+                            JarvisOverlayManager.instance?.updateText(spokenTarget)
                             JarvisOverlayManager.instance?.updateState("speaking")
                             updateNotification("Local Action (0 tokens): ${localResult.category}")
-                            speakBritish(fallback)
+                            if (!localResult.languageHint.isNullOrBlank()) {
+                                speakWithLanguage(spokenTarget, localResult.languageHint)
+                            } else {
+                                speakBritish(spokenTarget)
+                            }
                         } else {
                             updateNotification("Local Action (0 tokens): ${localResult.category}")
                         }
-                        isProcessing = false
-                        isCommandInFlight.set(false)
-                        proVoiceEngine?.notifyProcessing(false)
                         return@withTimeout
                     }
 
                     // Hands-Free Language Coach / Pocket Interpreter Session Hook
                     if (LanguageModeManager.isActive) {
+                        val dt = SystemClock.elapsedRealtime() - turnStartMs
+                        emitCommandTrace(transcript, "LANG", dt)
                         Log.i(TAG, "Routing turn to active LanguageModeManager (${LanguageModeManager.currentMode}/${LanguageModeManager.targetLanguage}): $transcript")
                         updateNotification("Language Mode (${LanguageModeManager.targetLanguage})")
                         LanguageModeManager.handleUserTurn(applicationContext, transcript, turnId)
-                        isProcessing = false
-                        isCommandInFlight.set(false)
-                        proVoiceEngine?.notifyProcessing(false)
                         return@withTimeout
                     }
 
                     // Live Screen Watching Active Session Hook
                     if (com.sajjad.jarvis.live.LiveScreenWatcher.isActive) {
+                        val dt = SystemClock.elapsedRealtime() - turnStartMs
+                        emitCommandTrace(transcript, "SCREEN", dt)
                         Log.i(TAG, "Routing question directly to active LiveScreenWatcher: $transcript")
                         updateNotification("Screen Vision: $transcript")
                         com.sajjad.jarvis.live.LiveScreenWatcher.askScreenQuestion(applicationContext, transcript) { reply ->
                             serviceListener?.onAssistantResponse(reply, turnId, false)
                             broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false, wakeStatus = "speaking")
                         }
-                        isProcessing = false
-                        isCommandInFlight.set(false)
-                        proVoiceEngine?.notifyProcessing(false)
                         return@withTimeout
                     }
 
                     // Live Audio Listening Active Session Hook
                     if (com.sajjad.jarvis.live.LiveAudioSessionManager.isActive) {
+                        val dt = SystemClock.elapsedRealtime() - turnStartMs
+                        emitCommandTrace(transcript, "AUDIO", dt)
                         Log.i(TAG, "User spoke during LiveAudioSessionManager: $transcript")
                         updateNotification("Audio Session: $transcript")
                         com.sajjad.jarvis.live.LiveAudioSessionManager.stopAndAsk(applicationContext, transcript)
-                        isProcessing = false
-                        isCommandInFlight.set(false)
-                        proVoiceEngine?.notifyProcessing(false)
+                        return@withTimeout
+                    }
+
+                    // Fix 3: Direct to AI streaming WITHOUT redundant /api/voice/vad_utterance re-upload!
+                    val cleanT = transcript.trim().lowercase(Locale.ROOT)
+                    if (cleanT.contains("ghost protocol") || cleanT.contains("پروتکل مخفی") || cleanT.contains("پروتکل شبح")) {
+                        ProtocolEngine.executeGhostProtocol(applicationContext)
+                        emitCommandTrace(transcript, "GHOST", SystemClock.elapsedRealtime() - turnStartMs)
+                        JarvisOverlayManager.instance?.updateState("standby")
                         return@withTimeout
                     }
 
                     updateNotification("Asking AI: $transcript")
-
-                    val (batPct, isCharging) = getBatteryTelemetry()
-                    ProactiveMonitor.checkBatteryAlert(applicationContext, batPct, isCharging)
-
-                    var result = withContext(Dispatchers.IO) {
-                        sendVadUtterance(wavBytes, batPct, isCharging)
-                    }
-
-                    if (System.currentTimeMillis() - createdAtMs > 12_000L) {
-                        Log.w(TAG, "Dropping stale response, turn age > 12s")
-                        return@withTimeout
-                    }
-
-                    if (result == null || result.optString("status") == "ignored") {
-                        val reply = withContext(Dispatchers.IO) {
-                            sendChatPrompt(transcript)
-                        }
-                        if (reply != null) {
-                            result = reply
-                        }
-                    }
-
-                    if (System.currentTimeMillis() - createdAtMs > 12_000L) {
-                        Log.w(TAG, "Dropping stale fallback response, turn age > 12s")
-                        return@withTimeout
-                    }
-
-                    if (result != null) {
-                        val status = result.optString("status", "")
-                        val response = result.optString("response", "")
-                        val clientActions = result.optJSONArray("client_actions")
-
-                        val cleanT = transcript.trim().lowercase(Locale.ROOT)
-
-                        // Ghost Protocol
-                        if (cleanT.contains("ghost protocol") || cleanT.contains("پروتکل مخفی") || cleanT.contains("پروتکل شبح")) {
-                            ProtocolEngine.executeGhostProtocol(applicationContext)
-                            isProcessing = false
-                            acousticState = AcousticState.IDLE
-                            proVoiceEngine?.notifyProcessing(false)
-                            JarvisOverlayManager.instance?.updateState("standby")
-                            return@withTimeout
-                        }
-
-                        // Sleep triggers
-                        val sleepTriggers = listOf(
-                            "stop listening", "bye jarvis", "goodbye jarvis", "go to sleep",
-                            "jarvis sleep", "sleep mode", "standby", "that's all jarvis", "mute yourself",
-                            "دیگه گوش نده", "گوش نده", "خداحافظ جارویس", "فعلا جارویس", "جارویس بخواب",
-                            "بخواب", "استندبای", "خداحافظ"
-                        )
-                        if (status == "sleep" || sleepTriggers.any { cleanT.contains(it) }) {
-                            proVoiceEngine?.setMutedState(true)
-                            val sleepMsg = if (response.isNotBlank()) response
-                                          else if (isFa) "به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید."
-                                          else "Going into standby mode, sir. Say Jarvis whenever you need me."
-                            serviceListener?.onAssistantResponse(sleepMsg, turnId, false)
-                            broadcastUiUpdate(assistantReply = sleepMsg, turnId = turnId, isAppend = false, wakeStatus = "paused")
-                            JarvisOverlayManager.instance?.updateText(sleepMsg)
-                            JarvisOverlayManager.instance?.updateState("standby")
-                            speakBritish(sleepMsg)
-                            return@withTimeout
-                        }
-
-                        // Client actions execution via ActionDispatcher
-                        val hasClientActions = clientActions != null && clientActions.length() > 0
-                        if (hasClientActions) {
-                            JarvisOverlayManager.instance?.updateState("agent_working")
-                            var deferredMediaAction: JSONObject? = null
-                            for (i in 0 until clientActions.length()) {
-                                val act = clientActions.optJSONObject(i) ?: continue
-                                val type = act.optString("type", "")
-                                if (type in listOf("media_play", "play_song", "play_music")) {
-                                    deferredMediaAction = act
-                                } else {
-                                    ActionDispatcher.dispatchAction(applicationContext, act) { feedback ->
-                                        speakBritish(feedback)
-                                    }
-                                }
-                            }
-
-                            if (deferredMediaAction != null) {
-                                if (response.isNotBlank()) {
-                                    serviceListener?.onAssistantResponse(response, turnId, false)
-                                    broadcastUiUpdate(assistantReply = response, turnId = turnId, isAppend = false)
-                                    JarvisOverlayManager.instance?.updateText(response)
-                                    JarvisOverlayManager.instance?.updateState("speaking")
-                                    speakBritish(response) {
-                                        ActionDispatcher.dispatchAction(applicationContext, deferredMediaAction)
-                                    }
-                                } else {
-                                    ActionDispatcher.dispatchAction(applicationContext, deferredMediaAction)
-                                }
-                                return@withTimeout
-                            }
-                        }
-
-                        if (response.isNotBlank()) {
-                            serviceListener?.onAssistantResponse(response, turnId, false)
-                            broadcastUiUpdate(assistantReply = response, turnId = turnId, isAppend = false)
-                            JarvisOverlayManager.instance?.updateText(response)
-                            JarvisOverlayManager.instance?.updateState("speaking")
-                            speakBritish(response)
-                        } else if (transcript.isNotBlank() && !hasClientActions) {
-                            streamChatAndPlay(transcript, turnId)
-                        } else {
-                            proVoiceEngine?.notifyProcessing(false)
-                            JarvisOverlayManager.instance?.updateState("active_conversation")
-                        }
-                    } else {
-                        proVoiceEngine?.notifyProcessing(false)
-                        JarvisOverlayManager.instance?.updateState("standby")
-                    }
+                    streamChatAndPlaySuspend(transcript, turnId)
+                    val dt = SystemClock.elapsedRealtime() - turnStartMs
+                    emitCommandTrace(transcript, "AI", dt)
                 }
+            } catch (e: TimeoutCancellationException) {
+                val dt = SystemClock.elapsedRealtime() - turnStartMs
+                Log.w(TAG, "dispatchVadUtteranceDirect timed out after ${dt}ms")
+                emitCommandTrace(transcript, "TIMEOUT", dt)
+                val timeoutMsg = if (isFa) "متاسفانه زمان پاسخ تمام شد قربان." else "Sorry sir, that timed out."
+                serviceListener?.onAssistantResponse(timeoutMsg, turnId, false)
+                broadcastUiUpdate(assistantReply = timeoutMsg, turnId = turnId, isAppend = false)
+                speakBritish(timeoutMsg)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                Log.i(TAG, "User turn cancelled cleanly for '$transcript'")
             } catch (e: Exception) {
                 Log.e(TAG, "dispatchVadUtteranceDirect error: ${e.message}", e)
+                val errMsg = if (isFa) "خطا در برقراری ارتباط با سرور قربان." else "Sorry sir, I could not reach the server."
+                speakBritish(errMsg)
             } finally {
+                activeTurnJob = null
+                isProcessingUserTurn.set(false)
                 isCommandInFlight.set(false)
                 isProcessing = false
                 proVoiceEngine?.notifyProcessing(false)
-                if (!isTtsSpeaking) {
+                if (!isTtsSpeaking && pendingSpeechCount.get() <= 0) {
                     duckExternalAndLocalAudio(false)
                 }
             }
@@ -1065,28 +1006,27 @@ class JarvisVoiceService : Service() {
     private fun sendChatPrompt(prompt: String): JSONObject? {
         return try {
             val server = getServerUrl()
-            val url = URL("$server/api/chat")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 6000
-                readTimeout = 15000
-                requestMethod = "POST"
-                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                setRequestProperty("Accept", "application/json")
-                val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
-                val apiKey = prefs.getString("api_key", "") ?: ""
-                if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
-                doOutput = true
-            }
+            val (batPct, isCharging) = getBatteryTelemetry()
             val body = JSONObject().apply {
                 put("message", prompt)
-                put("tts", true)
+                put("tts", false)
+                put("device_battery", batPct)
+                put("device_charging", isCharging)
             }
-            java.io.OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(body.toString()) }
-            if (conn.responseCode in 200..299) {
-                val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                JSONObject(respStr)
-            } else {
-                null
+            val reqBuilder = Request.Builder()
+                .url("$server/api/chat")
+                .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .addHeader("Accept", "application/json")
+            val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+            val apiKey = prefs.getString("api_key", "") ?: ""
+            if (apiKey.isNotBlank()) reqBuilder.addHeader("Authorization", "Bearer $apiKey")
+            JarvisHttpClient.chatClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val respStr = resp.body?.string() ?: ""
+                    JSONObject(respStr)
+                } else {
+                    null
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "sendChatPrompt error: ${e.message}")
@@ -1117,11 +1057,10 @@ class JarvisVoiceService : Service() {
 
                 var record: AudioRecord? = null
                 try {
-                    // Safe Voice Audio Source: VOICE_RECOGNITION or MIC (NEVER VOICE_COMMUNICATION!)
-                    // VOICE_COMMUNICATION hijacks media audio routing to earpiece on Xiaomi HyperOS!
+                    // Safe Voice Audio Source: MIC primary for high sensitivity, VOICE_RECOGNITION as fallback
                     record = try {
                         AudioRecord(
-                            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            MediaRecorder.AudioSource.MIC,
                             SAMPLE_RATE,
                             AudioFormat.CHANNEL_IN_MONO,
                             AudioFormat.ENCODING_PCM_16BIT,
@@ -1130,7 +1069,7 @@ class JarvisVoiceService : Service() {
                     } catch (e: Exception) {
                         try {
                             AudioRecord(
-                                MediaRecorder.AudioSource.MIC,
+                                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                                 SAMPLE_RATE,
                                 AudioFormat.CHANNEL_IN_MONO,
                                 AudioFormat.ENCODING_PCM_16BIT,
@@ -1391,6 +1330,7 @@ class JarvisVoiceService : Service() {
         val newGen = speechGenerationId.incrementAndGet()
         Log.i(TAG, "HARD STOP triggered! New speechGenerationId=$newGen")
 
+        try { activeTurnJob?.cancel(); activeTurnJob = null } catch (_: Exception) {}
         try { activeStreamCall?.cancel(); activeStreamCall = null } catch (_: Exception) {}
         try { fillerJob?.cancel(); fillerJob = null } catch (_: Exception) {}
 
@@ -1412,10 +1352,10 @@ class JarvisVoiceService : Service() {
 
         isTtsSpeaking = false
         isProcessing = false
+        isProcessingUserTurn.set(false)
         isCommandInFlight.set(false)
         isUtteranceActive = false
         acousticState = AcousticState.IDLE
-        proVoiceEngine?.notifySpeaking(false)
         proVoiceEngine?.triggerStandby()
         JarvisLocalAudioPlayer.setDucked(false)
         duckExternalAndLocalAudio(false)
@@ -1425,6 +1365,7 @@ class JarvisVoiceService : Service() {
         updateNotification("J.A.R.V.I.S. Standby — Say 'Jarvis' anytime")
 
         if (speakAck) {
+            proVoiceEngine?.suppressNextActiveConversation()
             val ack = if (isFa) "به حالت استندبای رفتم قربان." else "Standing by, sir."
             enqueueSpeech(ack)
         }
@@ -1513,7 +1454,8 @@ class JarvisVoiceService : Service() {
         turnId: String? = null,
         isAppend: Boolean = false,
         wakeStatus: String? = null,
-        amplitude: Float? = null
+        amplitude: Float? = null,
+        commandTrace: String? = null
     ) {
         try {
             val intent = Intent("com.openjarvis.ACTION_UI_UPDATE").apply {
@@ -1523,6 +1465,7 @@ class JarvisVoiceService : Service() {
                 putExtra("is_append", isAppend)
                 wakeStatus?.let { putExtra("wake_status", it) }
                 amplitude?.let { putExtra("amplitude", it) }
+                commandTrace?.let { putExtra("command_trace", it) }
                 setPackage(packageName)
             }
             sendBroadcast(intent)
@@ -2144,9 +2087,17 @@ class JarvisVoiceService : Service() {
     // -----------------------------------------------------------------------
 
     fun streamChatAndPlay(prompt: String, turnId: String = UUID.randomUUID().toString()) {
+        scope.launch(Dispatchers.IO) {
+            streamChatAndPlaySuspend(prompt, turnId)
+        }
+    }
+
+    private suspend fun streamChatAndPlaySuspend(prompt: String, turnId: String = UUID.randomUUID().toString()) {
         if (prompt.isBlank()) {
-            isProcessing = false
-            acousticState = AcousticState.IDLE
+            withContext(Dispatchers.Main) {
+                isProcessing = false
+                acousticState = AcousticState.IDLE
+            }
             return
         }
 
@@ -2154,42 +2105,46 @@ class JarvisVoiceService : Service() {
         // Part C: Ghost Protocol (<300ms fast path, completely silent!)
         if (cleanP.contains("ghost protocol") || cleanP.contains("پروتکل مخفی") || cleanP.contains("پروتکل شبح")) {
             ProtocolEngine.executeGhostProtocol(applicationContext)
-            isProcessing = false
-            acousticState = AcousticState.IDLE
-            broadcastUiUpdate(wakeStatus = "active")
+            withContext(Dispatchers.Main) {
+                isProcessing = false
+                acousticState = AcousticState.IDLE
+                broadcastUiUpdate(wakeStatus = "active")
+            }
             return
         }
 
-        isProcessing = true
-        acousticState = AcousticState.PROCESSING
-        serviceListener?.onWakeStateChanged("processing")
-        broadcastUiUpdate(wakeStatus = "processing", turnId = turnId)
-        updateNotification("J.A.R.V.I.S. Thinking...")
-        JarvisOverlayManager.instance?.showOverlay()
-        JarvisOverlayManager.instance?.updateText("Thinking...")
-        JarvisOverlayManager.instance?.updateState("thinking")
+        withContext(Dispatchers.Main) {
+            isProcessing = true
+            acousticState = AcousticState.PROCESSING
+            serviceListener?.onWakeStateChanged("processing")
+            broadcastUiUpdate(wakeStatus = "processing", turnId = turnId)
+            updateNotification("J.A.R.V.I.S. Thinking...")
+            JarvisOverlayManager.instance?.showOverlay()
+            JarvisOverlayManager.instance?.updateText("Thinking...")
+            JarvisOverlayManager.instance?.updateState("thinking")
 
-        // Layer 3: Verbal Filler Micro-Ack for Long/Complex Queries (>1600ms)
-        fillerJob?.cancel()
-        fillerJob = scope.launch(Dispatchers.Main) {
-            delay(1600L)
-            if (isProcessing && !isTtsSpeaking) {
-                val isFa = isPersianOrArabic(prompt)
-                val filler = if (isFa) {
-                    listOf("یه لحظه...", "الان بررسی می‌کنم قربان...", "چشم قربان...").random()
-                } else {
-                    listOf("One moment, sir.", "Looking into that, sir.", "Right away, sir.").random()
+            // Verbal filler after 2.4s only if stream hasn't emitted first sentence yet
+            fillerJob?.cancel()
+            fillerJob = scope.launch(Dispatchers.Main) {
+                delay(2400L)
+                if (isProcessing && !isTtsSpeaking) {
+                    val isFa = isPersianOrArabic(prompt)
+                    val filler = if (isFa) {
+                        listOf("یه لحظه...", "الان بررسی می‌کنم قربان...").random()
+                    } else {
+                        listOf("One moment, sir.", "Checking now, sir.").random()
+                    }
+                    Log.i(TAG, "Streaming latency > 2400ms. Speaking verbal filler: '$filler'")
+                    enqueueSpeech(filler)
                 }
-                Log.i(TAG, "Streaming latency > 1600ms. Speaking verbal filler: '$filler'")
-                enqueueSpeech(filler)
             }
         }
 
-        scope.launch(Dispatchers.IO) {
+        withContext(Dispatchers.IO) {
             var call: Call? = null
             var spokenSentences = 0
             try {
-                withTimeout(22_000L) {
+                withTimeout(20_000L) {
                     val server = getServerUrl()
                     val url = "$server/api/chat/stream"
                     val (batPct, isCharging) = getBatteryTelemetry()
@@ -2215,64 +2170,64 @@ class JarvisVoiceService : Service() {
                     }
 
                     val request = reqBuilder.build()
-                    val streamCall = streamingHttpClient.newCall(request)
+                    val streamCall = JarvisHttpClient.streamClient.newCall(request)
                     call = streamCall
                     activeStreamCall = streamCall
 
-                    val response = streamCall.execute()
-                    if (response.isSuccessful) {
-                        val responseStream = response.body?.byteStream()
-                        if (responseStream != null) {
-                            responseStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
-                                for (rawLine in lines) {
-                                    val line = rawLine.trim()
-                                    if (line.isBlank()) continue
-                                    val jsonStr = if (line.startsWith("data:")) line.removePrefix("data:").trim() else line
-                                    val chunkObj = try { JSONObject(jsonStr) } catch (_: Exception) { null } ?: continue
+                    streamCall.execute().use { response ->
+                        if (response.isSuccessful) {
+                            val responseStream = response.body?.byteStream()
+                            if (responseStream != null) {
+                                responseStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                                    for (rawLine in lines) {
+                                        val line = rawLine.trim()
+                                        if (line.isBlank()) continue
+                                        val jsonStr = if (line.startsWith("data:")) line.removePrefix("data:").trim() else line
+                                        val chunkObj = try { JSONObject(jsonStr) } catch (_: Exception) { null } ?: continue
 
-                                    val type = chunkObj.optString("type", "")
-                                    if (type == "sentence") {
-                                        val sentence = chunkObj.optString("text", "").trim()
-                                        if (sentence.isNotBlank()) {
-                                            spokenSentences++
-                                            withContext(Dispatchers.Main) {
-                                                fillerJob?.cancel()
-                                                serviceListener?.onAssistantResponse(sentence, turnId, true)
-                                                broadcastUiUpdate(assistantReply = sentence, turnId = turnId, isAppend = true, wakeStatus = "speaking")
-                                                JarvisOverlayManager.instance?.updateText(sentence)
-                                                JarvisOverlayManager.instance?.updateState("speaking")
+                                        val type = chunkObj.optString("type", "")
+                                        if (type == "sentence") {
+                                            val sentence = chunkObj.optString("text", "").trim()
+                                            if (sentence.isNotBlank()) {
+                                                spokenSentences++
+                                                withContext(Dispatchers.Main) {
+                                                    fillerJob?.cancel()
+                                                    serviceListener?.onAssistantResponse(sentence, turnId, true)
+                                                    broadcastUiUpdate(assistantReply = sentence, turnId = turnId, isAppend = true, wakeStatus = "speaking")
+                                                    JarvisOverlayManager.instance?.updateText(sentence)
+                                                    JarvisOverlayManager.instance?.updateState("speaking")
+                                                }
+                                                enqueueSpeech(sentence)
                                             }
-                                            enqueueSpeech(sentence)
-                                        }
-                                    } else if (type == "actions") {
-                                        val actions = chunkObj.optJSONArray("client_actions")
-                                        if (actions != null) {
-                                            withContext(Dispatchers.Main) {
-                                                ActionDispatcher.dispatchActions(applicationContext, actions) { feedback ->
-                                                    enqueueSpeech(feedback)
+                                        } else if (type == "actions") {
+                                            val actions = chunkObj.optJSONArray("client_actions")
+                                            if (actions != null) {
+                                                withContext(Dispatchers.Main) {
+                                                    ActionDispatcher.dispatchActions(applicationContext, actions) { feedback ->
+                                                        enqueueSpeech(feedback)
+                                                    }
                                                 }
                                             }
+                                        } else if (type == "done") {
+                                            Log.i(TAG, "Stream complete signal received.")
                                         }
-                                    } else if (type == "done") {
-                                        Log.i(TAG, "Stream complete signal received.")
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // If streaming returned non-200 or produced 0 spoken sentences, IMMEDIATELY fall back to POST /api/chat!
-                    if (spokenSentences == 0) {
-                        Log.w(TAG, "Stream produced 0 sentences (code=${response.code}). Falling back to POST /api/chat...")
-                        tryFallbackChat(prompt, turnId)
+                        if (spokenSentences == 0) {
+                            Log.w(TAG, "Stream produced 0 sentences (code=${response.code}). Falling back to POST /api/chat...")
+                            tryFallbackChat(prompt, turnId)
+                        }
                     }
                 }
             } catch (e: TimeoutCancellationException) {
-                Log.w(TAG, "streamChatAndPlay timed out after 22s watchdog")
+                Log.w(TAG, "streamChatAndPlay timed out after 20s watchdog")
                 withContext(Dispatchers.Main) {
                     fillerJob?.cancel()
                     val isFa = isPersianOrArabic(prompt)
-                    val timeoutMsg = if (isFa) "متاسفانه زمان پاسخ تمام شد قربان." else "Request timed out, sir."
+                    val timeoutMsg = if (isFa) "متاسفانه زمان پاسخ تمام شد قربان." else "Sorry sir, that timed out."
                     enqueueSpeech(timeoutMsg)
                 }
             } catch (e: Exception) {
@@ -2291,7 +2246,8 @@ class JarvisVoiceService : Service() {
                     isProcessing = false
                     if (!isTtsSpeaking && pendingSpeechCount.get() <= 0) {
                         acousticState = AcousticState.IDLE
-                        val st = if (isServiceMuted) "paused" else if (currentVadMode == VadMode.ACTIVE_COMMAND) "listening_cmd" else "listening_wake"
+                        val isConv = proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION
+                        val st = if (isServiceMuted) "paused" else if (isConv) "listening_cmd" else "listening_wake"
                         serviceListener?.onWakeStateChanged(st)
                         broadcastUiUpdate(wakeStatus = st)
                         updateNotification()
@@ -2322,30 +2278,31 @@ class JarvisVoiceService : Service() {
             if (apiKey.isNotBlank()) {
                 reqBuilder.addHeader("Authorization", "Bearer $apiKey")
             }
-            val resp = streamingHttpClient.newCall(reqBuilder.build()).execute()
-            if (resp.isSuccessful) {
-                val respStr = resp.body?.string() ?: ""
-                val json = JSONObject(respStr)
-                val reply = json.optString("response", "").trim()
-                val clientActions = json.optJSONArray("client_actions")
-                if (clientActions != null) {
-                    withContext(Dispatchers.Main) {
-                        ActionDispatcher.dispatchActions(applicationContext, clientActions) { feedback ->
-                            enqueueSpeech(feedback)
+            JarvisHttpClient.chatClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val respStr = resp.body?.string() ?: ""
+                    val json = JSONObject(respStr)
+                    val reply = json.optString("response", "").trim()
+                    val clientActions = json.optJSONArray("client_actions")
+                    if (clientActions != null) {
+                        withContext(Dispatchers.Main) {
+                            ActionDispatcher.dispatchActions(applicationContext, clientActions) { feedback ->
+                                enqueueSpeech(feedback)
+                            }
                         }
                     }
-                }
-                if (reply.isNotBlank()) {
-                    withContext(Dispatchers.Main) {
-                        serviceListener?.onAssistantResponse(reply, turnId, false)
-                        broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false)
+                    if (reply.isNotBlank()) {
+                        withContext(Dispatchers.Main) {
+                            serviceListener?.onAssistantResponse(reply, turnId, false)
+                            broadcastUiUpdate(assistantReply = reply, turnId = turnId, isAppend = false)
+                        }
+                        enqueueSpeech(reply)
                     }
-                    enqueueSpeech(reply)
+                } else {
+                    val isFa = isPersianOrArabic(prompt)
+                    val errMsg = if (isFa) "متاسفانه امکان پردازش درخواست وجود ندارد قربان." else "I was unable to complete the request, sir."
+                    enqueueSpeech(errMsg)
                 }
-            } else {
-                val isFa = isPersianOrArabic(prompt)
-                val errMsg = if (isFa) "متاسفانه امکان پردازش درخواست وجود ندارد قربان." else "I was unable to complete the request, sir."
-                enqueueSpeech(errMsg)
             }
         } catch (e: Exception) {
             Log.w(TAG, "tryFallbackChat error: ${e.message}")
@@ -2463,6 +2420,7 @@ class JarvisVoiceService : Service() {
                 trimmed.startsWith("Right away") -> File(cacheFolder, "action_ack.mp3")
                 trimmed.startsWith("All systems are online") -> File(cacheFolder, "online_ack.mp3")
                 trimmed.startsWith("Yes, sir") -> File(cacheFolder, "yes_sir.mp3")
+                trimmed.startsWith("بفرمایید قربان") -> File(cacheFolder, "yes_sir_fa.mp3")
                 trimmed.startsWith("Flashlight on") -> File(cacheFolder, "torch_on.mp3")
                 trimmed.startsWith("Flashlight off") -> File(cacheFolder, "torch_off.mp3")
                 trimmed.startsWith("در خدمت شما هستم") -> File(cacheFolder, "wake_ack_fa.mp3")
@@ -2512,17 +2470,6 @@ class JarvisVoiceService : Service() {
                 JarvisLocalAudioPlayer.setDucked(false)
                 duckExternalAndLocalAudio(false)
                 serviceListener?.onTtsFinished()
-                val isConv = proVoiceEngine?.currentState == ProVoiceEngine.EngineState.ACTIVE_CONVERSATION
-                val st = if (isServiceMuted) "paused" else if (isConv) "listening_cmd" else "listening_wake"
-                serviceListener?.onWakeStateChanged(st)
-                broadcastUiUpdate(wakeStatus = st)
-                val notif = if (isConv) "Listening..." else "J.A.R.V.I.S. Standby — Say 'Jarvis' anytime"
-                updateNotification(notif)
-                if (isConv) {
-                    JarvisOverlayManager.instance?.updateState("listening", "Listening...")
-                } else {
-                    JarvisOverlayManager.instance?.updateState("standby", "Standby")
-                }
             }
         }
     }
@@ -2566,30 +2513,16 @@ class JarvisVoiceService : Service() {
             if (ok) return@withContext true
         }
 
-        // 2. Fetch from VPS POST /api/tts with 1 automatic retry
+        // 2. Fetch from VPS POST /api/tts using shared HTTP/2 connection pool
         val rate = if (voice == "fa-IR-FaridNeural" || voice == "de-DE-ConradNeural") "+0%" else "+5%"
         val pitch = "-2Hz"
         val server = getServerUrl().removeSuffix("/")
+        val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
+        val apiKey = prefs.getString("api_key", "") ?: ""
 
         for (attempt in 1..2) {
             if (generationId != 0L && generationId != speechGenerationId.get()) return@withContext false
-            var conn: HttpURLConnection? = null
             try {
-                val url = URL("$server/api/tts")
-                conn = (url.openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 6000
-                    readTimeout = 18000
-                    requestMethod = "POST"
-                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                    setRequestProperty("Accept", "audio/mpeg")
-                    doOutput = true
-                }
-                val prefs = getSharedPreferences("jarvis_settings", Context.MODE_PRIVATE)
-                val apiKey = prefs.getString("api_key", "") ?: ""
-                if (apiKey.isNotBlank()) {
-                    conn.setRequestProperty("Authorization", "Bearer $apiKey")
-                }
-
                 val reqObj = JSONObject().apply {
                     put("text", clean)
                     put("voice", voice)
@@ -2599,30 +2532,36 @@ class JarvisVoiceService : Service() {
                         put("language", languageHint)
                     }
                 }
-                OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(reqObj.toString()) }
+                val reqBuilder = Request.Builder()
+                    .url("$server/api/tts")
+                    .post(reqObj.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .addHeader("Accept", "audio/mpeg")
+                if (apiKey.isNotBlank()) {
+                    reqBuilder.addHeader("Authorization", "Bearer $apiKey")
+                }
 
-                val code = conn.responseCode
-                if (code in 200..299) {
-                    val tempFile = File(ttsDir, "$hash.tmp")
-                    tempFile.outputStream().use { out ->
-                        conn.inputStream.copyTo(out)
-                    }
-                    if (tempFile.length() > 200) {
-                        tempFile.renameTo(cachedFile)
-                        pruneTtsCache(ttsDir, maxFiles = 100)
-                        return@withContext playLocalMp3File(cachedFile, generationId)
+                JarvisHttpClient.ttsClient.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bodyStream = resp.body?.byteStream()
+                        if (bodyStream != null) {
+                            val tempFile = File(ttsDir, "$hash.tmp")
+                            tempFile.outputStream().use { out -> bodyStream.copyTo(out) }
+                            if (tempFile.length() > 200) {
+                                tempFile.renameTo(cachedFile)
+                                pruneTtsCache(ttsDir, maxFiles = 100)
+                                return@withContext playLocalMp3File(cachedFile, generationId)
+                            } else {
+                                tempFile.delete()
+                            }
+                        }
                     } else {
-                        tempFile.delete()
+                        Log.w(TAG, "POST /api/tts attempt $attempt returned HTTP ${resp.code}")
                     }
-                } else {
-                    Log.w(TAG, "POST /api/tts attempt $attempt returned HTTP $code")
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "POST /api/tts attempt $attempt error: ${e.message}")
-            } finally {
-                conn?.disconnect()
             }
-            if (attempt == 1) delay(250)
+            if (attempt == 1) delay(200)
         }
 
         Log.e(TAG, "Failed to play Edge-TTS audio for '$clean' (NO Google TTS allowed)")
@@ -2717,6 +2656,7 @@ class JarvisVoiceService : Service() {
                 Pair("Right away, sir.", "action_ack.mp3"),
                 Pair("All systems are online, sir.", "online_ack.mp3"),
                 Pair("Yes, sir?", "yes_sir.mp3"),
+                Pair("بفرمایید قربان.", "yes_sir_fa.mp3"),
                 Pair("Flashlight on, sir.", "torch_on.mp3"),
                 Pair("Flashlight off, sir.", "torch_off.mp3"),
                 Pair("در خدمت شما هستم قربان. گوش می‌دهم.", "wake_ack_fa.mp3"),
@@ -2726,22 +2666,33 @@ class JarvisVoiceService : Service() {
                 Pair("به حالت استندبای می‌روم قربان. هر زمان نیاز داشتید جارویس را صدا بزنید.", "standby_ack_fa.mp3")
             )
             val cacheFolder = File(cacheDir, "jarvis_voice_cache").apply { mkdirs() }
-            val server = getServerUrl()
+            val server = getServerUrl().removeSuffix("/")
             for ((text, filename) in phrases) {
                 val destFile = File(cacheFolder, filename)
                 if (destFile.exists() && destFile.length() > 500) continue
                 try {
                     val isFa = text.any { it in '\u0600'..'\u06FF' }
                     val voice = if (isFa) "fa-IR-FaridNeural" else "en-GB-RyanNeural"
-                    val encText = URLEncoder.encode(text, "UTF-8")
-                    val encVoice = URLEncoder.encode(voice, "UTF-8")
-                    val url = URL("$server/api/tts/audio?text=$encText&voice=$encVoice&rate=%2B6%25&pitch=-2Hz")
-                    val conn = url.openConnection() as HttpURLConnection
-                    conn.connectTimeout = 3000
-                    conn.readTimeout = 15000
-                    if (conn.responseCode in 200..299) {
-                        destFile.outputStream().use { out -> conn.inputStream.copyTo(out) }
-                        Log.i(TAG, "Pre-cached British audio for '$text'")
+                    val rate = if (isFa) "+0%" else "+5%"
+                    val body = JSONObject().apply {
+                        put("text", text)
+                        put("voice", voice)
+                        put("rate", rate)
+                        put("pitch", "-2Hz")
+                    }
+                    val req = Request.Builder()
+                        .url("$server/api/tts")
+                        .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .addHeader("Accept", "audio/mpeg")
+                        .build()
+                    JarvisHttpClient.ttsClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val stream = resp.body?.byteStream()
+                            if (stream != null) {
+                                destFile.outputStream().use { out -> stream.copyTo(out) }
+                                Log.i(TAG, "Pre-cached male Edge-TTS audio for '$text'")
+                            }
+                        }
                     }
                 } catch (_: Exception) {}
             }

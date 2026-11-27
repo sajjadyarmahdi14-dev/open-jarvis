@@ -170,4 +170,129 @@ class ProVoiceEngineVadTest {
         assertFalse(ProVoiceEngine.Companion.isSemanticallyIncomplete("ساعت چنده"))
         assertFalse(ProVoiceEngine.Companion.isSemanticallyIncomplete("turn on the flashlight"))
     }
+
+    @Test
+    fun testHighPassFilter180HzAndScreenOffNormalization() {
+        val hpf = ProVoiceEngine.Companion.HighPassFilter180Hz(0.93f)
+        val sampleRate = 16000
+        val count = 800 // 50ms chunk
+
+        val rumble = ShortArray(count) { i ->
+            (sin(2.0 * PI * 80.0 * i / sampleRate) * 4000.0).toInt().toShort()
+        }
+        val speech = ShortArray(count) { i ->
+            (sin(2.0 * PI * 1000.0 * i / sampleRate) * 4000.0).toInt().toShort()
+        }
+        hpf.reset()
+        val rumbleRms = hpf.apply(rumble, count)
+        hpf.reset()
+        val speechRms = hpf.apply(speech, count)
+        assertTrue("180Hz HPF must keep speech RMS ($speechRms) much higher than 80Hz rumble ($rumbleRms)", speechRms > rumbleRms * 2.0)
+
+        // Quiet Xiaomi screen-off speech: peak ~ 260, rms ~ 183
+        val softScreenOff = ShortArray(count) { i ->
+            (sin(2.0 * PI * 600.0 * i / sampleRate) * 260.0).toInt().toShort()
+        }
+        val boosted = ProVoiceEngine.Companion.normalizeFrameForCapture(softScreenOff, count, isScreenOff = true)
+        val (boostedRms, boostedPeak) = ProVoiceEngine.Companion.computeFrameRmsAndPeak(boosted, count)
+        assertTrue("Screen-off soft voice RMS ($boostedRms) must be boosted above 450", boostedRms > 450.0)
+        assertTrue("Normalized peak ($boostedPeak) must not saturate 16-bit PCM", boostedPeak <= 32767)
+
+        // Pure floor silence (peak <= 20) must NOT be blown up
+        val nearSilence = ShortArray(count) { 10 }
+        val intact = ProVoiceEngine.Companion.normalizeFrameForCapture(nearSilence, count, isScreenOff = true)
+        assertEquals(10.toShort(), intact[0])
+    }
+
+    @Test
+    fun testActiveConversationEightSecondSilenceReturnsCleanlyToStandby() {
+        val sm = ProVoiceEngine.Companion.VadCaptureStateMachine()
+        val noiseFloor = 85.0
+        var stoppedCleanlyAt = -1L
+
+        // 8.5s of steady quiet noise below onset threshold (~163.8)
+        for (stepIdx in 0..170) {
+            val now = stepIdx * 50L
+            val action = sm.step(
+                nowMs = now,
+                filteredRms = 92.0,
+                dynamicNoiseFloor = noiseFloor,
+                isMusicActive = false,
+                inConvWindow = true,
+                isDirectTap = false,
+                capturedPcmBytes = 0
+            )
+            assertFalse("Must NEVER trigger SpeechStarted on silence in ACTIVE_CONVERSATION", action is ProVoiceEngine.Companion.VadCaptureStateMachine.StepAction.SpeechStarted)
+            assertFalse("Must NEVER commit /api/stt on silence in ACTIVE_CONVERSATION", action is ProVoiceEngine.Companion.VadCaptureStateMachine.StepAction.CommitUtterance)
+            if (action is ProVoiceEngine.Companion.VadCaptureStateMachine.StepAction.TimeoutToStandby) {
+                stoppedCleanlyAt = now
+                break
+            }
+        }
+        assertEquals(ProVoiceEngine.ACTIVE_CONV_NO_SPEECH_TIMEOUT_MS, stoppedCleanlyAt)
+        assertFalse(sm.isCapturing)
+    }
+
+    @Test
+    fun testActiveConversationCapturesRealSpeechOnceAndCommitsAfter850msSilence() {
+        val sm = ProVoiceEngine.Companion.VadCaptureStateMachine()
+        val noiseFloor = 85.0
+        var started = false
+        var committed = false
+        var pcmBytes = 0
+
+        // 1.5s ambient silence -> still waiting
+        for (i in 0 until 30) {
+            val act = sm.step(i * 50L, 90.0, noiseFloor, isMusicActive = false, inConvWindow = true, isDirectTap = false, capturedPcmBytes = 0)
+            assertTrue(act is ProVoiceEngine.Companion.VadCaptureStateMachine.StepAction.None)
+        }
+
+        // 400ms of speech onset (>= 100ms starts capture)
+        for (i in 30 until 38) {
+            val act = sm.step(i * 50L, 850.0, noiseFloor, isMusicActive = false, inConvWindow = true, isDirectTap = false, capturedPcmBytes = pcmBytes)
+            if (act is ProVoiceEngine.Companion.VadCaptureStateMachine.StepAction.SpeechStarted) {
+                started = true
+                assertTrue(act.isConvMode)
+                pcmBytes = ProVoiceEngine.PRE_ROLL_SAMPLES * 2
+            }
+            if (sm.isCapturing) pcmBytes += ProVoiceEngine.CHUNK_SAMPLES * 2
+        }
+        assertTrue("Speech onset must trigger SpeechStarted", started)
+
+        // Trailing 850ms silence -> commits ONCE
+        for (i in 38 until 65) {
+            val act = sm.step(i * 50L, 90.0, noiseFloor, isMusicActive = false, inConvWindow = true, isDirectTap = false, capturedPcmBytes = pcmBytes)
+            if (act is ProVoiceEngine.Companion.VadCaptureStateMachine.StepAction.CommitUtterance) {
+                committed = true
+                assertTrue(act.isConvMode)
+                break
+            }
+            if (sm.isCapturing) pcmBytes += ProVoiceEngine.CHUNK_SAMPLES * 2
+        }
+        assertTrue("Speech end must commit utterance ONCE after 850ms silence", committed)
+    }
+
+    @Test
+    fun testOneShotWakeCommandAndHardTtlConstants() {
+        assertEquals(20_000L, ProVoiceEngine.HARD_STALE_TTL_MS)
+
+        val p1 = ProVoiceEngine.Companion.parseWakeAndCommand("Jarvis what time is it")
+        assertTrue(p1.isWake)
+        assertEquals("what time is it", p1.commandText)
+
+        val p2 = ProVoiceEngine.Companion.parseWakeAndCommand("Hey Jarvis open telegram")
+        assertTrue(p2.isWake)
+        assertEquals("open telegram", p2.commandText)
+
+        val p3 = ProVoiceEngine.Companion.parseWakeAndCommand("جارویس چراغ قوه رو روشن کن")
+        assertTrue(p3.isWake)
+        assertEquals("چراغ قوه رو روشن کن", p3.commandText)
+
+        val p4 = ProVoiceEngine.Companion.parseWakeAndCommand("سلام جارویس")
+        assertTrue(p4.isWake)
+        assertEquals("", p4.commandText)
+
+        val p5 = ProVoiceEngine.Companion.parseWakeAndCommand("what is the capital of Japan")
+        assertFalse(p5.isWake)
+    }
 }

@@ -7,6 +7,7 @@ on Android / Termux and low-resource environments.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -468,6 +469,79 @@ FREE_MODEL_FALLBACK_POOL: List[str] = [
     "deepseek/deepseek-chat:free",
 ]
 
+# Fast, non-reasoning instruct models prioritized FIRST for low-latency voice turns
+VOICE_FAST_MODEL_POOL: List[str] = [
+    "google/gemma-3-27b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "google/gemma-3-12b-it:free",
+    "google/gemma-3-4b-it:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "deepseek/deepseek-chat:free",
+]
+
+
+def _is_reasoning_model_id(model_id: str) -> bool:
+    ml = (model_id or "").lower()
+    return any(k in ml for k in ("reasoning", "nemotron", "deepseek-r1", "thinking", ":thinking"))
+
+
+def _select_candidate_models(
+    base_url: str,
+    api_key: Optional[str],
+    model: str,
+    *,
+    voice_fast: bool = False,
+    is_async: bool = False,
+) -> List[str]:
+    """Select prioritized candidate models without blocking async loops on live /models fetches."""
+    is_openrouter = "openrouter" in (base_url or "").lower()
+    clean_model = "" if not model or model == "openrouter/free" else model
+
+    if voice_fast and is_openrouter:
+        models_to_try: List[str] = []
+        if clean_model and not _is_reasoning_model_id(clean_model):
+            models_to_try.append(clean_model)
+        for pm in VOICE_FAST_MODEL_POOL:
+            if pm not in models_to_try and pm != "openrouter/free":
+                models_to_try.append(pm)
+        if clean_model and clean_model not in models_to_try:
+            models_to_try.append(clean_model)
+        if _OPENROUTER_LIVE_MODELS_FETCHED and _OPENROUTER_LIVE_FREE_MODELS:
+            for lm in _OPENROUTER_LIVE_FREE_MODELS:
+                if lm not in models_to_try and lm != "openrouter/free":
+                    models_to_try.append(lm)
+        models_to_try = [m for m in models_to_try if m != "openrouter/free"][:5]
+        return models_to_try or [VOICE_FAST_MODEL_POOL[0]]
+
+    initial_model = (
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+        if model == "openrouter/free"
+        else model
+    )
+    models_to_try = [initial_model]
+    if is_openrouter:
+        for pm in FREE_MODEL_FALLBACK_POOL:
+            if pm not in models_to_try and pm != "openrouter/free":
+                models_to_try.append(pm)
+        if not is_async:
+            try:
+                live_free = get_openrouter_free_models(api_key)
+                for lm in live_free:
+                    if lm not in models_to_try and lm != "openrouter/free":
+                        models_to_try.append(lm)
+            except Exception:
+                pass
+        elif _OPENROUTER_LIVE_MODELS_FETCHED and _OPENROUTER_LIVE_FREE_MODELS:
+            for lm in _OPENROUTER_LIVE_FREE_MODELS:
+                if lm not in models_to_try and lm != "openrouter/free":
+                    models_to_try.append(lm)
+    models_to_try = [m for m in models_to_try if m != "openrouter/free"]
+    if not models_to_try:
+        models_to_try = ["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]
+    return models_to_try[:8] if is_async else models_to_try
+
 CURATED_FREE_MODELS: List[Dict[str, Any]] = [
     {
         "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -601,6 +675,8 @@ def generate_openai_compat_rest(
     if extra_headers:
         headers.update(extra_headers)
 
+    voice_fast = bool(kwargs.pop("voice_fast", False))
+    per_model_timeout = float(kwargs.pop("per_model_timeout", 8.0 if voice_fast else 12.0))
     raw_tools = kwargs.pop("tools", None)
     payload: Dict[str, Any] = {
         "model": model,
@@ -624,29 +700,16 @@ def generate_openai_compat_rest(
     url = f"{base_url.rstrip('/')}/chat/completions"
     t0 = time.monotonic()
 
-    # Prioritized model pool with auto-rotation on 400, 404, 429, 5xx, timeout, or blank reply
-    initial_model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" if model == "openrouter/free" else model
-    models_to_try = [initial_model]
-    if "openrouter" in base_url.lower():
-        for pm in FREE_MODEL_FALLBACK_POOL:
-            if pm not in models_to_try and pm != "openrouter/free":
-                models_to_try.append(pm)
-        try:
-            live_free = get_openrouter_free_models(api_key)
-            for lm in live_free:
-                if lm not in models_to_try and lm != "openrouter/free":
-                    models_to_try.append(lm)
-        except Exception:
-            pass
-    # Strictly purge any occurrence of openrouter/free
-    models_to_try = [m for m in models_to_try if m != "openrouter/free"]
-    if not models_to_try:
-        models_to_try = ["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]
+    models_to_try = _select_candidate_models(
+        base_url, api_key, model, voice_fast=voice_fast, is_async=False
+    )
+    initial_model = models_to_try[0]
 
     data = None
     selected_model = initial_model
     last_exc = None
     saw_quota = False
+    is_real_httpx = isinstance(client, httpx.Client)
 
     for candidate in models_to_try:
         cand_payload = dict(payload)
@@ -654,14 +717,17 @@ def generate_openai_compat_rest(
         cand_lower = candidate.lower()
         if "openrouter" in base_url.lower() or any(k in cand_lower for k in ("reasoning", "nemotron", "deepseek", "qwen")):
             if "reasoning" not in cand_payload:
-                cand_payload["reasoning"] = {"effort": "low", "exclude": True}
+                cand_payload["reasoning"] = {"effort": "none" if voice_fast else "low", "exclude": True}
             if cand_payload.get("max_tokens", 2500) < 2500:
                 cand_payload["max_tokens"] = 2500
         else:
             cand_payload.pop("reasoning", None)
 
         try:
-            resp = client.post(url, json=cand_payload, headers=headers)
+            post_kwargs: Dict[str, Any] = {"json": cand_payload, "headers": headers}
+            if is_real_httpx:
+                post_kwargs["timeout"] = per_model_timeout
+            resp = client.post(url, **post_kwargs)
             if is_quota_status_or_text(resp.status_code, resp.text):
                 saw_quota = True
 
@@ -671,7 +737,8 @@ def generate_openai_compat_rest(
             if resp.status_code == 400 and "tools" in cand_payload:
                 cand_payload.pop("tools", None)
                 cand_payload.pop("tool_choice", None)
-                resp = client.post(url, json=cand_payload, headers=headers)
+                post_kwargs["json"] = cand_payload
+                resp = client.post(url, **post_kwargs)
                 if not resp.is_success and candidate != models_to_try[-1]:
                     logger.warning("Model %s failed without tools (HTTP %d), rotating...", candidate, resp.status_code)
                     continue
@@ -813,6 +880,8 @@ async def stream_full_openai_compat_rest(
     if extra_headers:
         headers.update(extra_headers)
 
+    voice_fast = bool(kwargs.pop("voice_fast", False))
+    first_token_timeout_s = max(1.0, float(kwargs.pop("first_token_timeout_s", 6.0)))
     raw_tools = kwargs.pop("tools", None)
     payload: Dict[str, Any] = {
         "model": model,
@@ -843,25 +912,72 @@ async def stream_full_openai_compat_rest(
     url = f"{base_url.rstrip('/')}/chat/completions"
     accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
 
-    models_to_try = [model]
-    if "openrouter" in base_url.lower():
-        for pm in FREE_MODEL_FALLBACK_POOL:
-            if pm not in models_to_try and pm != "openrouter/free":
-                models_to_try.append(pm)
-        try:
-            live_free = get_openrouter_free_models(api_key)
-            for lm in live_free:
-                if lm not in models_to_try and lm != "openrouter/free":
-                    models_to_try.append(lm)
-        except Exception:
-            pass
-    models_to_try = [m for m in models_to_try if m != "openrouter/free"]
-    if not models_to_try:
-        models_to_try = ["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]
+    models_to_try = _select_candidate_models(
+        base_url, api_key, model, voice_fast=voice_fast, is_async=True
+    )
 
     stream_started = False
     last_exc = None
     saw_quota = False
+
+    def _parse_stream_line(line: str) -> Optional[Tuple[List[StreamChunk], Optional[str]]]:
+        if not line.startswith("data:"):
+            return None
+        data_str = line[len("data:") :].strip()
+        if not data_str:
+            return None
+        if data_str == "[DONE]":
+            return ([], "DONE")
+        try:
+            chunk = json.loads(data_str)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(chunk, dict):
+            return None
+        choices = safe_get_list(chunk, "choices")
+        if not choices:
+            return None
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        delta = safe_get_dict(choice, "delta")
+        finish = choice.get("finish_reason")
+
+        chunks_out: List[StreamChunk] = []
+        content = delta.get("content")
+        if content is not None and str(content):
+            chunks_out.append(StreamChunk(content=str(content)))
+
+        delta_tc = safe_get_list(delta, "tool_calls")
+        if delta_tc:
+            calls_to_yield = []
+            for tc in delta_tc:
+                if not isinstance(tc, dict):
+                    continue
+                idx = tc.get("index", 0)
+                fn_dict = safe_get_dict(tc, "function")
+                if idx not in accumulated_tool_calls:
+                    accumulated_tool_calls[idx] = {
+                        "index": idx,
+                        "id": str(tc.get("id") or ""),
+                        "type": "function",
+                        "function": {
+                            "name": str(fn_dict.get("name") or ""),
+                            "arguments": str(fn_dict.get("arguments") or ""),
+                        },
+                    }
+                else:
+                    curr = accumulated_tool_calls[idx]
+                    if tc.get("id"):
+                        curr["id"] = str(tc["id"])
+                    if fn_dict.get("name"):
+                        curr["function"]["name"] = str(fn_dict["name"])
+                    if fn_dict.get("arguments"):
+                        curr["function"]["arguments"] += str(fn_dict["arguments"])
+                calls_to_yield.append(accumulated_tool_calls[idx])
+            chunks_out.append(StreamChunk(tool_calls=calls_to_yield))
+
+        if finish:
+            chunks_out.append(StreamChunk(finish_reason=str(finish)))
+        return (chunks_out, None)  # type: ignore[return-value]
 
     for candidate in models_to_try:
         cand_payload = dict(payload)
@@ -876,7 +992,9 @@ async def stream_full_openai_compat_rest(
             cand_payload.pop("reasoning", None)
 
         try:
-            async with async_client.stream("POST", url, json=cand_payload, headers=headers, timeout=6.0) as resp:
+            async with async_client.stream(
+                "POST", url, json=cand_payload, headers=headers, timeout=first_token_timeout_s
+            ) as resp:
                 if is_quota_status_or_text(resp.status_code):
                     saw_quota = True
 
@@ -894,69 +1012,54 @@ async def stream_full_openai_compat_rest(
                         continue
                     break
 
-                stream_started = True
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data_str = line[len("data:") :].strip()
-                    if not data_str or data_str == "[DONE]":
-                        break
+                # Enforce strict pre-first-token deadline across OpenRouter keepalive comments
+                deadline = time.monotonic() + first_token_timeout_s
+                lines_iter = resp.aiter_lines().__aiter__()
+                got_first_payload = False
+                done_eof = False
+                while not got_first_payload:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        raise asyncio.TimeoutError("First-token deadline exceeded")
                     try:
-                        chunk = json.loads(data_str)
-                    except json.JSONDecodeError:
+                        line = await asyncio.wait_for(lines_iter.__anext__(), timeout=remaining)
+                    except StopAsyncIteration:
+                        done_eof = True
+                        break
+                    parsed = _parse_stream_line(line)
+                    if not parsed:
                         continue
+                    items, flag = parsed
+                    if flag == "DONE":
+                        done_eof = True
+                        break
+                    if items:
+                        for sc in items:  # type: ignore[union-attr]
+                            if sc.content or sc.tool_calls:
+                                got_first_payload = True
+                                stream_started = True
+                            yield sc
 
-                    if not isinstance(chunk, dict):
-                        continue
+                if got_first_payload and not done_eof:
+                    async for line in lines_iter:
+                        parsed = _parse_stream_line(line)
+                        if not parsed:
+                            continue
+                        items, flag = parsed
+                        if flag == "DONE":
+                            break
+                        if items:
+                            for sc in items:  # type: ignore[union-attr]
+                                yield sc
 
-                    choices = safe_get_list(chunk, "choices")
-                    if not choices:
-                        continue
-                    choice = choices[0] if isinstance(choices[0], dict) else {}
-                    delta = safe_get_dict(choice, "delta")
-                    finish = choice.get("finish_reason")
-
-                    content = delta.get("content")
-                    if content is not None and str(content):
-                        yield StreamChunk(content=str(content))
-
-                    delta_tc = safe_get_list(delta, "tool_calls")
-                    if delta_tc:
-                        calls_to_yield = []
-                        for tc in delta_tc:
-                            if not isinstance(tc, dict):
-                                continue
-                            idx = tc.get("index", 0)
-                            fn_dict = safe_get_dict(tc, "function")
-                            if idx not in accumulated_tool_calls:
-                                accumulated_tool_calls[idx] = {
-                                    "index": idx,
-                                    "id": str(tc.get("id") or ""),
-                                    "type": "function",
-                                    "function": {
-                                        "name": str(fn_dict.get("name") or ""),
-                                        "arguments": str(fn_dict.get("arguments") or ""),
-                                    },
-                                }
-                            else:
-                                curr = accumulated_tool_calls[idx]
-                                if tc.get("id"):
-                                    curr["id"] = str(tc["id"])
-                                if fn_dict.get("name"):
-                                    curr["function"]["name"] = str(fn_dict["name"])
-                                if fn_dict.get("arguments"):
-                                    curr["function"]["arguments"] += str(fn_dict["arguments"])
-                            calls_to_yield.append(accumulated_tool_calls[idx])
-                        yield StreamChunk(tool_calls=calls_to_yield)
-
-                    if finish:
-                        yield StreamChunk(finish_reason=str(finish))
             if stream_started:
                 return
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as exc:
+            if candidate != models_to_try[-1]:
+                logger.warning("Stream model %s ended without tokens, rotating...", candidate)
+        except (asyncio.TimeoutError, httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as exc:
             last_exc = exc
             if not stream_started and candidate != models_to_try[-1]:
-                logger.warning("Stream error on model %s (%s), rotating...", candidate, exc)
+                logger.warning("Stream error/timeout on model %s (%s), rotating...", candidate, exc)
                 continue
 
     if not stream_started:

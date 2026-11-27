@@ -397,6 +397,11 @@ def _convert_tools_to_google(
     return declarations
 
 
+def _is_real_openai_sdk_client(client: Any) -> bool:
+    """Return True when client is an actual openai SDK object rather than a mock/stub."""
+    return client is not None and type(client).__module__.startswith("openai")
+
+
 @EngineRegistry.register("cloud")
 class CloudEngine(InferenceEngine):
     """Cloud inference via OpenAI, Anthropic, Google, MiniMax, DeepSeek, and
@@ -418,7 +423,7 @@ class CloudEngine(InferenceEngine):
         self._openrouter_key: str | None = None
         self._openai_key: str | None = None
         self._openai_base_url: str | None = None
-        self._rest_client = httpx.Client(timeout=120.0)
+        self._rest_client = httpx.Client(timeout=15.0)
         self._async_rest_client: httpx.AsyncClient | None = None
         # Gemini thought_signatures: tool_call_id -> signature bytes
         self._thought_sigs: Dict[str, bytes] = {}
@@ -426,7 +431,11 @@ class CloudEngine(InferenceEngine):
 
     def _get_async_rest_client(self) -> httpx.AsyncClient:
         if self._async_rest_client is None or self._async_rest_client.is_closed:
-            self._async_rest_client = httpx.AsyncClient(timeout=120.0)
+            timeout = httpx.Timeout(15.0, connect=4.0)
+            try:
+                self._async_rest_client = httpx.AsyncClient(http2=True, timeout=timeout)
+            except Exception:
+                self._async_rest_client = httpx.AsyncClient(timeout=timeout)
         return self._async_rest_client
 
     def _init_clients(self) -> None:
@@ -677,11 +686,23 @@ class CloudEngine(InferenceEngine):
         max_tokens: int,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        if self._openai_client is None:
+        voice_fast = bool(kwargs.pop("voice_fast", False))
+        per_model_timeout = kwargs.pop("per_model_timeout", None)
+        kwargs.pop("first_token_timeout_s", None)
+        use_rest = self._openai_client is None or (
+            _is_real_openai_sdk_client(self._openai_client)
+            and (voice_fast or "openrouter" in (self._openai_base_url or "").lower())
+        )
+        if use_rest:
             if self._openai_key or self._openai_base_url:
                 from openjarvis.engine.cloud_rest import generate_openai_compat_rest
 
                 base_url = self._openai_base_url or "https://api.openai.com/v1"
+                rest_kwargs = dict(kwargs)
+                if voice_fast:
+                    rest_kwargs["voice_fast"] = True
+                if per_model_timeout is not None:
+                    rest_kwargs["per_model_timeout"] = per_model_timeout
                 return generate_openai_compat_rest(
                     client=self._rest_client,
                     base_url=base_url,
@@ -690,12 +711,13 @@ class CloudEngine(InferenceEngine):
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    **kwargs,
+                    **rest_kwargs,
                 )
-            raise EngineConnectionError(
-                "OpenAI client not available — set "
-                "OPENAI_API_KEY or OPENAI_BASE_URL"
-            )
+            if self._openai_client is None:
+                raise EngineConnectionError(
+                    "OpenAI client not available — set "
+                    "OPENAI_API_KEY or OPENAI_BASE_URL"
+                )
         # Extract response_format before spreading kwargs into create_kwargs
         response_format = kwargs.pop("response_format", None)
         create_kwargs: Dict[str, Any] = {
@@ -1065,11 +1087,22 @@ class CloudEngine(InferenceEngine):
         max_tokens: int,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        if self._openrouter_client is None:
+        voice_fast = bool(kwargs.pop("voice_fast", False))
+        per_model_timeout = kwargs.pop("per_model_timeout", None)
+        kwargs.pop("first_token_timeout_s", None)
+        use_rest = self._openrouter_client is None or (
+            _is_real_openai_sdk_client(self._openrouter_client) and bool(self._openrouter_key)
+        )
+        if use_rest:
             if self._openrouter_key:
                 from openjarvis.engine.cloud_rest import generate_openai_compat_rest
 
                 actual_model = model.removeprefix("openrouter/")
+                rest_kwargs = dict(kwargs)
+                if voice_fast:
+                    rest_kwargs["voice_fast"] = True
+                if per_model_timeout is not None:
+                    rest_kwargs["per_model_timeout"] = per_model_timeout
                 return generate_openai_compat_rest(
                     client=self._rest_client,
                     base_url="https://openrouter.ai/api/v1",
@@ -1082,7 +1115,7 @@ class CloudEngine(InferenceEngine):
                         "HTTP-Referer": "https://github.com/sajjadyarmahdi14-dev/open-jarvis",
                         "X-Title": "Open Jarvis",
                     },
-                    **kwargs,
+                    **rest_kwargs,
                 )
             raise EngineConnectionError(
                 "OpenRouter client not available — set OPENROUTER_API_KEY"
@@ -1451,11 +1484,23 @@ class CloudEngine(InferenceEngine):
         max_tokens: int,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        if self._openai_client is None:
+        voice_fast = bool(kwargs.pop("voice_fast", False))
+        first_token_timeout_s = kwargs.pop("first_token_timeout_s", None)
+        kwargs.pop("per_model_timeout", None)
+        use_rest = self._openai_client is None or (
+            _is_real_openai_sdk_client(self._openai_client)
+            and (voice_fast or "openrouter" in (self._openai_base_url or "").lower())
+        )
+        if use_rest:
             if self._openai_key or self._openai_base_url:
                 from openjarvis.engine.cloud_rest import stream_full_openai_compat_rest
 
                 base_url = self._openai_base_url or "https://api.openai.com/v1"
+                rest_kwargs = dict(kwargs)
+                if voice_fast:
+                    rest_kwargs["voice_fast"] = True
+                if first_token_timeout_s is not None:
+                    rest_kwargs["first_token_timeout_s"] = first_token_timeout_s
                 async for chunk in stream_full_openai_compat_rest(
                     async_client=self._get_async_rest_client(),
                     base_url=base_url,
@@ -1464,12 +1509,13 @@ class CloudEngine(InferenceEngine):
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    **kwargs,
+                    **rest_kwargs,
                 ):
                     if chunk.content:
                         yield chunk.content
                 return
-            raise EngineConnectionError("OpenAI client not available")
+            if self._openai_client is None:
+                raise EngineConnectionError("OpenAI client not available")
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages_to_dicts(messages),
@@ -1751,11 +1797,22 @@ class CloudEngine(InferenceEngine):
         max_tokens: int,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        if self._openrouter_client is None:
+        voice_fast = bool(kwargs.pop("voice_fast", False))
+        first_token_timeout_s = kwargs.pop("first_token_timeout_s", None)
+        kwargs.pop("per_model_timeout", None)
+        use_rest = self._openrouter_client is None or (
+            _is_real_openai_sdk_client(self._openrouter_client) and bool(self._openrouter_key)
+        )
+        if use_rest:
             if self._openrouter_key:
                 from openjarvis.engine.cloud_rest import stream_full_openai_compat_rest
 
                 actual_model = model.removeprefix("openrouter/")
+                rest_kwargs = dict(kwargs)
+                if voice_fast:
+                    rest_kwargs["voice_fast"] = True
+                if first_token_timeout_s is not None:
+                    rest_kwargs["first_token_timeout_s"] = first_token_timeout_s
                 async for chunk in stream_full_openai_compat_rest(
                     async_client=self._get_async_rest_client(),
                     base_url="https://openrouter.ai/api/v1",
@@ -1768,7 +1825,7 @@ class CloudEngine(InferenceEngine):
                         "HTTP-Referer": "https://github.com/sajjadyarmahdi14-dev/open-jarvis",
                         "X-Title": "Open Jarvis",
                     },
-                    **kwargs,
+                    **rest_kwargs,
                 ):
                     if chunk.content:
                         yield chunk.content
@@ -1911,11 +1968,23 @@ class CloudEngine(InferenceEngine):
             ):
                 yield chunk
             return
+        voice_fast = bool(kwargs.pop("voice_fast", False))
+        first_token_timeout_s = kwargs.pop("first_token_timeout_s", None)
+        kwargs.pop("per_model_timeout", None)
         if _is_openrouter_model(model):
-            if self._openrouter_client is None and self._openrouter_key:
+            use_rest = (
+                (self._openrouter_client is None or _is_real_openai_sdk_client(self._openrouter_client))
+                and bool(self._openrouter_key)
+            )
+            if use_rest:
                 from openjarvis.engine.cloud_rest import stream_full_openai_compat_rest
 
                 actual_model = model.removeprefix("openrouter/")
+                rest_kwargs = dict(kwargs)
+                if voice_fast:
+                    rest_kwargs["voice_fast"] = True
+                if first_token_timeout_s is not None:
+                    rest_kwargs["first_token_timeout_s"] = first_token_timeout_s
                 async for chunk in stream_full_openai_compat_rest(
                     async_client=self._get_async_rest_client(),
                     base_url="https://openrouter.ai/api/v1",
@@ -1928,7 +1997,7 @@ class CloudEngine(InferenceEngine):
                         "HTTP-Referer": "https://github.com/sajjadyarmahdi14-dev/open-jarvis",
                         "X-Title": "Open Jarvis",
                     },
-                    **kwargs,
+                    **rest_kwargs,
                 ):
                     yield chunk
                 return
@@ -1983,10 +2052,19 @@ class CloudEngine(InferenceEngine):
                 **kwargs,
             }
         else:
-            if self._openai_client is None and (self._openai_key or self._openai_base_url):
+            use_rest = (
+                (self._openai_client is None or (_is_real_openai_sdk_client(self._openai_client) and (voice_fast or "openrouter" in (self._openai_base_url or "").lower())))
+                and bool(self._openai_key or self._openai_base_url)
+            )
+            if use_rest:
                 from openjarvis.engine.cloud_rest import stream_full_openai_compat_rest
 
                 base_url = self._openai_base_url or "https://api.openai.com/v1"
+                rest_kwargs = dict(kwargs)
+                if voice_fast:
+                    rest_kwargs["voice_fast"] = True
+                if first_token_timeout_s is not None:
+                    rest_kwargs["first_token_timeout_s"] = first_token_timeout_s
                 async for chunk in stream_full_openai_compat_rest(
                     async_client=self._get_async_rest_client(),
                     base_url=base_url,
@@ -1995,7 +2073,7 @@ class CloudEngine(InferenceEngine):
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    **kwargs,
+                    **rest_kwargs,
                 ):
                     yield chunk
                 return

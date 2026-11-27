@@ -41,12 +41,15 @@ object NotificationDomain {
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "notif_dismiss_all")
         }
 
-        val dismissSingleWords = listOf(
-            "نوتیف رو ببند", "اعلان رو پاک کن", "قطع کن", "ردش کن", "بیخیالش شو",
-            "نوتیف رو رد کن", "اعلان رو رد کن", "پیام رو ببند", "ببندش", "پاکش کن",
-            "dismiss notification", "clear notification", "dismiss", "ignore it", "close notification"
+        val dismissExactWords = setOf(
+            "ردش کن", "بیخیالش شو", "ببندش", "پاکش کن", "dismiss", "ignore it"
         )
-        if (dismissSingleWords.any { norm == it || norm.contains(it) }) {
+        val dismissSinglePhrases = listOf(
+            "نوتیف رو ببند", "اعلان رو پاک کن",
+            "نوتیف رو رد کن", "اعلان رو رد کن", "پیام رو ببند",
+            "dismiss notification", "clear notification", "close notification"
+        )
+        if (norm in dismissExactWords || dismissSinglePhrases.any { norm == it || norm.contains(it) }) {
             val ok = JarvisNotificationListener.dismissLatestNotification()
             val reply = if (ok) {
                 if (isFa) "اعلان بسته شد قربان." else "Notification dismissed, sir."
@@ -59,11 +62,11 @@ object NotificationDomain {
         // ---------------------------------------------------------------------
         // 2. Open Active Notification
         // ---------------------------------------------------------------------
-        val openWords = listOf(
-            "نوتیف رو باز کن", "اعلان رو باز کن", "پیام رو باز کن", "بازش کن",
+        val openPhrases = listOf(
+            "نوتیف رو باز کن", "اعلان رو باز کن", "پیام رو باز کن",
             "open notification", "open latest notification", "open message"
         )
-        if (openWords.any { norm == it || norm.contains(it) }) {
+        if (norm == "بازش کن" || openPhrases.any { norm == it || norm.contains(it) }) {
             val ok = JarvisNotificationListener.openLatestNotification(context)
             val reply = if (ok) {
                 if (isFa) "اعلان باز شد قربان." else "Opening notification, sir."
@@ -137,7 +140,21 @@ object NotificationDomain {
         // ---------------------------------------------------------------------
         if (norm.contains("نوتیفها رو سایلنت کن") || norm.contains("اعلان‌ها رو سایلنت کن") || norm.contains("mute notifications") || norm.contains("silence notifications")) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-            val reply = if (isFa) "اعلان‌ها بی‌صدا شدند قربان." else "Notifications silenced, sir."
+            val dndGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && nm != null && nm.isNotificationPolicyAccessGranted) {
+                nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY)
+                true
+            } else {
+                false
+            }
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+            try {
+                am?.setStreamVolume(android.media.AudioManager.STREAM_NOTIFICATION, 0, 0)
+            } catch (_: Exception) {}
+            val reply = if (dndGranted) {
+                if (isFa) "اعلان‌ها بی‌صدا شدند قربان." else "Notifications silenced, sir."
+            } else {
+                if (isFa) "صدای اعلان‌ها کم شد قربان؛ برای حالت مزاحم نشوید دسترسی لازم است." else "Notification volume muted, sir. Grant Do Not Disturb access for full DND silence."
+            }
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "notif_mute")
         }
 

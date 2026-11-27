@@ -53,61 +53,63 @@ object SystemAndAppDomain {
         // ---------------------------------------------------------------------
         // 2. System Navigation (Back, Home, Recents, Notifications, Quick Settings, Lock Screen, Screenshot, Scroll)
         // ---------------------------------------------------------------------
+        fun accResult(ok: Boolean, successMsg: String, category: String): LocalRouteResult {
+            val reply = if (ok) {
+                successMsg
+            } else if (JarvisAccessibilityService.instance == null) {
+                if (isFa) "سرویس دسترسی‌پذیری غیرفعال است قربان." else "Accessibility service is not active, sir."
+            } else {
+                if (isFa) "انجام این دستور ممکن نشد قربان." else "Could not perform that navigation action, sir."
+            }
+            return LocalRouteResult(handled = true, spokenFeedback = reply, category = category)
+        }
+
         if (norm in listOf("go back", "back", "برگرد", "برو عقب", "صفحه قبل", "بازگشت")) {
-            JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            val reply = if (isFa) "به عقب برگشتم قربان." else "Going back, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_back")
+            val ok = JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) == true
+            return accResult(ok, if (isFa) "به عقب برگشتم قربان." else "Going back, sir.", "nav_back")
         }
 
         if (norm in listOf("go home", "home", "home screen", "صفحه اصلی", "برو هوم", "برو خانه", "برو صفحه اصلی")) {
-            JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-            val reply = if (isFa) "به صفحه اصلی رفتم قربان." else "Going to home screen, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_home")
+            val ok = JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME) == true
+            return accResult(ok, if (isFa) "به صفحه اصلی رفتم قربان." else "Going to home screen, sir.", "nav_home")
         }
 
         if (norm in listOf("recent apps", "recents", "overview", "برنامه‌های اخیر", "برنامه های باز", "برنامه‌های باز")) {
-            JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
-            val reply = if (isFa) "برنامه‌های اخیر باز شد قربان." else "Showing recent apps, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_recents")
+            val ok = JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS) == true
+            return accResult(ok, if (isFa) "برنامه‌های اخیر باز شد قربان." else "Showing recent apps, sir.", "nav_recents")
         }
 
         if (norm in listOf("open notifications", "show notifications", "اعلان‌ها", "پنل اعلان", "اعلان ها")) {
-            JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
-            val reply = if (isFa) "پنل اعلان‌ها باز شد قربان." else "Opening notifications, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_notifications")
+            val ok = JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS) == true
+            return accResult(ok, if (isFa) "پنل اعلان‌ها باز شد قربان." else "Opening notifications, sir.", "nav_notifications")
         }
 
         if (norm in listOf("quick settings", "open quick settings", "تنظیمات سریع", "کنترل سنتر", "پنل تنظیمات سریع")) {
-            JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)
-            val reply = if (isFa) "تنظیمات سریع باز شد قربان." else "Opening quick settings, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_quick_settings")
+            val ok = JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS) == true
+            return accResult(ok, if (isFa) "تنظیمات سریع باز شد قربان." else "Opening quick settings, sir.", "nav_quick_settings")
         }
 
         if (norm in listOf("lock screen", "lock phone", "صفحه رو قفل کن", "گوشی رو قفل کن", "صفحه قفل", "گوشی را قفل کن")) {
-            JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
-            val reply = if (isFa) "صفحه قفل شد قربان." else "Screen locked, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_lock_screen")
+            val ok = JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN) == true
+            return accResult(ok, if (isFa) "صفحه قفل شد قربان." else "Screen locked, sir.", "nav_lock_screen")
         }
 
         if (norm in listOf("take a screenshot", "screenshot", "capture screen", "عکس از صفحه", "اسکرین شات بگیر", "اسکرین‌شات", "اسکرین شات")) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
+            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                JarvisAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT) == true
             } else {
                 ActionDispatcher.dispatchAction(context, JSONObject(mapOf("type" to "take_screenshot")))
             }
-            val reply = if (isFa) "اسکرین‌شات گرفته شد قربان." else "Screenshot captured, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_screenshot")
+            return accResult(ok, if (isFa) "اسکرین‌شات گرفته شد قربان." else "Screenshot captured, sir.", "nav_screenshot")
         }
 
         if (norm in listOf("scroll down", "بیا پایین", "برو پایین", "اسکرول به پایین", "پایین‌تر")) {
-            JarvisAccessibilityService.instance?.scrollDown()
-            val reply = if (isFa) "به پایین اسکرول شد قربان." else "Scrolled down, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_scroll")
+            val ok = JarvisAccessibilityService.instance?.scrollDown() == true
+            return accResult(ok, if (isFa) "به پایین اسکرول شد قربان." else "Scrolled down, sir.", "nav_scroll")
         }
         if (norm in listOf("scroll up", "برو بالا", "اسکرول به بالا", "بالاتر")) {
-            JarvisAccessibilityService.instance?.scrollUp()
-            val reply = if (isFa) "به بالا اسکرول شد قربان." else "Scrolled up, sir."
-            return LocalRouteResult(handled = true, spokenFeedback = reply, category = "nav_scroll")
+            val ok = JarvisAccessibilityService.instance?.scrollUp() == true
+            return accResult(ok, if (isFa) "به بالا اسکرول شد قربان." else "Scrolled up, sir.", "nav_scroll")
         }
 
         // ---------------------------------------------------------------------
@@ -119,8 +121,12 @@ object SystemAndAppDomain {
             "چراغ قوه را روشن کن", "فلش رو روشن کن", "چراغ قوه روشن"
         )
         if (torchOnWords.any { norm.contains(it) }) {
-            DeviceController.setTorchState(context, true)
-            val reply = if (isFa) "چراغ قوه روشن شد قربان." else "Flashlight turned on, sir."
+            val ok = DeviceController.setTorchState(context, true)
+            val reply = if (ok) {
+                if (isFa) "چراغ قوه روشن شد قربان." else "Flashlight turned on, sir."
+            } else {
+                if (isFa) "امکان روشن کردن چراغ قوه نیست قربان." else "Unable to turn on the flashlight right now, sir."
+            }
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "torch_on")
         }
 
@@ -130,8 +136,12 @@ object SystemAndAppDomain {
             "چراغ قوه را خاموش کن", "فلش رو خاموش کن", "چراغ قوه خاموش"
         )
         if (torchOffWords.any { norm.contains(it) }) {
-            DeviceController.setTorchState(context, false)
-            val reply = if (isFa) "چراغ قوه خاموش شد قربان." else "Flashlight turned off, sir."
+            val ok = DeviceController.setTorchState(context, false)
+            val reply = if (ok) {
+                if (isFa) "چراغ قوه خاموش شد قربان." else "Flashlight turned off, sir."
+            } else {
+                if (isFa) "امکان خاموش کردن چراغ قوه نیست قربان." else "Unable to turn off the flashlight right now, sir."
+            }
             return LocalRouteResult(handled = true, spokenFeedback = reply, category = "torch_off")
         }
 
@@ -228,17 +238,26 @@ object SystemAndAppDomain {
         }
 
         if (!appQuery.isNullOrBlank()) {
-            val queryClean = appQuery.removePrefix("the ").removePrefix("app ").trim()
-            if (queryClean.isNotBlank()) {
+            val rawQueryLower = appQuery.lowercase(Locale.ROOT).trim()
+            val hasExplicitAppPrefix = rawQueryLower.startsWith("app ") || rawQueryLower.startsWith("برنامه ")
+            val queryClean = appQuery.removePrefix("the ").removePrefix("app ").removePrefix("برنامه ").trim()
+            val isNaturalPhrase = !hasExplicitAppPrefix && (
+                rawQueryLower.startsWith("a ") ||
+                rawQueryLower.startsWith("an ") ||
+                rawQueryLower.contains(" and ") ||
+                appQuery.contains(" و ") ||
+                queryClean.split(Regex("\\s+")).size > 3
+            )
+            if (queryClean.isNotBlank() && !isNaturalPhrase) {
                 val resJsonStr = AppLauncher.launchApp(context, queryClean)
                 val resObj = try { JSONObject(resJsonStr) } catch (_: Exception) { null }
                 val success = resObj?.optBoolean("success", false) == true
                 val resolved = resObj?.optString("label", queryClean) ?: queryClean
-                val reply = if (success) {
-                    if (isFa) "در حال باز کردن $resolved قربان." else "Opening $resolved, sir."
-                } else {
-                    if (isFa) "برنامه $queryClean روی گوشی شما پیدا نشد قربان." else "Could not find $queryClean installed on your device, sir."
+                if (success) {
+                    val reply = if (isFa) "در حال باز کردن $resolved قربان." else "Opening $resolved, sir."
+                    return LocalRouteResult(handled = true, spokenFeedback = reply, category = "app_launcher")
                 }
+                val reply = if (isFa) "برنامه $queryClean روی گوشی شما پیدا نشد قربان." else "Could not find $queryClean installed on your device, sir."
                 return LocalRouteResult(handled = true, spokenFeedback = reply, category = "app_launcher")
             }
         }

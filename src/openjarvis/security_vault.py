@@ -400,11 +400,18 @@ class SecurityEvidenceVault:
         async def _loop():
             logger.info("Started Telegram remote security command polling loop.")
             while True:
+                bot_token = str(self.config.get("bot_token", "") or "").strip()
+                if not bot_token:
+                    await asyncio.sleep(10.0)
+                    continue
                 try:
                     await self.poll_telegram_bot_updates()
                 except Exception as e:
                     logger.debug(f"Polling loop exception: {e}")
                 await asyncio.sleep(4.0)
 
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
         self._polling_task = loop.create_task(_loop())
