@@ -2140,11 +2140,11 @@ class JarvisVoiceService : Service() {
             }
         }
 
-        withContext(Dispatchers.IO) {
+        withContext<Unit>(Dispatchers.IO) {
             var call: Call? = null
             var spokenSentences = 0
             try {
-                withTimeout(20_000L) {
+                withTimeout<Unit>(20_000L) {
                     val server = getServerUrl()
                     val url = "$server/api/chat/stream"
                     val (batPct, isCharging) = getBatteryTelemetry()
@@ -2220,6 +2220,7 @@ class JarvisVoiceService : Service() {
                             Log.w(TAG, "Stream produced 0 sentences (code=${response.code}). Falling back to POST /api/chat...")
                             tryFallbackChat(prompt, turnId)
                         }
+                        Unit
                     }
                 }
             } catch (e: TimeoutCancellationException) {
@@ -2254,6 +2255,7 @@ class JarvisVoiceService : Service() {
                     }
                 }
             }
+            Unit
         }
     }
 
@@ -2557,6 +2559,7 @@ class JarvisVoiceService : Service() {
                     } else {
                         Log.w(TAG, "POST /api/tts attempt $attempt returned HTTP ${resp.code}")
                     }
+                    Unit
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "POST /api/tts attempt $attempt error: ${e.message}")
@@ -2693,6 +2696,7 @@ class JarvisVoiceService : Service() {
                                 Log.i(TAG, "Pre-cached male Edge-TTS audio for '$text'")
                             }
                         }
+                        Unit
                     }
                 } catch (_: Exception) {}
             }

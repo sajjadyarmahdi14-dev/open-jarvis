@@ -846,6 +846,7 @@ class MainActivity : ComponentActivity(), JarvisVoiceService.VoiceEventListener 
                             voiceStateText.value = "STANDBY: Say \"Jarvis\""
                         }
                     }
+                    Unit
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
