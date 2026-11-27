@@ -423,7 +423,7 @@ class ProVoiceEngine(
             var isCapturing: Boolean = false
                 private set
             private var consecutiveSpeechChunks: Int = 0
-            private var activeConvWaitStartMs: Long = 0L
+            private var activeConvWaitStartMs: Long = -1L
             private var captureStartMs: Long = 0L
             private var lastSpeechMs: Long = 0L
             private var silenceStartMs: Long = 0L
@@ -434,7 +434,7 @@ class ProVoiceEngine(
             fun reset() {
                 isCapturing = false
                 consecutiveSpeechChunks = 0
-                activeConvWaitStartMs = 0L
+                activeConvWaitStartMs = -1L
                 captureStartMs = 0L
                 lastSpeechMs = 0L
                 silenceStartMs = 0L
@@ -446,7 +446,7 @@ class ProVoiceEngine(
             fun beginDirectTapCapture(nowMs: Long) {
                 isCapturing = true
                 consecutiveSpeechChunks = 0
-                activeConvWaitStartMs = 0L
+                activeConvWaitStartMs = -1L
                 captureStartMs = nowMs
                 lastSpeechMs = nowMs
                 silenceStartMs = 0L
@@ -479,13 +479,13 @@ class ProVoiceEngine(
                     }
 
                     if (inConvWindow) {
-                        if (activeConvWaitStartMs == 0L) {
+                        if (activeConvWaitStartMs < 0L) {
                             activeConvWaitStartMs = nowMs
                         }
                         if (consecutiveSpeechChunks >= requiredChunks) {
                             isCapturing = true
                             consecutiveSpeechChunks = 0
-                            activeConvWaitStartMs = 0L
+                            activeConvWaitStartMs = -1L
                             captureStartMs = nowMs
                             lastSpeechMs = nowMs
                             silenceStartMs = 0L
@@ -495,13 +495,13 @@ class ProVoiceEngine(
                             return StepAction.SpeechStarted(EngineState.LISTENING_UTTERANCE, true, false)
                         }
                         if (nowMs - activeConvWaitStartMs >= ACTIVE_CONV_NO_SPEECH_TIMEOUT_MS) {
-                            activeConvWaitStartMs = 0L
+                            activeConvWaitStartMs = -1L
                             consecutiveSpeechChunks = 0
                             return StepAction.TimeoutToStandby
                         }
                         return StepAction.None
                     } else {
-                        activeConvWaitStartMs = 0L
+                        activeConvWaitStartMs = -1L
                         if (consecutiveSpeechChunks >= requiredChunks) {
                             isCapturing = true
                             consecutiveSpeechChunks = 0
